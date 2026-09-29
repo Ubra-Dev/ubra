@@ -1,9 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chimeStyleParam,
+  parseChimeStyle,
   parseDelivery,
   parseToastPosition,
   routeNotification,
+  testNotificationPayload,
 } from "../src/lib/notify.ts";
 
 describe("parseDelivery", () => {
@@ -67,5 +70,51 @@ describe("routeNotification", () => {
     assert.equal(routeNotification({ ...base, cli: "Droid" }).sound, false);
     assert.equal(routeNotification({ ...base, cli: "claude" }).sound, true);
     assert.equal(routeNotification({ ...base, cli: undefined }).sound, true);
+  });
+});
+
+describe("chime styles", () => {
+  it("parses persisted selections, falling back to default", () => {
+    assert.equal(parseChimeStyle("bright"), "bright");
+    assert.equal(parseChimeStyle("custom"), "custom");
+    assert.equal(parseChimeStyle("nope"), "default");
+    assert.equal(parseChimeStyle(null), "default");
+    assert.equal(parseChimeStyle(undefined), "default");
+  });
+
+  it("maps selections to backend params without ever sending custom", () => {
+    assert.equal(chimeStyleParam("soft"), "soft");
+    assert.equal(chimeStyleParam("custom"), null);
+    assert.equal(chimeStyleParam("nope"), "default");
+  });
+});
+
+describe("testNotificationPayload", () => {
+  it("marks itself as a test with a safe empty jump target", () => {
+    const t = testNotificationPayload();
+    assert.match(t.title, /\(test\)/);
+    assert.equal(t.nodeId, "");
+    assert.equal(t.kind, "done");
+  });
+
+  it("routes like a real finish, honoring mute and delivery", () => {
+    const t = testNotificationPayload();
+    assert.deepEqual(
+      routeNotification({
+        delivery: "system",
+        soundEnabled: true,
+        mutedClis: [],
+        cli: t.cli,
+      }),
+      { toast: false, system: true, sound: true },
+    );
+    const muted = routeNotification({
+      delivery: "system",
+      soundEnabled: true,
+      mutedClis: [t.cli],
+      cli: t.cli,
+    });
+    assert.equal(muted.sound, false);
+    assert.equal(muted.system, true);
   });
 });

@@ -39,12 +39,20 @@ pub trait PtyEventSink: Send + Sync + 'static {
     fn exited(&self, id: PaneId, success: bool, code: Option<i32>);
 }
 
+/// Scrollback rows kept in each pane's screen emulator. Detection reads
+/// the bottom window of the live screen; scrollback exists so resized and
+/// alternate-screen transitions keep prior rows addressable.
+const SCREEN_SCROLLBACK_ROWS: u16 = 200;
+
 struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PID of the process spawned directly in the PTY (0 when unknown).
     root_pid: u32,
+    /// In-memory emulation of the pane's screen, fed every output chunk.
+    /// Backs agent detection snapshots; rendering stays in the frontend.
+    screen: Mutex<vt100::Parser>,
 }
 
 pub struct PtyManager {
@@ -96,6 +104,11 @@ impl PtyManager {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             root_pid,
+            screen: Mutex::new(vt100::Parser::new(
+                rows,
+                cols,
+                SCREEN_SCROLLBACK_ROWS as usize,
+            )),
         });
         self.sessions
             .lock()
@@ -143,7 +156,30 @@ impl PtyManager {
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        session
+            .screen
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_size(rows, cols);
         Ok(())
+    }
+
+    /// ANSI-formatted snapshot of the pane's emulated screen, suitable for
+    /// feeding to a fresh terminal parser to repaint it. Used when a moved
+    /// pane's frontend reattaches to its surviving PTY.
+    pub fn snapshot(&self, id: PaneId) -> anyhow::Result<String> {
+        let session = self.session(id)?;
+        let guard = session.screen.lock().unwrap();
+        Ok(String::from_utf8_lossy(&guard.screen().contents_formatted()).into_owned())
+    }
+
+    /// Plain-text contents of the pane's emulated screen, for agent
+    /// detection. `None` when the pane is gone.
+    pub fn screen_text(&self, id: PaneId) -> Option<String> {
+        let session = self.session(id).ok()?;
+        let guard = session.screen.lock().unwrap();
+        Some(guard.screen().contents())
     }
 
     /// Snapshot of live panes and their root PIDs for the agent watcher.
@@ -188,6 +224,7 @@ fn reader_loop(
             Ok(n) => {
                 let text = decoder.push(&buf[..n]);
                 if !text.is_empty() {
+                    session.screen.lock().unwrap().process(text.as_bytes());
                     sink.output(id, text);
                 }
             }
@@ -199,6 +236,7 @@ fn reader_loop(
     }
     let tail = decoder.flush();
     if !tail.is_empty() {
+        session.screen.lock().unwrap().process(tail.as_bytes());
         sink.output(id, tail);
     }
 

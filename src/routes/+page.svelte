@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { agent } from "$lib/agent.svelte";
+  import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
   import { isEditableTarget, matchShortcut } from "$lib/shortcuts";
   import { store } from "$lib/store.svelte";
@@ -16,6 +17,8 @@
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
+    // The confirm dialog owns the keyboard while open (Escape/Tab/arrows).
+    if (store.pendingClose) return;
     const matched = matchShortcut({
       key: e.key,
       mod: e.metaKey || e.ctrlKey,
@@ -45,7 +48,7 @@
         store.addTab();
         break;
       case "close-pane-or-tab":
-        store.closePaneOrTab();
+        store.requestClosePaneOrTab();
         break;
       case "new-workspace":
         store.addWorkspace();
@@ -92,6 +95,28 @@
       case "rename-pane":
         store.requestPaneRename();
         break;
+      case "focus-neighbor":
+        if (matched.dir) store.focusNeighbor(matched.dir);
+        break;
+      case "swap-neighbor":
+        if (matched.dir) store.swapWithNeighbor(matched.dir);
+        break;
+      case "resize-pane":
+        if (matched.dir) store.resizeFocused(matched.dir);
+        break;
+      case "move-pane-to-new-tab": {
+        const cur = store.currentPane();
+        if (cur) store.movePaneToNewTab(cur.paneId);
+        break;
+      }
+      case "move-pane-to-new-workspace": {
+        const cur = store.currentPane();
+        if (cur) store.movePaneToNewWorkspace(cur.paneId);
+        break;
+      }
+      case "find-in-pane":
+        store.requestPaneFind();
+        break;
       default:
         return;
     }
@@ -101,7 +126,7 @@
 
 <svelte:window onkeydown={onGlobalKeyDown} />
 
-<div class="root" style={themeStyle(store.theme)}>
+<div class="root" style={themeStyle(store.theme, store.termOpacity / 100)}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
   {:else if store.layout}
@@ -129,6 +154,7 @@
   {#if store.settingsOpen}
     <SettingsModal />
   {/if}
+  <ConfirmDialog />
   <Toasts />
 </div>
 

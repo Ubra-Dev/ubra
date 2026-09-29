@@ -1,9 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { routeNotification, type SoundKind } from "./notify";
+import {
+  chimeStyleParam,
+  routeNotification,
+  type SoundKind,
+} from "./notify";
 import { store } from "./store.svelte";
 import { toasts } from "./toasts.svelte.ts";
 import {
+  baseName,
   collectPaneIds,
   detectFinished,
   detectVanished,
@@ -15,13 +20,23 @@ import {
   type Workspace,
 } from "./layout";
 
-export type Rollup = "working" | "attention" | "done" | "idle";
+export type Rollup =
+  | "working"
+  | "blocked"
+  | "unknown"
+  | "attention"
+  | "done"
+  | "idle";
 
 export interface ActiveAgent {
   nodeId: string;
   agent: string;
   cli?: string;
-  status: "working" | "attention" | "done" | "idle";
+  /** Display name: the agent's working directory (basename). */
+  dir: string;
+  /** Full working directory for tooltips, when known. */
+  dirPath?: string;
+  status: "working" | "blocked" | "unknown" | "attention" | "done" | "idle";
   tabName: string;
   paneTitle?: string;
 }
@@ -39,8 +54,11 @@ class AgentStore {
   /** Panes whose agent cleanly finished a task and is unseen. */
   done = $state<string[]>([]);
   private liveToNode = new Map<number, string>();
-  /** Last-known agent name + CLI per pane node, for attention and idle rows. */
-  private lastAgent = new Map<string, { agent: string; cli?: string }>();
+  /** Last-known agent name + CLI + cwd per pane node, for ended rows. */
+  private lastAgent = new Map<
+    string,
+    { agent: string; cli?: string; cwd?: string }
+  >();
   private started = false;
 
   register(liveId: number, nodeId: string): void {
@@ -59,7 +77,9 @@ class AgentStore {
     ).catch(console.error);
   }
 
-  paneState(nodeId: string): { state: string; agent?: string; cli?: string } | null {
+  paneState(
+    nodeId: string,
+  ): { state: string; agent?: string; cli?: string; cwd?: string } | null {
     for (const [live, node] of this.liveToNode) {
       if (node === nodeId) return this.states[live] ?? null;
     }
@@ -74,16 +94,23 @@ class AgentStore {
     return this.rollupFor(ws.tabs.flatMap((t) => collectPaneIds(t.root)));
   }
 
+  /** Precedence: blocked > working > attention > done > unknown > idle. */
   private rollupFor(nodeIds: string[]): Rollup {
     let seenAttention = false;
     let seenDone = false;
+    let seenUnknown = false;
     for (const id of nodeIds) {
-      if (this.paneState(id)?.state === "working") return "working";
+      const state = this.paneState(id)?.state;
+      if (state === "blocked") return "blocked";
+      if (state === "working") return "working";
       if (this.attention.includes(id)) seenAttention = true;
       else if (this.done.includes(id)) seenDone = true;
+      else if (state === "done") seenDone = true;
+      else if (state === "unknown") seenUnknown = true;
     }
     if (seenAttention) return "attention";
-    return seenDone ? "done" : "idle";
+    if (seenDone) return "done";
+    return seenUnknown ? "unknown" : "idle";
   }
 
   /** Jump to the first pane needing review (unexpected stops first). */
@@ -122,10 +149,12 @@ class AgentStore {
   }
 
   /**
-   * Working panes, unseen stops, and idle known agents, grouped per
-   * workspace in workspace order (working first, idle last). Clean finishes
-   * show done; unexpected stops show attention; both become idle once seen.
-   * Workspaces without agents are omitted; an empty list means none anywhere.
+   * Working panes, blocked/starting panes, live-done panes (agent at prompt),
+   * unseen stops, and idle known agents, grouped per workspace in workspace
+   * order (working first, idle last). Clean finishes show done; unexpected
+   * stops show attention; exit-based rows become idle once seen while
+   * live-done rows keep their check until the agent works again. Workspaces
+   * without agents are omitted; an empty list means none anywhere.
    */
   activeAgents(): WorkspaceAgents[] {
     const layout = store.layout;
@@ -136,38 +165,47 @@ class AgentStore {
       node: string,
       label: string,
       cli: string | undefined,
+      cwd: string | undefined,
       status: ActiveAgent["status"],
     ) => {
       if (seen.has(node)) return;
       const found = findTabByPane(layout, node);
       if (!found) return;
       seen.add(node);
+      const pane = findPane(found.tab.root, node);
+      const full = cwd ?? pane?.cwd ?? null;
       rows.push({
         wsId: found.ws.id,
         row: {
           nodeId: node,
           agent: label,
           cli,
+          dir: full ? baseName(full) : label,
+          dirPath: full ?? undefined,
           status,
           tabName: found.tab.name,
-          paneTitle: findPane(found.tab.root, node)?.title,
+          paneTitle: pane?.title,
         },
       });
     };
-    for (const [live, node] of this.liveToNode) {
-      const st = this.states[live];
-      if (st?.state === "working") push(node, st.agent ?? "Agent", st.cli, "working");
+    for (const status of ["working", "blocked", "unknown", "done"] as const) {
+      for (const [live, node] of this.liveToNode) {
+        const st = this.states[live];
+        if (st?.state === status) {
+          push(node, st.agent ?? "Agent", st.cli, st.cwd, status);
+        }
+      }
     }
     for (const node of this.attention) {
       const last = this.lastAgent.get(node);
-      push(node, last?.agent ?? "Agent", last?.cli, "attention");
+      push(node, last?.agent ?? "Agent", last?.cli, last?.cwd, "attention");
     }
     for (const node of this.done) {
       const last = this.lastAgent.get(node);
-      push(node, last?.agent ?? "Agent", last?.cli, "done");
+      push(node, last?.agent ?? "Agent", last?.cli, last?.cwd, "done");
     }
     for (const [node, last] of this.lastAgent) {
-      push(node, last.agent, last.cli, "idle");
+      push(node, last.agent, last.cli, last.cwd, "idle");
     }
     const groups: WorkspaceAgents[] = [];
     for (const ws of layout.workspaces) {
@@ -225,13 +263,14 @@ class AgentStore {
             title: title(label),
             body: "Open Ubra to review",
             kind,
-          }).catch(() => {});
+          }).catch((e) => console.error("ubra: agent notification failed", e));
         }
         if (route.sound) {
           invoke("play_sound", {
             kind,
+            style: chimeStyleParam(store.soundStyle),
             file: store.soundFile.trim() === "" ? null : store.soundFile,
-          }).catch(() => {});
+          }).catch((e) => console.error("ubra: agent sound failed", e));
         }
       };
       // Clean exits are done; vanished ids with a live mapping died
@@ -253,7 +292,13 @@ class AgentStore {
       this.done = this.done.filter(stillUnseen);
       for (const [live, node] of this.liveToNode) {
         const st = next[live];
-        if (st?.agent) this.lastAgent.set(node, { agent: st.agent, cli: st.cli });
+        if (st?.agent) {
+          this.lastAgent.set(node, {
+            agent: st.agent,
+            cli: st.cli,
+            cwd: st.cwd ?? this.lastAgent.get(node)?.cwd,
+          });
+        }
       }
       const live = new Set(
         layout.workspaces.flatMap((ws) =>

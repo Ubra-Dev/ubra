@@ -25,9 +25,34 @@ function shape(
 describe("matchShortcut", () => {
   it("matches every table binding", () => {
     for (const b of SHORTCUTS) {
-      const got = matchShortcut(shape(b.key, { mod: b.mod, shift: b.shift }));
-      assert.deepEqual(got, { action: b.action });
+      const got = matchShortcut(
+        shape(b.key, { mod: b.mod, shift: b.shift, alt: b.alt }),
+      );
+      const want: { action: string; dir?: string } = { action: b.action };
+      if (b.dir) want.dir = b.dir;
+      assert.deepEqual(got, want);
     }
+  });
+
+  it("carries direction for neighbor actions", () => {
+    assert.deepEqual(
+      matchShortcut(shape("ArrowRight", { mod: true, alt: true })),
+      { action: "focus-neighbor", dir: "right" },
+    );
+    assert.deepEqual(
+      matchShortcut(shape("ArrowUp", { mod: true, shift: true, alt: true })),
+      { action: "swap-neighbor", dir: "up" },
+    );
+    assert.deepEqual(
+      matchShortcut(shape("ArrowLeft", { shift: true, alt: true })),
+      { action: "resize-pane", dir: "left" },
+    );
+    assert.deepEqual(matchShortcut(shape("t", { mod: true, alt: true })), {
+      action: "move-pane-to-new-tab",
+    });
+    // Alt must match exactly: no binding, no match.
+    assert.equal(matchShortcut(shape("ArrowRight", { mod: true })), null);
+    assert.equal(matchShortcut(shape("ArrowRight", { alt: true })), null);
   });
 
   it("matches uppercase keys (shift-held letters)", () => {
@@ -62,13 +87,20 @@ describe("matchShortcut", () => {
     });
   });
 
-  it("rejects plain keys, alt combos, and unbound mod combos", () => {
+  it("rejects plain keys and unbound combos", () => {
     assert.equal(matchShortcut(shape("t")), null);
     assert.equal(matchShortcut(shape("Enter")), null);
-    assert.equal(matchShortcut(shape("t", { mod: true, alt: true })), null);
     assert.equal(matchShortcut(shape("t", { mod: true, shift: true })), null);
     assert.equal(matchShortcut(shape("q", { mod: true })), null);
     assert.equal(matchShortcut(shape("F2", { mod: true })), null);
+    assert.equal(matchShortcut(shape("1", { mod: true, alt: true })), null);
+  });
+
+  it("matches Mod+F for find in pane", () => {
+    assert.deepEqual(matchShortcut(shape("f", { mod: true })), {
+      action: "find-in-pane",
+    });
+    assert.equal(matchShortcut(shape("f", { mod: true, shift: true })), null);
   });
 });
 
@@ -109,6 +141,16 @@ describe("labels", () => {
     const f2 = SHORTCUTS.find((b) => b.action === "rename-pane")!;
     assert.equal(formatBinding(f2, true), "F2");
     assert.equal(formatBinding(f2, false), "F2");
+    const focus = SHORTCUTS.find(
+      (b) => b.action === "focus-neighbor" && b.dir === "right",
+    )!;
+    assert.equal(formatBinding(focus, true), "⌘⌥→");
+    assert.equal(formatBinding(focus, false), "Ctrl+Alt+→");
+    const resize = SHORTCUTS.find(
+      (b) => b.action === "resize-pane" && b.dir === "left",
+    )!;
+    assert.equal(formatBinding(resize, true), "⌥⇧←");
+    assert.equal(formatBinding(resize, false), "Alt+Shift+←");
   });
 
   it("builds a cheat sheet with a jump-tab row", () => {

@@ -102,20 +102,25 @@ export function findTabByPane(
 }
 
 /// Split a pane in place; returns the new sibling pane, or null when missing.
+/// `ratio` is the original pane's fraction (clamped); the sibling inherits
+/// its working directory but never its startup command.
 export function splitPaneInTab(
   tab: Tab,
   paneId: string,
   dir: "row" | "col",
+  ratio = 0.5,
 ): PaneNode | null {
   const sibling: PaneNode = defaultPane();
+  const at = Math.min(0.9, Math.max(0.1, ratio));
   const visit = (node: LayoutNode, set: (n: LayoutNode) => void): PaneNode | null => {
     if (node.kind === "pane") {
       if (node.id !== paneId) return null;
+      if (node.cwd !== undefined) sibling.cwd = node.cwd;
       set({
         kind: "split",
         id: newId("split"),
         dir,
-        sizes: [0.5, 0.5],
+        sizes: [at, 1 - at],
         first: node,
         second: sibling,
       });
@@ -149,6 +154,178 @@ export function closePaneInTab(tab: Tab, paneId: string): boolean {
     return false;
   };
   return visit(tab.root, (n) => (tab.root = n));
+}
+
+export type Direction = "left" | "right" | "up" | "down";
+
+/**
+ * Geometric neighbor of a pane in a direction, or null at the tab edge.
+ * Picks the closest pane past that edge, preferring the largest shared
+ * border on ties.
+ */
+export function findNeighbor(
+  root: LayoutNode,
+  paneId: string,
+  dir: Direction,
+): PaneNode | null {
+  const panes = computeLayout(root).panes;
+  const cur = panes.find((p) => p.node.id === paneId);
+  if (!cur) return null;
+  const [cx, cy, cw, ch] = cur.rect;
+  const eps = 1e-9;
+  let best: { node: PaneNode; gap: number; overlap: number } | null = null;
+  for (const p of panes) {
+    if (p.node.id === paneId) continue;
+    const [x, y, w, h] = p.rect;
+    let gap = -1;
+    let overlap = 0;
+    if (dir === "left" && x + w <= cx + eps) {
+      gap = cx - (x + w);
+      overlap = Math.min(y + h, cy + ch) - Math.max(y, cy);
+    } else if (dir === "right" && x >= cx + cw - eps) {
+      gap = x - (cx + cw);
+      overlap = Math.min(y + h, cy + ch) - Math.max(y, cy);
+    } else if (dir === "up" && y + h <= cy + eps) {
+      gap = cy - (y + h);
+      overlap = Math.min(x + w, cx + cw) - Math.max(x, cx);
+    } else if (dir === "down" && y >= cy + ch - eps) {
+      gap = y - (cy + ch);
+      overlap = Math.min(x + w, cx + cw) - Math.max(x, cx);
+    }
+    if (gap < -eps || overlap <= eps) continue;
+    if (
+      !best ||
+      gap < best.gap - eps ||
+      (Math.abs(gap - best.gap) <= eps && overlap > best.overlap)
+    ) {
+      best = { node: p.node, gap, overlap };
+    }
+  }
+  return best?.node ?? null;
+}
+
+/// Exchange two panes' positions in place. Ids (and their live terminals)
+/// move with them; split sizes stay put. Null-safe: false unless both exist.
+export function swapPanesInTab(tab: Tab, aId: string, bId: string): boolean {
+  if (aId === bId) return false;
+  const hits = new Map<string, { node: PaneNode; set: (n: LayoutNode) => void }>();
+  const visit = (node: LayoutNode, set: (n: LayoutNode) => void): void => {
+    if (node.kind === "pane") {
+      if (node.id === aId || node.id === bId) hits.set(node.id, { node, set });
+      return;
+    }
+    visit(node.first, (n) => (node.first = n));
+    visit(node.second, (n) => (node.second = n));
+  };
+  visit(tab.root, (n) => (tab.root = n));
+  const ha = hits.get(aId);
+  const hb = hits.get(bId);
+  if (!ha || !hb) return false;
+  ha.set(hb.node);
+  hb.set(ha.node);
+  return true;
+}
+
+/// Grow the pane toward `dir` by `delta`, moving the divider on that side.
+/// Returns false at the tab edge or without a matching-orientation split.
+export function resizePaneInTab(
+  tab: Tab,
+  paneId: string,
+  dir: Direction,
+  delta: number,
+): boolean {
+  const horizontal = dir === "left" || dir === "right";
+  const path: { split: SplitNode; side: "first" | "second" }[] = [];
+  const descend = (node: LayoutNode): boolean => {
+    if (node.kind === "pane") return node.id === paneId;
+    path.push({ split: node, side: "first" });
+    if (descend(node.first)) return true;
+    path[path.length - 1].side = "second";
+    if (descend(node.second)) return true;
+    path.pop();
+    return false;
+  };
+  if (!descend(tab.root)) return false;
+  for (let i = path.length - 1; i >= 0; i--) {
+    const { split, side } = path[i];
+    const oriented =
+      (split.dir === "row" && horizontal) ||
+      (split.dir === "col" && !horizontal);
+    if (!oriented) continue;
+    const dividerOnSide =
+      (dir === "right" && side === "first") ||
+      (dir === "down" && side === "first") ||
+      (dir === "left" && side === "second") ||
+      (dir === "up" && side === "second");
+    if (!dividerOnSide) continue;
+    const sign = dir === "right" || dir === "down" ? 1 : -1;
+    const next = Math.min(0.9, Math.max(0.1, split.sizes[0] + sign * delta));
+    split.sizes = [next, 1 - next];
+    return true;
+  }
+  return false;
+}
+
+/// Remove a pane, promoting its sibling like a close, and return the
+/// removed node. The tab keeps a fresh pane root when emptied.
+export function extractPane(tab: Tab, paneId: string): PaneNode | null {
+  if (tab.root.kind === "pane") {
+    if (tab.root.id !== paneId) return null;
+    const node = tab.root;
+    tab.root = defaultPane();
+    return node;
+  }
+  const visit = (
+    split: SplitNode,
+    set: (n: LayoutNode) => void,
+  ): PaneNode | null => {
+    for (const side of ["first", "second"] as const) {
+      const child = split[side];
+      if (child.kind === "pane" && child.id === paneId) {
+        set(side === "first" ? split.second : split.first);
+        return child;
+      }
+      if (child.kind === "split") {
+        const got = visit(child, (n) => (split[side] = n));
+        if (got) return got;
+      }
+    }
+    return null;
+  };
+  return visit(tab.root, (n) => (tab.root = n));
+}
+
+/// Move a pane into a new tab of the same workspace. Returns the new tab.
+export function extractPaneToNewTab(
+  layout: Layout,
+  paneId: string,
+): Tab | null {
+  const found = findTabByPane(layout, paneId);
+  if (!found) return null;
+  const node = extractPane(found.tab, paneId);
+  if (!node) return null;
+  clearStaleZoom(found.tab);
+  const tab = defaultTab(node.title ?? `Tab ${found.ws.tabs.length + 1}`);
+  tab.root = node;
+  found.ws.tabs.push(tab);
+  return tab;
+}
+
+/// Move a pane into a new single-tab workspace. Returns the workspace.
+export function extractPaneToNewWorkspace(
+  layout: Layout,
+  paneId: string,
+): Workspace | null {
+  const found = findTabByPane(layout, paneId);
+  if (!found) return null;
+  const node = extractPane(found.tab, paneId);
+  if (!node) return null;
+  clearStaleZoom(found.tab);
+  const ws = defaultWorkspace(`Workspace ${layout.workspaces.length + 1}`);
+  ws.tabs[0].root = node;
+  if (node.title) ws.tabs[0].name = node.title;
+  layout.workspaces.push(ws);
+  return ws;
 }
 
 // --- loading ---------------------------------------------------------------
@@ -255,28 +432,48 @@ export function collectPaneIds(node: LayoutNode): string[] {
 /** Agent states by live pane id, as emitted by the backend poller. */
 export type AgentSnapshot = Record<
   string,
-  { state: string; agent?: string; cli?: string }
+  { state: string; agent?: string; cli?: string; cwd?: string }
 >;
 
-/** Live ids that transitioned from working to anything else. */
+/**
+ * Last path segment for display: "/a/b" and "/a/b/" give "b", "/" gives
+ * "/", "" gives "". Handles both separators for Windows paths.
+ */
+export function baseName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  if (trimmed === "") return path === "" ? "" : "/";
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1];
+}
+
+/** Live-agent states: the pane hosts a running, suspended, or starting agent. */
+export function isActiveAgentState(state: string | undefined): boolean {
+  return state === "working" || state === "blocked" || state === "unknown";
+}
+
+/** Live ids that transitioned from an active agent state to inactive. */
 export function detectFinished(
   prev: AgentSnapshot,
   next: AgentSnapshot,
 ): string[] {
   const out: string[] = [];
   for (const [id, state] of Object.entries(next)) {
-    if (prev[id]?.state === "working" && state.state !== "working") out.push(id);
+    if (
+      isActiveAgentState(prev[id]?.state) &&
+      !isActiveAgentState(state.state)
+    )
+      out.push(id);
   }
   return out;
 }
 
-/** Live ids that were working in prev but are absent from next. */
+/** Live ids that held an active agent in prev but are absent from next. */
 export function detectVanished(
   prev: AgentSnapshot,
   next: AgentSnapshot,
 ): string[] {
   return Object.keys(prev).filter(
-    (id) => prev[id].state === "working" && !(id in next),
+    (id) => isActiveAgentState(prev[id].state) && !(id in next),
   );
 }
 
@@ -332,6 +529,24 @@ export function computeLayout(root: LayoutNode): TabLayout {
   };
   visit(root, 0, 0, 1, 1);
   return { panes, dividers };
+}
+
+/**
+ * Pane under canvas-fraction point (fx, fy), or null outside the canvas.
+ * Shared tile edges resolve to the earlier pane in traversal order, so
+ * results are deterministic for drag-and-drop hit-testing.
+ */
+export function findPaneAtPoint(
+  root: LayoutNode,
+  fx: number,
+  fy: number,
+): PaneNode | null {
+  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
+  for (const p of computeLayout(root).panes) {
+    const [x, y, w, h] = p.rect;
+    if (fx >= x && fx <= x + w && fy >= y && fy <= y + h) return p.node;
+  }
+  return null;
 }
 
 /** Find a split node by id (for divider drags). */

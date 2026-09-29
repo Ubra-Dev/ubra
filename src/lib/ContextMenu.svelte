@@ -1,8 +1,11 @@
 <script module lang="ts">
+  import type { IconName } from "./Icon.svelte";
+
   export interface MenuItem {
     id: string;
     label: string;
     danger?: boolean;
+    icon?: IconName;
   }
 
   /**
@@ -16,11 +19,12 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     x: number;
     y: number;
-    items: { id: string; label: string; danger?: boolean }[];
+    items: MenuItem[];
     onPick: (id: string) => void;
     onDismiss: () => void;
   }
@@ -54,6 +58,9 @@
       class:danger={item.danger}
       onclick={() => onPick(item.id)}
     >
+      {#if item.icon}
+        <Icon name={item.icon} size={12} />
+      {/if}
       {item.label}
     </button>
   {/each}
@@ -74,6 +81,9 @@
     font: 12px system-ui, sans-serif;
   }
   .menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     background: transparent;
     border: none;
     color: var(--text);

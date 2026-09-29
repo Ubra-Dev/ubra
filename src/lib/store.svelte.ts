@@ -9,18 +9,26 @@ import {
   defaultLayout,
   defaultTab,
   defaultWorkspace,
+  extractPaneToNewTab,
+  extractPaneToNewWorkspace,
+  findNeighbor,
   findPane,
   findTabByPane,
+  resizePaneInTab,
   sanitizeLayout,
   setZoomedPane,
   splitPaneInTab,
+  swapPanesInTab,
+  type Direction,
   type Layout,
   type Tab,
   type Workspace,
 } from "./layout";
 import {
+  DEFAULT_CHIME_STYLE,
   DEFAULT_DELIVERY,
   DEFAULT_TOAST_POSITION,
+  parseChimeStyle,
   parseDelivery,
   parseToastPosition,
   type NotifyDelivery,
@@ -33,9 +41,26 @@ import {
   type ThemeId,
 } from "./themes";
 
+export type CloseKind = "workspace" | "tab" | "pane";
+
+export interface PendingClose {
+  kind: CloseKind;
+  /** Workspace id, tab id, or pane node id. */
+  id: string;
+  /** Display name shown in the dialog. */
+  name: string;
+  tabs: number;
+  panes: number;
+}
+
 export const DEFAULT_TERM_FONT_SIZE = 13;
 export const MIN_TERM_FONT_SIZE = 9;
 export const MAX_TERM_FONT_SIZE = 24;
+export const DEFAULT_TERM_SCROLLBACK = 1000;
+export const SCROLLBACK_OPTIONS = [100, 1000, 5000, 10000];
+export const DEFAULT_TERM_OPACITY = 100;
+export const MIN_TERM_OPACITY = 10;
+export const MAX_TERM_OPACITY = 100;
 
 class AppStore {
   layout = $state<Layout | null>(null);
@@ -43,6 +68,8 @@ class AppStore {
   loadError = $state<string | null>(null);
   themeId = $state<ThemeId>(DEFAULT_THEME_ID);
   termFontSize = $state<number>(DEFAULT_TERM_FONT_SIZE);
+  termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
+  termOpacity = $state<number>(DEFAULT_TERM_OPACITY);
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
   toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
   soundEnabled = $state<boolean>(true);
@@ -50,11 +77,19 @@ class AppStore {
   mutedAgents = $state<string[]>(["droid"]);
   /** Custom notification sound file (blank = synthesized default chime). */
   soundFile = $state<string>("");
+  /** Selected chime: a built-in id or "custom" (uses soundFile). */
+  soundStyle = $state<string>(DEFAULT_CHIME_STYLE);
   settingsOpen = $state(false);
   /** Last-focused pane node id (session-only, for shortcuts). */
   focusedPaneId = $state<string | null>(null);
   /** Pane node id that should enter rename editing (F2); cleared on take. */
   paneRenameTarget = $state<string | null>(null);
+  /** Close awaiting confirmation in the alert dialog; null when idle. */
+  pendingClose = $state<PendingClose | null>(null);
+  /** Pane node id whose terminal should take keyboard focus; cleared on take. */
+  paneFocusTarget = $state<string | null>(null);
+  /** Pane node id that should open terminal find; cleared on take. */
+  paneFindTarget = $state<string | null>(null);
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   get theme() {
@@ -77,6 +112,17 @@ class AppStore {
       if (isThemeId(savedTheme)) this.themeId = savedTheme;
       const savedFont = window.localStorage.getItem("ubra.termFontSize");
       if (savedFont !== null) this.termFontSize = this.clampFontSize(Number(savedFont));
+      const savedScrollback = window.localStorage.getItem("ubra.termScrollback");
+      if (
+        savedScrollback !== null &&
+        SCROLLBACK_OPTIONS.includes(Number(savedScrollback))
+      ) {
+        this.termScrollback = Number(savedScrollback);
+      }
+      const savedOpacity = window.localStorage.getItem("ubra.termOpacity");
+      if (savedOpacity !== null) {
+        this.termOpacity = this.clampOpacity(Number(savedOpacity));
+      }
       const savedDelivery = window.localStorage.getItem("ubra.notifyDelivery");
       if (savedDelivery !== null) this.notifyDelivery = parseDelivery(savedDelivery);
       const savedPosition = window.localStorage.getItem("ubra.toastPosition");
@@ -98,6 +144,8 @@ class AppStore {
       }
       const savedFile = window.localStorage.getItem("ubra.soundFile");
       if (savedFile !== null) this.soundFile = savedFile;
+      const savedStyle = window.localStorage.getItem("ubra.soundStyle");
+      if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -154,6 +202,36 @@ class AppStore {
     this.setTermFontSize(DEFAULT_TERM_FONT_SIZE);
   }
 
+  setTermScrollback(lines: number): void {
+    if (!SCROLLBACK_OPTIONS.includes(lines) || lines === this.termScrollback)
+      return;
+    this.termScrollback = lines;
+    try {
+      window.localStorage.setItem("ubra.termScrollback", String(lines));
+    } catch (e) {
+      console.error("ubra: failed to save terminal scrollback", e);
+    }
+  }
+
+  private clampOpacity(pct: number): number {
+    if (!Number.isFinite(pct)) return DEFAULT_TERM_OPACITY;
+    return Math.min(
+      MAX_TERM_OPACITY,
+      Math.max(MIN_TERM_OPACITY, Math.round(pct)),
+    );
+  }
+
+  setTermOpacity(pct: number): void {
+    const clamped = this.clampOpacity(pct);
+    if (clamped === this.termOpacity) return;
+    this.termOpacity = clamped;
+    try {
+      window.localStorage.setItem("ubra.termOpacity", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save terminal opacity", e);
+    }
+  }
+
   private savePref(key: string, value: string): void {
     try {
       window.localStorage.setItem(key, value);
@@ -180,6 +258,11 @@ class AppStore {
   setSoundFile(path: string): void {
     this.soundFile = path;
     this.savePref("ubra.soundFile", path);
+  }
+
+  setSoundStyle(style: string): void {
+    this.soundStyle = parseChimeStyle(style);
+    this.savePref("ubra.soundStyle", this.soundStyle);
   }
 
   setAgentMuted(cli: string, muted: boolean): void {
@@ -240,7 +323,19 @@ class AppStore {
     }
   }
 
-  closeWorkspace(id: string): void {
+  requestCloseWorkspace(id: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (!ws) return;
+    this.pendingClose = {
+      kind: "workspace",
+      id,
+      name: ws.name,
+      tabs: ws.tabs.length,
+      panes: ws.tabs.reduce((n, t) => n + countPanes(t.root), 0),
+    };
+  }
+
+  private doCloseWorkspace(id: string): void {
     if (!this.layout) return;
     if (this.layout.workspaces.length <= 1) {
       const ws = defaultWorkspace();
@@ -265,7 +360,19 @@ class AppStore {
     this.saveSoon();
   }
 
-  closeTab(id: string): void {
+  requestCloseTab(id: string): void {
+    const tab = this.workspace()?.tabs.find((t) => t.id === id);
+    if (!tab) return;
+    this.pendingClose = {
+      kind: "tab",
+      id,
+      name: tab.name,
+      tabs: 1,
+      panes: countPanes(tab.root),
+    };
+  }
+
+  private doCloseTab(id: string): void {
     const ws = this.workspace();
     if (!ws) return;
     if (ws.tabs.length <= 1) {
@@ -295,23 +402,64 @@ class AppStore {
     }
   }
 
-  splitPane(paneId: string, dir: "row" | "col"): void {
+  splitPane(paneId: string, dir: "row" | "col", ratio = 0.5): void {
     if (!this.layout) return;
     const found = findTabByPane(this.layout, paneId);
-    if (found && splitPaneInTab(found.tab, paneId, dir)) {
+    if (!found) return;
+    const sibling = splitPaneInTab(found.tab, paneId, dir, ratio);
+    if (sibling) {
       // A split made while zoomed would hide the new sibling; show both.
       setZoomedPane(found.tab, null);
+      // The new pane takes focus (outline + keyboard).
+      this.focusedPaneId = sibling.id;
+      this.paneFocusTarget = sibling.id;
       this.saveSoon();
     }
   }
 
-  closePane(paneId: string): void {
+  requestClosePane(paneId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    if (!node) return;
+    this.pendingClose = {
+      kind: "pane",
+      id: paneId,
+      name: node.title?.trim() || "Pane",
+      tabs: 0,
+      panes: 1,
+    };
+  }
+
+  private doClosePane(paneId: string): void {
     if (!this.layout) return;
     const found = findTabByPane(this.layout, paneId);
     if (found && closePaneInTab(found.tab, paneId)) {
       clearStaleZoom(found.tab);
       this.saveSoon(true);
     }
+  }
+
+  confirmPendingClose(): void {
+    const pending = this.pendingClose;
+    this.pendingClose = null;
+    if (!pending || !this.layout) return;
+    // Re-resolve: never close a target that no longer exists.
+    if (pending.kind === "workspace") {
+      if (this.layout.workspaces.some((w) => w.id === pending.id)) {
+        this.doCloseWorkspace(pending.id);
+      }
+    } else if (pending.kind === "tab") {
+      if (this.workspace()?.tabs.some((t) => t.id === pending.id)) {
+        this.doCloseTab(pending.id);
+      }
+    } else if (findTabByPane(this.layout, pending.id)) {
+      this.doClosePane(pending.id);
+    }
+  }
+
+  cancelPendingClose(): void {
+    this.pendingClose = null;
   }
 
   renamePane(paneId: string, name: string): void {
@@ -384,16 +532,77 @@ class AppStore {
   }
 
   /** Close the shortcut-target pane; when it is the tab's last pane, close the tab. */
-  closePaneOrTab(): void {
+  requestClosePaneOrTab(): void {
     const cur = this.currentPane();
     if (!cur) return;
-    if (countPanes(cur.tab.root) > 1) this.closePane(cur.paneId);
-    else this.closeTab(cur.tab.id);
+    if (countPanes(cur.tab.root) > 1) this.requestClosePane(cur.paneId);
+    else this.requestCloseTab(cur.tab.id);
   }
 
   requestPaneRename(): void {
     const cur = this.currentPane();
     if (cur) this.paneRenameTarget = cur.paneId;
+  }
+
+  requestPaneFind(): void {
+    const cur = this.currentPane();
+    if (cur) this.paneFindTarget = cur.paneId;
+  }
+
+  /** Move keyboard focus to the neighbor pane in `dir`, if any. */
+  focusNeighbor(dir: Direction): void {
+    const cur = this.currentPane();
+    if (!cur) return;
+    const next = findNeighbor(cur.tab.root, cur.paneId, dir);
+    if (next) {
+      this.focusedPaneId = next.id;
+      this.paneFocusTarget = next.id;
+    }
+  }
+
+  /** Exchange the focused pane's position with its neighbor in `dir`. */
+  swapWithNeighbor(dir: Direction): void {
+    const cur = this.currentPane();
+    if (!cur) return;
+    const next = findNeighbor(cur.tab.root, cur.paneId, dir);
+    if (next && swapPanesInTab(cur.tab, cur.paneId, next.id)) {
+      this.saveSoon();
+    }
+  }
+
+  /** Exchange two panes' positions (titlebar drag-drop). Same-tab only. */
+  swapPanes(aId: string, bId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, aId);
+    if (found && swapPanesInTab(found.tab, aId, bId)) {
+      this.saveSoon();
+    }
+  }
+
+  /** Grow the focused pane toward `dir` by one step. */
+  resizeFocused(dir: Direction): void {
+    const cur = this.currentPane();
+    if (cur && resizePaneInTab(cur.tab, cur.paneId, dir, 0.05)) {
+      this.paneSizesChanged();
+    }
+  }
+
+  /** Move a pane into a new tab of its workspace and reveal it. */
+  movePaneToNewTab(paneId: string): void {
+    if (!this.layout) return;
+    if (extractPaneToNewTab(this.layout, paneId)) {
+      this.revealPane(paneId);
+      this.saveSoon(true);
+    }
+  }
+
+  /** Move a pane into a new workspace and reveal it. */
+  movePaneToNewWorkspace(paneId: string): void {
+    if (!this.layout) return;
+    if (extractPaneToNewWorkspace(this.layout, paneId)) {
+      this.revealPane(paneId);
+      this.saveSoon(true);
+    }
   }
 
   paneSizesChanged(): void {

@@ -167,4 +167,72 @@ fn unknown_pane_operations_fail() {
     assert!(manager.write(999, "x").is_err());
     assert!(manager.resize(999, 80, 24).is_err());
     assert!(manager.kill(999).is_err());
+    assert!(manager.snapshot(999).is_err());
+}
+
+#[test]
+fn snapshot_repaints_live_pane_and_fails_after_kill() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    // Bare interactive shell stays alive so the snapshot has a live screen.
+    let id = manager.spawn(None, None, Vec::new(), 80, 24).unwrap();
+    let mut handshake = Handshake::new();
+    let mut transcript = String::new();
+    // Warm up (answering the ConPTY handshake on Windows), then run echo.
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before snapshot"),
+            Err(_) => break, // Quiet: warmed up.
+        }
+    }
+    manager.write(id, "echo hello-snapshot\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+                if transcript.contains("hello-snapshot") {
+                    break;
+                }
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before echo"),
+            Err(_) => panic!("timed out waiting for echo; got: {transcript:?}"),
+        }
+    }
+    let snap = manager.snapshot(id).unwrap();
+    assert!(
+        snap.contains("hello-snapshot"),
+        "snapshot should repaint visible output, got: {snap:?}"
+    );
+
+    manager.kill(id).unwrap();
+    assert!(
+        manager.snapshot(id).is_err(),
+        "snapshot of a killed pane must fail"
+    );
+    // Drain until the reader thread reports the exit (no leaked session).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Exit(got, _)) => {
+                assert_eq!(got, id);
+                return;
+            }
+            Ok(Event::Output(_, _)) => {}
+            Err(_) => panic!("timed out waiting for killed pane to exit"),
+        }
+    }
 }

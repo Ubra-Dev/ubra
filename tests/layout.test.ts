@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  baseName,
   clearStaleZoom,
   closePaneInTab,
   collectPaneIds,
@@ -10,10 +11,18 @@ import {
   defaultTab,
   detectFinished,
   detectVanished,
+  extractPane,
+  extractPaneToNewTab,
+  extractPaneToNewWorkspace,
+  findNeighbor,
   findPane,
+  findPaneAtPoint,
   findSplit,
   findTabByPane,
+  isActiveAgentState,
+  resizePaneInTab,
   sanitizeLayout,
+  swapPanesInTab,
   setZoomedPane,
   splitPaneInTab,
   type Tab,
@@ -202,6 +211,18 @@ describe("collectPaneIds", () => {
   });
 });
 
+describe("isActiveAgentState", () => {
+  it("treats working, blocked, and unknown as active", () => {
+    assert.equal(isActiveAgentState("working"), true);
+    assert.equal(isActiveAgentState("blocked"), true);
+    assert.equal(isActiveAgentState("unknown"), true);
+    assert.equal(isActiveAgentState("idle"), false);
+    assert.equal(isActiveAgentState("done"), false);
+    assert.equal(isActiveAgentState(undefined), false);
+    assert.equal(isActiveAgentState("bogus"), false);
+  });
+});
+
 describe("detectFinished", () => {
   it("reports working-to-idle transitions only", () => {
     const prev = {
@@ -218,6 +239,36 @@ describe("detectFinished", () => {
     assert.deepEqual(detectFinished(prev, next), ["1"]);
     assert.deepEqual(detectFinished({}, next), []);
   });
+
+  it("treats a live backend done as a finish (interactive agent at prompt)", () => {
+    const prev = {
+      "1": { state: "working", agent: "Codex" },
+      "2": { state: "working", agent: "Claude Code" },
+    };
+    const next = {
+      "1": { state: "done", agent: "Codex" },
+      "2": { state: "working", agent: "Claude Code" },
+    };
+    assert.deepEqual(detectFinished(prev, next), ["1"]);
+    // Steady done is not a repeat finish.
+    assert.deepEqual(detectFinished(next, next), []);
+  });
+
+  it("finishes blocked and unknown panes, not active-to-active moves", () => {
+    const prev = {
+      "1": { state: "blocked", agent: "Codex" },
+      "2": { state: "unknown", agent: "Codex" },
+      "3": { state: "unknown", agent: "Codex" },
+      "4": { state: "working", agent: "Codex" },
+    };
+    const next = {
+      "1": { state: "idle" },
+      "2": { state: "idle" },
+      "3": { state: "working", agent: "Codex" },
+      "4": { state: "blocked", agent: "Codex" },
+    };
+    assert.deepEqual(detectFinished(prev, next), ["1", "2"]);
+  });
 });
 
 describe("detectVanished", () => {
@@ -229,6 +280,211 @@ describe("detectVanished", () => {
     };
     assert.deepEqual(detectVanished(prev, { "3": { state: "working" } }), ["1"]);
     assert.deepEqual(detectVanished(prev, prev), []);
+  });
+
+  it("reports blocked and unknown panes missing from the next snapshot", () => {
+    const prev = {
+      "1": { state: "blocked", agent: "Codex" },
+      "2": { state: "unknown", agent: "Codex" },
+      "3": { state: "working", agent: "Amp" },
+      "4": { state: "idle" },
+    };
+    assert.deepEqual(detectVanished(prev, { "3": { state: "working" } }), [
+      "1",
+      "2",
+    ]);
+  });
+});
+
+describe("findNeighbor", () => {
+  it("finds geometric neighbors in split layouts", () => {
+    const tab = defaultTab();
+    const firstId = rootPaneId(tab);
+    const sibling = splitPaneInTab(tab, firstId, "row");
+    assert.ok(sibling);
+    assert.equal(findNeighbor(tab.root, firstId, "right")?.id, sibling.id);
+    assert.equal(findNeighbor(tab.root, sibling.id, "left")?.id, firstId);
+    assert.equal(findNeighbor(tab.root, firstId, "left"), null);
+    assert.equal(findNeighbor(tab.root, firstId, "up"), null);
+    assert.equal(findNeighbor(tab.root, sibling.id, "down"), null);
+    assert.equal(findNeighbor(tab.root, "nope", "right"), null);
+  });
+
+  it("picks the closest overlapping pane in nested layouts", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const right = splitPaneInTab(tab, a, "row")!;
+    const c = splitPaneInTab(tab, right.id, "col")!;
+    // Layout: [A | B(top) / C(bottom)].
+    assert.equal(findNeighbor(tab.root, a, "right")?.id, right.id);
+    assert.equal(findNeighbor(tab.root, right.id, "down")?.id, c.id);
+    assert.equal(findNeighbor(tab.root, c.id, "up")?.id, right.id);
+    assert.equal(findNeighbor(tab.root, c.id, "left")?.id, a);
+    assert.equal(findNeighbor(tab.root, a, "left"), null);
+  });
+});
+
+describe("swapPanesInTab", () => {
+  it("exchanges pane positions, keeping ids and terminals", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const b = splitPaneInTab(tab, a, "row")!;
+    findPane(tab.root, a)!.title = "A";
+    findPane(tab.root, b.id)!.title = "B";
+    assert.equal(swapPanesInTab(tab, a, b.id), true);
+    const panes = computeLayout(tab.root).panes;
+    const left = panes.find((p) => p.rect[0] === 0)!;
+    assert.equal(left.node.id, b.id);
+    assert.equal(left.node.title, "B");
+    assert.equal(swapPanesInTab(tab, a, a), false);
+    assert.equal(swapPanesInTab(tab, a, "nope"), false);
+  });
+});
+
+describe("findPaneAtPoint", () => {
+  it("hits panes in a row split", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const b = splitPaneInTab(tab, a, "row")!;
+    assert.equal(findPaneAtPoint(tab.root, 0.25, 0.5)?.id, a);
+    assert.equal(findPaneAtPoint(tab.root, 0.75, 0.5)?.id, b.id);
+  });
+
+  it("hits panes in nested splits", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const right = splitPaneInTab(tab, a, "row")!;
+    const c = splitPaneInTab(tab, right.id, "col")!;
+    // Layout: [A | B(top) / C(bottom)].
+    assert.equal(findPaneAtPoint(tab.root, 0.1, 0.1)?.id, a);
+    assert.equal(findPaneAtPoint(tab.root, 0.9, 0.1)?.id, right.id);
+    assert.equal(findPaneAtPoint(tab.root, 0.9, 0.9)?.id, c.id);
+  });
+
+  it("resolves shared edges to the earlier pane", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    splitPaneInTab(tab, a, "row");
+    assert.equal(findPaneAtPoint(tab.root, 0.5, 0.5)?.id, a);
+  });
+
+  it("returns null outside the canvas", () => {
+    const tab = defaultTab();
+    assert.equal(findPaneAtPoint(tab.root, -0.1, 0.5), null);
+    assert.equal(findPaneAtPoint(tab.root, 0.5, 1.1), null);
+    assert.equal(findPaneAtPoint(tab.root, Number.NaN, 0.5), null);
+  });
+});
+
+describe("resizePaneInTab", () => {
+  it("grows the pane toward the divider side", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const b = splitPaneInTab(tab, a, "row")!;
+    assert.equal(resizePaneInTab(tab, a, "right", 0.25), true);
+    assert.equal(tab.root.kind, "split");
+    if (tab.root.kind === "split")
+      assert.deepEqual(tab.root.sizes, [0.75, 0.25]);
+    assert.equal(resizePaneInTab(tab, b.id, "left", 0.25), true);
+    if (tab.root.kind === "split")
+      assert.deepEqual(tab.root.sizes, [0.5, 0.5]);
+  });
+
+  it("returns false at edges and clamps to bounds", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    assert.equal(resizePaneInTab(tab, a, "right", 0.1), false);
+    splitPaneInTab(tab, a, "row");
+    assert.equal(resizePaneInTab(tab, a, "left", 0.1), false);
+    assert.equal(resizePaneInTab(tab, a, "up", 0.1), false);
+    assert.equal(resizePaneInTab(tab, "nope", "right", 0.1), false);
+    resizePaneInTab(tab, a, "right", 5);
+    assert.equal(tab.root.kind, "split");
+    if (tab.root.kind === "split") assert.equal(tab.root.sizes[0], 0.9);
+  });
+});
+
+describe("extractPane", () => {
+  it("removes the pane and promotes its sibling", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const b = splitPaneInTab(tab, a, "row")!;
+    const got = extractPane(tab, b.id);
+    assert.equal(got?.id, b.id);
+    assert.equal(tab.root.kind, "pane");
+    if (tab.root.kind === "pane") assert.equal(tab.root.id, a);
+    assert.equal(extractPane(tab, "nope"), null);
+  });
+
+  it("leaves a fresh pane when extracting the last one", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const got = extractPane(tab, a);
+    assert.equal(got?.id, a);
+    assert.equal(tab.root.kind, "pane");
+    if (tab.root.kind === "pane") assert.notEqual(tab.root.id, a);
+  });
+});
+
+describe("extractPaneToNewTab", () => {
+  it("moves the pane node into a new tab", () => {
+    const layout = defaultLayout();
+    const ws = layout.workspaces[0];
+    const tab = ws.tabs[0];
+    const a = rootPaneId(tab);
+    splitPaneInTab(tab, a, "row");
+    const moved = extractPaneToNewTab(layout, a);
+    assert.ok(moved);
+    assert.equal(ws.tabs.length, 2);
+    assert.equal(moved.root.kind, "pane");
+    if (moved.root.kind === "pane") assert.equal(moved.root.id, a);
+    assert.equal(countPanes(tab.root), 1);
+    assert.equal(extractPaneToNewTab(layout, "nope"), null);
+  });
+
+  it("clears zoom pointing at the moved pane", () => {
+    const layout = defaultLayout();
+    const tab = layout.workspaces[0].tabs[0];
+    const a = rootPaneId(tab);
+    splitPaneInTab(tab, a, "row");
+    setZoomedPane(tab, a);
+    extractPaneToNewTab(layout, a);
+    assert.equal(tab.zoomedPaneId, undefined);
+  });
+});
+
+describe("extractPaneToNewWorkspace", () => {
+  it("moves the pane node into a new workspace", () => {
+    const layout = defaultLayout();
+    const a = rootPaneId(layout.workspaces[0].tabs[0]);
+    const ws = extractPaneToNewWorkspace(layout, a);
+    assert.ok(ws);
+    assert.equal(layout.workspaces.length, 2);
+    assert.equal(countPanes(ws.tabs[0].root), 1);
+    const src = layout.workspaces[0].tabs[0];
+    assert.equal(src.root.kind, "pane");
+    if (src.root.kind === "pane") assert.notEqual(src.root.id, a);
+    assert.equal(extractPaneToNewWorkspace(layout, "nope"), null);
+  });
+});
+
+describe("splitPaneInTab options", () => {
+  it("honors ratio and inherits cwd but not cmd", () => {
+    const tab = defaultTab();
+    const a = rootPaneId(tab);
+    const node = findPane(tab.root, a)!;
+    node.cwd = "/tmp/proj";
+    node.cmd = ["claude"];
+    const sib = splitPaneInTab(tab, a, "row", 0.75)!;
+    assert.equal(sib.cwd, "/tmp/proj");
+    assert.equal(sib.cmd, undefined);
+    assert.equal(tab.root.kind, "split");
+    if (tab.root.kind !== "split") assert.fail("expected split");
+    assert.deepEqual(tab.root.sizes, [0.75, 0.25]);
+    splitPaneInTab(tab, sib.id, "col", 0.99);
+    const inner = tab.root.second;
+    assert.equal(inner.kind, "split");
+    if (inner.kind === "split") assert.equal(inner.sizes[0], 0.9);
   });
 });
 
@@ -274,6 +530,18 @@ describe("computeLayout", () => {
     // Right column split stacked: y halves of full height.
     assert.deepEqual(layout.panes[1].rect, [0.25, 0, 0.75, 0.5]);
     assert.deepEqual(layout.panes[2].rect, [0.25, 0.5, 0.75, 0.5]);
+  });
+});
+
+describe("baseName", () => {
+  it("returns the last path segment", () => {
+    assert.equal(baseName("/Users/me/herdr"), "herdr");
+    assert.equal(baseName("/Users/me/herdr/"), "herdr");
+    assert.equal(baseName("herdr"), "herdr");
+    assert.equal(baseName("C:\\Users\\me\\herdr"), "herdr");
+    assert.equal(baseName("C:\\Users\\me\\herdr\\"), "herdr");
+    assert.equal(baseName("/"), "/");
+    assert.equal(baseName(""), "");
   });
 });
 

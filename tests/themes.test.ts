@@ -6,6 +6,7 @@ import {
   THEME_IDS,
   isThemeId,
   themeStyle,
+  withAlpha,
 } from "../src/lib/themes.ts";
 
 const builtInThemeIds = [
@@ -47,5 +48,37 @@ describe("theme catalog", () => {
       assert.ok(theme.ui.accent);
       assert.ok(themeStyle(theme).includes(`--terminal-background:${theme.terminal.background}`));
     }
+  });
+});
+
+describe("withAlpha", () => {
+  it("adds an alpha channel to 6-digit hex", () => {
+    assert.equal(withAlpha("#1e1e1e", 0.8), "rgba(30, 30, 30, 0.8)");
+    assert.equal(withAlpha("#FF0000", 0.5), "rgba(255, 0, 0, 0.5)");
+  });
+
+  it("clamps and rounds the alpha", () => {
+    assert.equal(withAlpha("#1e1e1e", 2), "#1e1e1e");
+    assert.equal(withAlpha("#1e1e1e", 1), "#1e1e1e");
+    assert.equal(withAlpha("#1e1e1e", 0.333), "rgba(30, 30, 30, 0.33)");
+    assert.equal(withAlpha("#1e1e1e", -1), "rgba(30, 30, 30, 0)");
+  });
+
+  it("passes anything unparseable through untouched", () => {
+    assert.equal(withAlpha("red", 0.5), "red");
+    assert.equal(withAlpha("#abc", 0.5), "#abc");
+    assert.equal(withAlpha("", 0.5), "");
+  });
+
+  it("themeStyle applies alpha only to the background stack", () => {
+    const theme = THEMES[DEFAULT_THEME_ID];
+    const styled = themeStyle(theme, 0.8);
+    assert.ok(styled.includes(`--app-bg:rgba(30, 30, 30, 0.8)`));
+    assert.ok(styled.includes(`--pane-bg:rgba(30, 30, 30, 0.8)`));
+    assert.ok(
+      styled.includes(`--terminal-background:rgba(30, 30, 30, 0.8)`),
+    );
+    assert.ok(styled.includes(`--sidebar-bg:${theme.ui.sidebarBg}`));
+    assert.equal(themeStyle(theme), themeStyle(theme, 1));
   });
 });

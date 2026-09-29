@@ -1,9 +1,12 @@
 pub mod agent_watch;
+pub mod cli;
+pub mod daemon;
 pub mod layout_store;
 pub mod pty_manager;
+pub mod screen_rules;
 pub mod sound;
 
-use agent_watch::poll_once;
+use agent_watch::Watcher;
 use layout_store::{data_dir, load_layout_from, save_layout_to};
 use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,6 +64,11 @@ fn pty_kill(manager: State<'_, PtyManager>, id: PaneId) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn pty_snapshot(manager: State<'_, PtyManager>, id: PaneId) -> Result<String, String> {
+    manager.snapshot(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn load_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     load_layout_from(&dir).map_err(|e| e.to_string())
@@ -112,17 +120,20 @@ fn notify_agent(
     if let Some(kind) = kind {
         eprintln!("ubra: agent notification ({kind:?}): {title}");
     }
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-        .map_err(|e| e.to_string())
+    let result = app.notification().builder().title(title).body(body).show();
+    if let Err(e) = &result {
+        eprintln!("ubra: system notification failed: {e}");
+    }
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn play_sound(kind: sound::SoundKind, file: Option<String>) -> Result<(), String> {
-    sound::play(kind, file.as_deref()).map_err(|e| e.to_string())
+fn play_sound(
+    kind: sound::SoundKind,
+    style: Option<sound::ChimeStyle>,
+    file: Option<String>,
+) -> Result<(), String> {
+    sound::play(kind, style.unwrap_or_default(), file.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -205,6 +216,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             app.manage(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
@@ -213,16 +225,26 @@ pub fn run() {
                 eprintln!("ubra: failed to build tray icon: {e}");
             }
             let poll_app = app.handle().clone();
+            let rules_dir = match data_dir(app.handle()) {
+                Ok(dir) => Some(dir.join("agent-detection")),
+                Err(e) => {
+                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
+                    None
+                }
+            };
             std::thread::Builder::new()
                 .name("ubra-agent-watch".to_string())
                 .spawn(move || {
-                    let mut sys = sysinfo::System::new_all();
+                    let mut watcher = match rules_dir {
+                        Some(dir) => Watcher::with_dir(dir),
+                        None => Watcher::bundled(),
+                    };
                     let mut last = String::new();
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(2));
                         let states = {
                             let manager = poll_app.state::<PtyManager>();
-                            poll_once(&manager, &mut sys)
+                            watcher.poll(&manager)
                         };
                         let json = serde_json::to_string(&states).unwrap_or_default();
                         if json != last {
@@ -258,6 +280,7 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            pty_snapshot,
             load_layout,
             save_layout,
             autostart_enabled,

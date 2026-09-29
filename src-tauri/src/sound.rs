@@ -23,24 +23,46 @@ pub enum SoundKind {
     Request,
 }
 
+/// Built-in chime style for the Done signal. Request keeps its own urgent
+/// triple regardless of style (it only fires once blocked-detection lands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChimeStyle {
+    #[default]
+    Default,
+    Bright,
+    Soft,
+    Pop,
+}
+
 /// One chime note: (frequency Hz, length).
 pub fn chime_notes(kind: SoundKind) -> Vec<(f32, Duration)> {
+    chime_notes_styled(kind, ChimeStyle::Default)
+}
+
+pub fn chime_notes_styled(kind: SoundKind, style: ChimeStyle) -> Vec<(f32, Duration)> {
     let ms = |n: u64| Duration::from_millis(n);
-    // Done: rising two-note chime. Request: attention triple.
     match kind {
-        SoundKind::Done => vec![(659.25, ms(120)), (880.0, ms(220))],
         SoundKind::Request => vec![(880.0, ms(110)), (659.25, ms(110)), (880.0, ms(240))],
+        SoundKind::Done => match style {
+            // Default: rising two-note chime.
+            ChimeStyle::Default => vec![(659.25, ms(120)), (880.0, ms(220))],
+            ChimeStyle::Bright => vec![(880.0, ms(90)), (1174.66, ms(90)), (1567.98, ms(200))],
+            ChimeStyle::Soft => vec![(523.25, ms(160)), (392.0, ms(260))],
+            ChimeStyle::Pop => vec![(1200.0, ms(70)), (800.0, ms(100))],
+        },
     }
 }
 
-fn append_chime(player: &Player, kind: SoundKind) {
-    for (freq, len) in chime_notes(kind) {
+fn append_chime(player: &Player, kind: SoundKind, style: ChimeStyle) {
+    for (freq, len) in chime_notes_styled(kind, style) {
         player.append(SineWave::new(freq).take_duration(len).amplify(0.2));
     }
 }
 
 struct PlayMsg {
     kind: SoundKind,
+    style: ChimeStyle,
     file: Option<PathBuf>,
 }
 
@@ -84,7 +106,7 @@ fn play_on(player: &Player, msg: &PlayMsg) {
             }
         }
     }
-    append_chime(player, msg.kind);
+    append_chime(player, msg.kind, msg.style);
 }
 
 fn audio_loop(rx: mpsc::Receiver<PlayMsg>) {
@@ -127,10 +149,11 @@ fn sender() -> &'static Sender<PlayMsg> {
 
 /// Queue a notification sound. Best-effort: failures are logged on the audio
 /// thread, never surfaced to the notify flow.
-pub fn play(kind: SoundKind, file: Option<&str>) -> anyhow::Result<()> {
+pub fn play(kind: SoundKind, style: ChimeStyle, file: Option<&str>) -> anyhow::Result<()> {
     sender()
         .send(PlayMsg {
             kind,
+            style,
             file: resolve_override(file),
         })
         .map_err(|e| anyhow::anyhow!("audio thread gone: {e}"))
@@ -138,7 +161,9 @@ pub fn play(kind: SoundKind, file: Option<&str>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chime_notes, file_decodes, resolve_override, SoundKind};
+    use super::{
+        chime_notes, chime_notes_styled, file_decodes, resolve_override, ChimeStyle, SoundKind,
+    };
 
     #[test]
     fn chimes_differ_per_kind() {
@@ -148,6 +173,44 @@ mod tests {
         assert_ne!(done, request);
         for (_, len) in done.iter().chain(request.iter()) {
             assert!(!len.is_zero());
+        }
+    }
+
+    #[test]
+    fn chime_styles_differ_for_done() {
+        let styles = [
+            ChimeStyle::Default,
+            ChimeStyle::Bright,
+            ChimeStyle::Soft,
+            ChimeStyle::Pop,
+        ];
+        let seqs: Vec<_> = styles
+            .iter()
+            .map(|s| chime_notes_styled(SoundKind::Done, *s))
+            .collect();
+        for seq in &seqs {
+            assert!(!seq.is_empty());
+            for (_, len) in seq {
+                assert!(!len.is_zero());
+            }
+        }
+        for (i, a) in seqs.iter().enumerate() {
+            for b in &seqs[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn request_ignores_style() {
+        let expected = chime_notes(SoundKind::Request);
+        for style in [
+            ChimeStyle::Default,
+            ChimeStyle::Bright,
+            ChimeStyle::Soft,
+            ChimeStyle::Pop,
+        ] {
+            assert_eq!(chime_notes_styled(SoundKind::Request, style), expected);
         }
     }
 

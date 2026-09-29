@@ -4,6 +4,7 @@
   import {
     computeLayout,
     findPane,
+    findPaneAtPoint,
     findSplit,
     type LayoutNode,
   } from "./layout";
@@ -69,6 +70,56 @@
     window.addEventListener("pointerup", up);
   }
 
+  // Titlebar drag-drop: the dragged pane swaps slots with the drop target.
+  // Plain clicks never activate (5px threshold), so rename/focus are safe.
+  let dragSource = $state<string | null>(null);
+  let dragTarget = $state<string | null>(null);
+
+  function onHeaderPointerDown(paneId: string, e: PointerEvent): void {
+    if (placed.zoomed !== null) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let active = false;
+    const move = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
+        active = true;
+        dragSource = paneId;
+        document.body.classList.add("pane-dragging");
+      }
+      if (!el) return;
+      const box = el.getBoundingClientRect();
+      const fx =
+        box.width > 0 ? (ev.clientX - box.left) / box.width : Number.NaN;
+      const fy =
+        box.height > 0 ? (ev.clientY - box.top) / box.height : Number.NaN;
+      const hit = findPaneAtPoint(root, fx, fy);
+      dragTarget = hit && hit.id !== paneId ? hit.id : null;
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("keydown", cancel);
+      document.body.classList.remove("pane-dragging");
+    };
+    const up = () => {
+      const target = active ? dragTarget : null;
+      cleanup();
+      dragSource = null;
+      dragTarget = null;
+      if (target) store.swapPanes(paneId, target);
+    };
+    const cancel = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      cleanup();
+      dragSource = null;
+      dragTarget = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("keydown", cancel);
+  }
+
   function onDividerKeyDown(e: KeyboardEvent, splitId: string): void {
     if (!e.key.startsWith("Arrow")) return;
     e.preventDefault();
@@ -88,13 +139,22 @@
   {#each placed.panes as pane (pane.node.id)}
     <div
       class="slot"
+      class:drag-source={dragSource === pane.node.id}
+      class:drop-target={dragTarget === pane.node.id}
+      class:active={placed.zoomed === null &&
+        placed.panes.length > 1 &&
+        store.focusedPaneId === pane.node.id}
       hidden={placed.zoomed !== null && pane.node.id !== placed.zoomed}
       style:left={pct(pane.rect[0])}
       style:top={pct(pane.rect[1])}
       style:width={pct(pane.rect[2])}
       style:height={pct(pane.rect[3])}
     >
-      <PaneView node={pane.node} zoomed={pane.node.id === placed.zoomed} />
+      <PaneView
+        node={pane.node}
+        zoomed={pane.node.id === placed.zoomed}
+        onHeaderPointerDown={onHeaderPointerDown}
+      />
     </div>
   {/each}
   {#each placed.dividers as div (div.splitId)}
@@ -131,9 +191,29 @@
     position: absolute;
     padding: 3px;
     box-sizing: border-box;
+    outline: 1px solid var(--border);
+    outline-offset: -1px;
+    border-radius: 6px;
   }
   .slot[hidden] {
     display: none;
+  }
+  .slot.drag-source {
+    opacity: 0.55;
+  }
+  .slot.drop-target {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 6px;
+  }
+  .slot.active {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+    border-radius: 6px;
+  }
+  :global(body.pane-dragging),
+  :global(body.pane-dragging *) {
+    cursor: grabbing !important;
   }
   .divider {
     position: absolute;

@@ -554,13 +554,35 @@ export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === "string" && Object.hasOwn(THEMES, value);
 }
 
-export function themeStyle(theme: AppTheme): string {
-  const appVariables = Object.entries(theme.ui).map(
-    ([key, value]) => `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}:${value}`,
-  );
+export function themeStyle(theme: AppTheme, bgAlpha = 1): string {
+  const appVariables = Object.entries(theme.ui).map(([key, value]) => {
+    const color = TRANSLUCENT_KEYS.has(key) ? withAlpha(value, bgAlpha) : value;
+    return `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}:${color}`;
+  });
   appVariables.push(
-    `--terminal-background:${theme.terminal.background}`,
+    `--terminal-background:${withAlpha(theme.terminal.background, bgAlpha)}`,
     `--terminal-foreground:${theme.terminal.foreground}`,
   );
   return appVariables.join(";");
+}
+
+/**
+ * Lowest layers of the background stack: the root surface, the pane surface
+ * behind each terminal, and (above) the terminal surface itself. Chrome —
+ * sidebar, tab bar, headers, dialogs — keeps its own opaque paint.
+ */
+const TRANSLUCENT_KEYS = new Set(["appBg", "paneBg"]);
+
+/**
+ * Hex color with an alpha channel: withAlpha("#1e1e1e", 0.8) gives
+ * "rgba(30, 30, 30, 0.8)". Alpha 1 returns the input unchanged so default
+ * output is byte-identical; anything unparseable passes through untouched.
+ */
+export function withAlpha(color: string, alpha: number): string {
+  const a = Math.max(0, Math.min(1, Math.round(alpha * 100) / 100));
+  if (a >= 1) return color;
+  const match = /^#([\da-f]{6})$/i.exec(color.trim());
+  if (!match) return color;
+  const value = Number.parseInt(match[1], 16);
+  return `rgba(${(value >> 16) & 0xff}, ${(value >> 8) & 0xff}, ${value & 0xff}, ${a})`;
 }

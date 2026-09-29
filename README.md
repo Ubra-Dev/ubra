@@ -92,23 +92,68 @@ npm run tauri dev
   the agent exits while you're elsewhere, you get an OS notification and a
   review shortcut in the sidebar.
 - The sidebar Agents section lists working agents (green), finished ones
-  (check), unexpected stops needing review (amber), and idle known agents
-  (hollow), grouped per workspace; clicking a row jumps to its pane.
+  (check), unexpected stops needing review (amber), suspended agents
+  (blocked, red — try Ctrl+Z then `fg`), starting agents (unknown, dim),
+  and idle known agents (hollow), grouped per workspace and named by
+  working directory; clicking a row jumps to its pane.
+- Approval prompts on an agent's screen also flag it blocked (red): run
+  `claude` and trigger a permission prompt in a hidden tab to see the
+  badge. Per-agent screen rules live in
+  `<data-dir>/agent-detection/<cli>.toml` (TOML `[[blocked]]` entries with
+  `id` + `contains` substrings, all of which must appear); a file replaces
+  that CLI's bundled rules.
 - In Settings, switch Agent-finished delivery to in-app toast and finish an
   agent in another tab: a toast appears with a chime, and clicking it jumps
   to the pane. Muting that agent's CLI silences the chime but keeps the
   toast; the test-sound button previews the current chime.
 - Right-click workspaces (Rename/Close), tabs (Rename/Close), and panes
-  (Rename/Zoom/Close). Zoom fills the tab; hidden siblings keep running.
+  (Rename/Zoom/Move to new tab/Move to new workspace/Close). Zoom fills
+  the tab; hidden siblings keep running. Moved panes keep their live
+  terminals; the source tab keeps a fresh pane when emptied.
+- `Mod+Alt+Arrow` moves focus between panes, `Mod+Alt+Shift+Arrow` swaps
+  the focused pane with its neighbor, `Alt+Shift+Arrow` grows it, and
+  `Mod+Alt+T` / `Mod+Alt+N` move it to a new tab / workspace.
 - Resize/move the window, quit, and relaunch: size and position restore.
 - Keyboard shortcuts work with terminal focus: `Mod+T` new tab, `Mod+W` close
   pane, `Mod+N` new workspace, `Mod+D` / `Mod+Shift+D` split, `Mod+Enter`
   zoom, `Mod+[` / `Mod+]` switch tabs, `Mod+,` settings (`Mod` is Cmd on
   macOS, Ctrl elsewhere; the full list lives in Settings).
 - `Mod+=` / `Mod+-` / `Mod+0` resize the terminal font; the size persists.
+- `Mod+F` (or pane menu → Find) opens terminal find with incremental
+  highlight; Enter / Shift+Enter steps through matches, Esc closes.
+- Terminal scrollback is configurable in Settings → Appearance; URLs
+  printed in any pane are clickable and open in the browser.
+- Settings → Appearance has a background opacity slider (10–100%) for
+  terminal-style translucency; the sidebar, tabs, and dialogs stay solid.
 - Settings (sidebar footer, or `Mod+,`) holds launch-at-login, theme, font
   size, notification delivery, sounds and per-agent muting, the shortcut
   reference, and version info.
+
+## Headless daemon + CLI (experimental)
+
+`ubra-daemon` owns PTYs and the agent watcher without a window, serving a
+JSON-lines protocol over loopback TCP (port file at
+`<tmp>/ubra-<user>/daemon.json`); `ubra-cli` drives it — all output is
+pretty-printed JSON, and the CLI starts the daemon on demand:
+
+```sh
+cd src-tauri
+cargo run -q --bin ubra-cli -- agents        # agent states
+cargo run -q --bin ubra-cli -- agents --watch
+cargo run -q --bin ubra-cli -- spawn          # {"ok":true,"pane":1}
+cargo run -q --bin ubra-cli -- write 1 "echo hi"
+cargo run -q --bin ubra-cli -- read 1         # pane screen text
+cargo run -q --bin ubra-cli -- prompt 1 "summarize the diff"
+cargo run -q --bin ubra-cli -- send-keys 1 enter
+cargo run -q --bin ubra-cli -- wait-state 1 idle --timeout 120
+cargo run -q --bin ubra-cli -- wait-output 1 "done" --timeout 120
+cargo run -q --bin ubra-cli -- snapshot
+cargo run -q --bin ubra-cli -- shutdown
+```
+
+The GUI does not use the daemon yet (it keeps its in-process backend), and
+the protocol has no authentication — localhost-only by design, but any
+local process can drive panes. Both change before the GUI migrates.
 
 ## Roadmap
 

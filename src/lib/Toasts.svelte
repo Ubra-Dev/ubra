@@ -1,20 +1,32 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
+  import Icon from "./Icon.svelte";
   import { store } from "./store.svelte";
   import { toasts } from "./toasts.svelte.ts";
 
   function onClick(nodeId: string, id: number): void {
     toasts.dismiss(id);
-    agent.jumpToPane(nodeId);
+    // Copy toasts (and other node-less notices) dismiss only; agent toasts
+    // jump to the pane for review.
+    if (nodeId !== "") agent.jumpToPane(nodeId);
   }
 </script>
 
 {#if toasts.items.length > 0}
   <div class="stack {store.toastPosition}" role="status" aria-live="polite">
     {#each toasts.items as t (t.id)}
-      <button class="toast" onclick={() => onClick(t.nodeId, t.id)}>
-        <span class="title">{t.title}</span>
-        <span class="body">{t.body}</span>
+      <button
+        class="toast"
+        class:copy={t.kind === "copy"}
+        onclick={() => onClick(t.nodeId, t.id)}
+      >
+        <span class="toast-icon">
+          <Icon name={t.kind === "copy" ? "check" : "bell"} size={14} />
+        </span>
+        <span class="texts">
+          <span class="title">{t.title}</span>
+          <span class="body">{t.body}</span>
+        </span>
       </button>
     {/each}
   </div>
@@ -49,9 +61,9 @@
   .toast {
     pointer-events: auto;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     align-items: flex-start;
-    gap: 2px;
+    gap: 8px;
     text-align: left;
     background: var(--surface-bg);
     border: 1px solid var(--border);
@@ -66,6 +78,26 @@
   .toast:hover {
     border-color: var(--accent);
     border-left-color: var(--attention);
+  }
+  .toast-icon {
+    flex: 0 0 auto;
+    color: var(--attention);
+    margin-top: 1px;
+  }
+  .toast.copy {
+    border-left-color: var(--accent);
+  }
+  .toast.copy:hover {
+    border-left-color: var(--accent);
+  }
+  .toast.copy .toast-icon {
+    color: var(--accent);
+  }
+  .texts {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
   }
   .title {
     color: var(--text-strong);

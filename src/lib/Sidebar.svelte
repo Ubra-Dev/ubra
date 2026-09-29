@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
 
@@ -42,7 +43,7 @@
         draft = ws.name;
       }
     } else if (action === "close") {
-      store.closeWorkspace(m.id);
+      store.requestCloseWorkspace(m.id);
     }
   }
 
@@ -50,12 +51,15 @@
 
 {#if store.layout}
   <aside class="sidebar">
-    <div class="section">Workspaces</div>
+    <div class="section"><Icon name="layers" size={12} /> Workspaces</div>
     {#if agent.attention.length + agent.done.length > 0}
       {@const reviewCount = agent.attention.length + agent.done.length}
       <button class="attention" onclick={() => agent.jumpToReview()}>
-        {reviewCount}
-        {reviewCount === 1 ? "needs" : "need"} review
+        <Icon name="alert" size={12} />
+        <span>
+          {reviewCount}
+          {reviewCount === 1 ? "needs" : "need"} review
+        </span>
       </button>
     {/if}
     {#each store.layout.workspaces as ws (ws.id)}
@@ -87,7 +91,9 @@
           >
             {ws.name}
             {#if rollup === "done"}
-              <span class="done-check" title="done">&#10003;</span>
+              <span class="done-check" title="done">
+                <Icon name="check" size={10} />
+              </span>
             {:else if rollup !== "idle"}
               <span class={"dot " + rollup}></span>
             {/if}
@@ -96,9 +102,9 @@
         <button
           class="close"
           title="Close workspace"
-          onclick={() => store.closeWorkspace(ws.id)}
+          onclick={() => store.requestCloseWorkspace(ws.id)}
         >
-          &times;
+          <Icon name="x" size={12} />
         </button>
       </div>
     {/each}
@@ -107,29 +113,37 @@
       title={`New workspace (${mod}N)`}
       onclick={() => store.addWorkspace()}
     >
-      + Workspace
+      <Icon name="plus" size={12} />
+      <span>Workspace</span>
     </button>
-    <div class="section agents">Agents</div>
+    <div class="section agents"><Icon name="cpu" size={12} /> Agents</div>
     {#if agents.length === 0}
-      <div class="none">No active agents</div>
+      <div class="none">
+        <Icon name="cpu" size={12} />
+        <span>No active agents</span>
+      </div>
     {:else}
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
           <button
             class="agent-row"
-            title={a.paneTitle ?? a.tabName}
+            title={a.dirPath
+              ? `${a.dirPath} — ${a.paneTitle ?? a.tabName}`
+              : (a.paneTitle ?? a.tabName)}
             onclick={() => agent.jumpToPane(a.nodeId)}
           >
             {#if a.status === "done"}
-              <span class="done-check" title="done">&#10003;</span>
+              <span class="done-check" title="done">
+                <Icon name="check" size={10} />
+              </span>
             {:else}
               <span
                 class={"dot " + a.status}
                 title={a.status === "attention" ? "needs review" : a.status}
               ></span>
             {/if}
-            <span class="agent-name">{a.agent}</span>
+            <span class="agent-name">{a.dir}</span>
             {#if a.cli}
               <span class="agent-cli">{a.cli}</span>
             {/if}
@@ -143,7 +157,8 @@
         title={`Settings (${mod},)`}
         onclick={() => (store.settingsOpen = true)}
       >
-        Settings
+        <Icon name="settings" size={13} />
+        <span>Settings</span>
       </button>
     </div>
     {#if menu}
@@ -151,8 +166,8 @@
         x={menu.x}
         y={menu.y}
         items={[
-          { id: "rename", label: "Rename" },
-          { id: "close", label: "Close", danger: true },
+          { id: "rename", label: "Rename", icon: "edit" },
+          { id: "close", label: "Close", danger: true, icon: "x" },
         ]}
         onPick={onPick}
         onDismiss={() => (menu = null)}
@@ -175,6 +190,9 @@
     user-select: none;
   }
   .section {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -182,7 +200,9 @@
     padding: 0 6px 6px;
   }
   .section.agents {
-    margin-top: 10px;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
   }
   .ws {
     display: flex;
@@ -208,11 +228,12 @@
     white-space: nowrap;
   }
   .close {
+    display: inline-flex;
+    align-items: center;
     flex: 0 0 auto;
     background: transparent;
     border: none;
     color: var(--text-muted);
-    font-size: 13px;
     padding: 4px 8px;
     cursor: pointer;
     border-radius: 4px;
@@ -234,6 +255,9 @@
     padding: 4px 6px;
   }
   .add {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin-top: 6px;
     background: transparent;
     border: none;
@@ -249,6 +273,9 @@
     background: var(--surface-bg);
   }
   .none {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     color: var(--text-subtle);
     padding: 2px 6px;
   }
@@ -305,6 +332,9 @@
     color: var(--text-muted);
   }
   .settings-btn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     width: 100%;
     box-sizing: border-box;
     background: transparent;
@@ -321,6 +351,9 @@
     background: var(--surface-bg);
   }
   .attention {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     background: var(--attention-bg);
     border: none;
     color: var(--attention);
@@ -345,6 +378,12 @@
   .dot.working {
     background: var(--success);
   }
+  .dot.blocked {
+    background: var(--error-text);
+  }
+  .dot.unknown {
+    background: var(--text-subtle);
+  }
   .dot.attention {
     background: var(--attention);
   }
@@ -354,13 +393,10 @@
     box-sizing: border-box;
   }
   .done-check {
-    display: inline-block;
+    display: inline-flex;
     color: var(--success);
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1;
     margin-left: 6px;
-    vertical-align: baseline;
+    vertical-align: -1px;
   }
   .agent-row .done-check {
     margin-left: 0;

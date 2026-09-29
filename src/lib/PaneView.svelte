@@ -1,13 +1,21 @@
 <script lang="ts">
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { agent } from "./agent.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import type { PaneNode } from "./layout";
 
-  let { node, zoomed = false }: { node: PaneNode; zoomed?: boolean } =
-    $props();
+  let {
+    node,
+    zoomed = false,
+    onHeaderPointerDown,
+  }: {
+    node: PaneNode;
+    zoomed?: boolean;
+    onHeaderPointerDown?: (paneId: string, e: PointerEvent) => void;
+  } = $props();
 
   const isMac = isMacPlatform(navigator.platform);
   const mod = modLabel(isMac);
@@ -28,6 +36,24 @@
     }
   });
 
+  // Focus requests: bump the token so the terminal takes keyboard focus.
+  let focusToken = $state(0);
+  $effect(() => {
+    if (store.paneFocusTarget === node.id) {
+      store.paneFocusTarget = null;
+      focusToken += 1;
+    }
+  });
+
+  // Find requests: bump the token so the terminal opens its find bar.
+  let findToken = $state(0);
+  $effect(() => {
+    if (store.paneFindTarget === node.id) {
+      store.paneFindTarget = null;
+      findToken += 1;
+    }
+  });
+
   const title = $derived(
     node.title ?? node.cwd?.split("/").filter(Boolean).pop() ?? "Terminal",
   );
@@ -42,6 +68,14 @@
       store.renamePane(node.id, draft);
       editing = false;
     }
+  }
+
+  function headerPointerDown(e: PointerEvent): void {
+    // Drags start from bare header only: buttons/inputs keep their behavior,
+    // and right-clicks still open the context menu.
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button, input")) return;
+    onHeaderPointerDown?.(node.id, e);
   }
 
   function openMenu(e: MouseEvent): void {
@@ -59,8 +93,14 @@
       draft = node.title ?? "";
     } else if (action === "zoom") {
       store.toggleZoomPane(node.id);
+    } else if (action === "find") {
+      findToken += 1;
+    } else if (action === "move-tab") {
+      store.movePaneToNewTab(node.id);
+    } else if (action === "move-workspace") {
+      store.movePaneToNewWorkspace(node.id);
     } else if (action === "close") {
-      store.closePane(node.id);
+      store.requestClosePane(node.id);
     }
   }
 </script>
@@ -72,7 +112,7 @@
   onfocusin={() => store.focusPane(node.id)}
   onpointerdown={() => store.focusPane(node.id)}
 >
-  <div class="pane-header">
+  <div class="pane-header" onpointerdown={headerPointerDown}>
     {#if editing}
       <input
         class="rename"
@@ -96,8 +136,13 @@
         {title}
       </span>
     {/if}
-    {#if agentState?.state === "working"}
-      <span class="agent">{agentState.agent}</span>
+    {#if
+      agentState?.state === "working" ||
+      agentState?.state === "blocked" ||
+      agentState?.state === "unknown"}
+      <span class={"agent " + agentState.state} title={agentState.state}>
+        {agentState.agent}
+      </span>
     {/if}
     {#if zoomed}
       <button
@@ -113,30 +158,35 @@
         title={`Split right (${mod}D)`}
         onclick={() => store.splitPane(node.id, "row")}
       >
-        Split &rarr;
+        <Icon name="columns" size={12} />
       </button>
       <button
         title={`Split down (${mod}${isMac ? "⇧" : "Shift+"}D)`}
         onclick={() => store.splitPane(node.id, "col")}
       >
-        Split &darr;
+        <Icon name="rows" size={12} />
       </button>
       <button
         title={`Close pane (${mod}W)`}
-        onclick={() => store.closePane(node.id)}
+        onclick={() => store.requestClosePane(node.id)}
       >
-        &times;
+        <Icon name="x" size={12} />
       </button>
     </span>
   </div>
   <div class="term-wrap">
     {#key runId}
       <TerminalPane
+        sessionKey={node.id}
         cwd={node.cwd}
         shell={node.cmd?.[0]}
         args={node.cmd?.slice(1)}
         theme={store.theme}
         fontSize={store.termFontSize}
+        opacity={store.termOpacity / 100}
+        focusToken={focusToken}
+        findToken={findToken}
+        scrollback={store.termScrollback}
         onExit={() => (exited = true)}
         onSpawn={(id) => agent.register(id, node.id)}
         onDispose={(id) => agent.unregister(id)}
@@ -150,7 +200,8 @@
           runId += 1;
         }}
       >
-        Respawn shell
+        <Icon name="refresh" size={12} />
+        <span>Respawn shell</span>
       </button>
     {/if}
   </div>
@@ -159,9 +210,16 @@
       x={menu.x}
       y={menu.y}
       items={[
-        { id: "rename", label: "Rename" },
-        { id: "zoom", label: zoomed ? "Unzoom" : "Zoom" },
-        { id: "close", label: "Close", danger: true },
+        { id: "rename", label: "Rename", icon: "edit" },
+        {
+          id: "zoom",
+          label: zoomed ? "Unzoom" : "Zoom",
+          icon: zoomed ? "minimize" : "maximize",
+        },
+        { id: "find", label: "Find in pane", icon: "search" },
+        { id: "move-tab", label: "Move to new tab", icon: "external" },
+        { id: "move-workspace", label: "Move to new workspace", icon: "layers" },
+        { id: "close", label: "Close", danger: true, icon: "x" },
       ]}
       onPick={onPick}
       onDismiss={() => (menu = null)}
@@ -191,6 +249,8 @@
     font: 12px system-ui, sans-serif;
     color: var(--text);
     user-select: none;
+    cursor: grab;
+    touch-action: none;
   }
   .title {
     overflow: hidden;
@@ -218,6 +278,13 @@
     white-space: nowrap;
     cursor: pointer;
   }
+  .agent.blocked {
+    color: var(--error-text);
+    background: var(--error-bg);
+  }
+  .agent.unknown {
+    color: var(--text-muted);
+  }
   .zoomed {
     border: 0;
     border-radius: 4px;
@@ -239,10 +306,11 @@
     opacity: 1;
   }
   .actions button {
+    display: inline-flex;
+    align-items: center;
     background: transparent;
     border: none;
     color: var(--text);
-    font-size: 11px;
     padding: 2px 6px;
     border-radius: 4px;
     cursor: pointer;
@@ -260,6 +328,9 @@
     position: absolute;
     top: 8px;
     right: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     background: var(--accent);
     color: var(--text-strong);
     border: none;

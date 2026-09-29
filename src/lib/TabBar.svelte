@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
 
@@ -40,7 +41,7 @@
         draft = tab.name;
       }
     } else if (action === "close") {
-      store.closeTab(m.id);
+      store.requestCloseTab(m.id);
     }
   }
 </script>
@@ -80,16 +81,18 @@
             </button>
           {/if}
           {#if rollup === "done"}
-            <span class="done-check" title="done">&#10003;</span>
+            <span class="done-check" title="done">
+              <Icon name="check" size={10} />
+            </span>
           {:else if rollup !== "idle"}
             <span class={"dot " + rollup}></span>
           {/if}
           <button
             class="close"
             title={`Close tab (${mod}W closes the pane)`}
-            onclick={() => store.closeTab(tab.id)}
+            onclick={() => store.requestCloseTab(tab.id)}
           >
-            &times;
+            <Icon name="x" size={12} />
           </button>
         </div>
       {/each}
@@ -98,7 +101,7 @@
         title={`New tab (${mod}T)`}
         onclick={() => store.addTab()}
       >
-        +
+        <Icon name="plus" size={13} />
       </button>
     </div>
     {#if menu}
@@ -106,8 +109,8 @@
         x={menu.x}
         y={menu.y}
         items={[
-          { id: "rename", label: "Rename" },
-          { id: "close", label: "Close", danger: true },
+          { id: "rename", label: "Rename", icon: "edit" },
+          { id: "close", label: "Close", danger: true, icon: "x" },
         ]}
         onPick={onPick}
         onDismiss={() => (menu = null)}
@@ -163,10 +166,11 @@
     margin: 2px 0 2px 4px;
   }
   .close {
+    display: inline-flex;
+    align-items: center;
     background: transparent;
     border: none;
     color: var(--text-muted);
-    font-size: 13px;
     padding: 4px 8px 4px 4px;
     cursor: pointer;
     border-radius: 4px;
@@ -175,11 +179,12 @@
     color: var(--text-strong);
   }
   .add {
+    display: inline-flex;
+    align-items: center;
     background: transparent;
     border: none;
     color: var(--text-muted);
-    font-size: 15px;
-    padding: 2px 8px;
+    padding: 4px 8px;
     cursor: pointer;
     border-radius: 4px;
   }
@@ -197,15 +202,19 @@
   .dot.working {
     background: var(--success);
   }
+  .dot.blocked {
+    background: var(--error-text);
+  }
+  .dot.unknown {
+    background: var(--text-subtle);
+  }
   .dot.attention {
     background: var(--attention);
   }
   .done-check {
+    display: inline-flex;
     flex: 0 0 auto;
     color: var(--success);
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1;
     margin-right: 2px;
   }
 </style>

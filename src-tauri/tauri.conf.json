@@ -10,13 +10,15 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "title": "Ubra",
-        "width": 800,
-        "height": 600,
-        "theme": "Dark"
+        "width": 1200,
+        "height": 800,
+        "theme": "Dark",
+        "transparent": true
       }
     ],
     "security": {
