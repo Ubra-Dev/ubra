@@ -24,6 +24,33 @@ impl PtyEventSink for ChannelSink {
     }
 }
 
+/// Answers ConPTY's startup cursor-position query (Windows only).
+///
+/// ConPTY — and shells like PSReadLine — emit `ESC[6n` at startup and withhold
+/// all further output until the terminal replies with a cursor position
+/// report. In production xterm.js answers via `pty_write`; these headless
+/// tests must play the terminal themselves, or the pane looks permanently
+/// stuck (no output, no exit). Tracking the whole transcript also covers the
+/// query arriving split across output chunks. On Unix the query never
+/// arrives, so this is a silent no-op there.
+struct Handshake {
+    answered: bool,
+}
+
+impl Handshake {
+    fn new() -> Self {
+        Self { answered: false }
+    }
+
+    fn note_output(&mut self, manager: &PtyManager, id: PaneId, transcript: &str) {
+        if !self.answered && transcript.contains("\u{1b}[6n") {
+            self.answered = true;
+            // Best-effort: if the pane already exited, no handshake is needed.
+            let _ = manager.write(id, "\u{1b}[1;1R");
+        }
+    }
+}
+
 fn echo_command() -> (Option<String>, Vec<String>) {
     #[cfg(windows)]
     return (
@@ -46,12 +73,14 @@ fn pty_spawns_and_captures_output() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = String::new();
+    let mut handshake = Handshake::new();
     let exited_success = loop {
         let timeout = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
             Ok(Event::Output(got, data)) => {
                 assert_eq!(got, id);
                 transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
             }
             Ok(Event::Exit(got, success)) => {
                 assert_eq!(got, id);
@@ -73,15 +102,37 @@ fn pty_kill_terminates_live_pane() {
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     // Bare interactive shell blocks on input until killed.
     let id = manager.spawn(None, None, Vec::new(), 80, 24).unwrap();
-    // Give the child a moment to start so kill targets a live process.
-    std::thread::sleep(Duration::from_millis(500));
+    // Drain startup output (answering the ConPTY handshake on Windows) so the
+    // child is actually running — not blocked on an unanswered cursor query —
+    // when killed. Must happen before kill: kill drops the session, and with
+    // it the ability to write the handshake reply.
+    let mut handshake = Handshake::new();
+    let mut transcript = String::new();
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before kill"),
+            Err(_) => break, // Quiet: warmed up.
+        }
+    }
     manager.kill(id).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let timeout = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
-            Ok(Event::Output(_, _)) => continue,
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
             Ok(Event::Exit(got, _)) => {
                 assert_eq!(got, id);
                 return;
