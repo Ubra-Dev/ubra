@@ -21,8 +21,12 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 - **Tray behavior** — closing the window hides the app to the tray; agents keep
   running and the tray menu brings it back.
 - **Agent awareness** — panes running agent CLIs (`claude`, `codex`, `opencode`, …)
-  surface working/finished badges in pane headers, tabs, and the sidebar, plus OS
-  notifications when an agent finishes while you're elsewhere.
+  surface working/finished badges in pane headers, tabs, and the sidebar, plus a
+  notification and sound when an agent finishes while you're elsewhere.
+- **Notifications & sounds** — finished-agent alerts delivered as a system
+  notification, an in-app toast, or off, with done/needs-attention chimes
+  (custom sound file and per-agent muting supported) that play even when the
+  window is hidden to the tray.
 
 ## Install
 
@@ -86,10 +90,14 @@ npm run tauri dev
 - Run an agent CLI (e.g. `claude`, `codex`, `opencode`) in one pane and switch
   to another tab: the pane header, tab, and sidebar show a working badge. When
   the agent exits while you're elsewhere, you get an OS notification and a
-  "needs attention" shortcut in the sidebar.
+  review shortcut in the sidebar.
 - The sidebar Agents section lists working agents (green), finished ones
-  needing review (amber), and idle known agents (hollow), grouped per
-  workspace; clicking a row jumps to its pane.
+  (check), unexpected stops needing review (amber), and idle known agents
+  (hollow), grouped per workspace; clicking a row jumps to its pane.
+- In Settings, switch Agent-finished delivery to in-app toast and finish an
+  agent in another tab: a toast appears with a chime, and clicking it jumps
+  to the pane. Muting that agent's CLI silences the chime but keeps the
+  toast; the test-sound button previews the current chime.
 - Right-click workspaces (Rename/Close), tabs (Rename/Close), and panes
   (Rename/Zoom/Close). Zoom fills the tab; hidden siblings keep running.
 - Resize/move the window, quit, and relaunch: size and position restore.
@@ -99,7 +107,8 @@ npm run tauri dev
   macOS, Ctrl elsewhere; the full list lives in Settings).
 - `Mod+=` / `Mod+-` / `Mod+0` resize the terminal font; the size persists.
 - Settings (sidebar footer, or `Mod+,`) holds launch-at-login, theme, font
-  size, the shortcut reference, and version info.
+  size, notification delivery, sounds and per-agent muting, the shortcut
+  reference, and version info.
 
 ## Roadmap
 

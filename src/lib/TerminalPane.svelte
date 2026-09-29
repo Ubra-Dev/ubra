@@ -12,24 +12,44 @@
     shell?: string;
     args?: string[];
     theme: AppTheme;
+    fontSize: number;
     onExit?: () => void;
     onSpawn?: (liveId: number) => void;
     onDispose?: (liveId: number) => void;
   }
-  let { cwd, shell, args, theme, onExit, onSpawn, onDispose }: Props = $props();
+  let {
+    cwd,
+    shell,
+    args,
+    theme,
+    fontSize,
+    onExit,
+    onSpawn,
+    onDispose,
+  }: Props = $props();
 
   let container: HTMLDivElement | undefined = $state();
   let terminal: Terminal | null = null;
+  let refit: (() => void) | null = null;
 
   $effect(() => {
     const palette = theme.terminal;
     if (terminal) terminal.options.theme = { ...palette };
   });
 
+  $effect(() => {
+    const px = fontSize;
+    if (terminal) {
+      terminal.options.fontSize = px;
+      // Refitting reflows and reports the new grid so the PTY resizes too.
+      refit?.();
+    }
+  });
+
   onMount(() => {
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize,
       fontFamily: "Menlo, Consolas, 'Courier New', monospace",
       theme: { ...theme.terminal },
     });
@@ -73,6 +93,7 @@
       }
     };
     ensureFit();
+    refit = ensureFit;
 
     const resizeObserver = new ResizeObserver(ensureFit);
     resizeObserver.observe(container!);
@@ -154,6 +175,7 @@
     return () => {
       disposed = true;
       terminal = null;
+      refit = null;
       resizeObserver.disconnect();
       unlistens.forEach((u) => u());
       if (paneId !== null) {

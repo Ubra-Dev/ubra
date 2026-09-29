@@ -23,9 +23,9 @@ fn scratch_dir() -> std::path::PathBuf {
 /// Create a long-running executable named like a known agent CLI. Returns
 /// (program, args) to spawn it in a pane.
 #[cfg(unix)]
-fn fake_agent(dir: &std::path::Path) -> (String, Vec<String>) {
+fn fake_agent(dir: &std::path::Path, name: &str) -> (String, Vec<String>) {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("codex");
+    let path = dir.join(name);
     std::fs::write(&path, "#!/bin/sh\nsleep 60\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     (path.to_string_lossy().into_owned(), Vec::new())
@@ -34,8 +34,8 @@ fn fake_agent(dir: &std::path::Path) -> (String, Vec<String>) {
 /// Windows cannot run extensionless scripts; copy a real exe under an
 /// agent-like name instead.
 #[cfg(windows)]
-fn fake_agent(dir: &std::path::Path) -> (String, Vec<String>) {
-    let dest = dir.join("codex.exe");
+fn fake_agent(dir: &std::path::Path, name: &str) -> (String, Vec<String>) {
+    let dest = dir.join(format!("{name}.exe"));
     let system32 = std::env::var("SystemRoot")
         .map(|r| format!("{r}\\System32\\timeout.exe"))
         .unwrap();
@@ -46,11 +46,37 @@ fn fake_agent(dir: &std::path::Path) -> (String, Vec<String>) {
     )
 }
 
+/// Poll until the pane scans as working with the expected label + CLI, or panic.
+fn expect_working(
+    manager: &PtyManager,
+    sys: &mut sysinfo::System,
+    pane: PaneId,
+    agent: &str,
+    cli: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let states = poll_once(manager, sys);
+        if states.get(&pane)
+            == Some(&PaneAgent::Working {
+                agent: agent.to_string(),
+                cli: cli.to_string(),
+            })
+        {
+            return;
+        }
+        if Instant::now() > deadline {
+            panic!("pane {pane:?} never scanned as working {agent} (states: {states:?})");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
 fn detects_agent_process_in_pane() {
     let dir = scratch_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let (program, args) = fake_agent(&dir);
+    let (program, args) = fake_agent(&dir, "codex");
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
     let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
@@ -66,6 +92,7 @@ fn detects_agent_process_in_pane() {
         if agent_state
             == Some(&PaneAgent::Working {
                 agent: "Codex".to_string(),
+                cli: "codex".to_string(),
             })
             && shell_state == Some(&PaneAgent::Idle)
         {
@@ -84,5 +111,23 @@ fn detects_agent_process_in_pane() {
         !states.contains_key(&agent_pane) && !states.contains_key(&shell_pane),
         "killed panes must leave the scan, got: {states:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn detects_versioned_muse_binary_in_pane() {
+    // The `muse` launcher execs a versioned `muse-bin-<version>-<build>`
+    // binary; a pane running it must scan as working "Muse".
+    let dir = scratch_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let (program, args) = fake_agent(&dir, "muse-bin-1.4.1-R4503.1");
+
+    let manager = PtyManager::new(std::sync::Arc::new(Sink));
+    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+
+    let mut sys = sysinfo::System::new_all();
+    expect_working(&manager, &mut sys, agent_pane, "Muse", "muse");
+
+    manager.kill(agent_pane).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

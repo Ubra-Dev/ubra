@@ -1,16 +1,13 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
-  import { THEMES, THEME_IDS, isThemeId } from "./themes";
 
   let editing = $state<string | null>(null);
   let draft = $state("");
-  let autostart = $state(false);
-  let autostartLoaded = $state(false);
   const agents = $derived(agent.activeAgents());
+  const mod = modLabel(isMacPlatform(navigator.platform));
 
   function focus(el: HTMLInputElement): void {
     el.focus();
@@ -49,37 +46,16 @@
     }
   }
 
-  onMount(() => {
-    invoke<boolean>("autostart_enabled")
-      .then((v) => {
-        autostart = v;
-        autostartLoaded = true;
-      })
-      .catch((e) => console.error("ubra: autostart check failed", e));
-  });
-
-  function onAutostartChange(e: Event): void {
-    const checked = (e.target as HTMLInputElement).checked;
-    autostart = checked;
-    invoke("autostart_set", { enabled: checked }).catch((err) => {
-      console.error("ubra: autostart update failed", err);
-      autostart = !checked;
-    });
-  }
-
-  function onThemeChange(e: Event): void {
-    const value = (e.target as HTMLSelectElement).value;
-    if (isThemeId(value)) store.setTheme(value);
-  }
 </script>
 
 {#if store.layout}
   <aside class="sidebar">
     <div class="section">Workspaces</div>
-    {#if agent.attention.length > 0}
-      <button class="attention" onclick={() => agent.jumpToAttention()}>
-        {agent.attention.length}
-        {agent.attention.length === 1 ? "needs" : "need"} attention
+    {#if agent.attention.length + agent.done.length > 0}
+      {@const reviewCount = agent.attention.length + agent.done.length}
+      <button class="attention" onclick={() => agent.jumpToReview()}>
+        {reviewCount}
+        {reviewCount === 1 ? "needs" : "need"} review
       </button>
     {/if}
     {#each store.layout.workspaces as ws (ws.id)}
@@ -110,7 +86,9 @@
             }}
           >
             {ws.name}
-            {#if rollup !== "idle"}
+            {#if rollup === "done"}
+              <span class="done-check" title="done">&#10003;</span>
+            {:else if rollup !== "idle"}
               <span class={"dot " + rollup}></span>
             {/if}
           </button>
@@ -124,7 +102,13 @@
         </button>
       </div>
     {/each}
-    <button class="add" onclick={() => store.addWorkspace()}>+ Workspace</button>
+    <button
+      class="add"
+      title={`New workspace (${mod}N)`}
+      onclick={() => store.addWorkspace()}
+    >
+      + Workspace
+    </button>
     <div class="section agents">Agents</div>
     {#if agents.length === 0}
       <div class="none">No active agents</div>
@@ -132,35 +116,35 @@
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
-          <button class="agent-row" onclick={() => agent.jumpToPane(a.nodeId)}>
-            <span class={"dot " + a.status}></span>
+          <button
+            class="agent-row"
+            title={a.paneTitle ?? a.tabName}
+            onclick={() => agent.jumpToPane(a.nodeId)}
+          >
+            {#if a.status === "done"}
+              <span class="done-check" title="done">&#10003;</span>
+            {:else}
+              <span
+                class={"dot " + a.status}
+                title={a.status === "attention" ? "needs review" : a.status}
+              ></span>
+            {/if}
             <span class="agent-name">{a.agent}</span>
-            <span class="agent-status">
-              {a.status === "working" ? "working" : "needs review"}
-            </span>
-            <span class="agent-loc">{a.paneTitle ?? a.tabName}</span>
+            {#if a.cli}
+              <span class="agent-cli">{a.cli}</span>
+            {/if}
           </button>
         {/each}
       {/each}
     {/if}
     <div class="footer">
-      <label class="theme-setting">
-        <span>Theme</span>
-        <select value={store.themeId} onchange={onThemeChange} aria-label="App theme">
-          {#each THEME_IDS as id}
-            <option value={id}>{THEMES[id].name}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="autostart-setting">
-        <input
-          type="checkbox"
-          checked={autostart}
-          disabled={!autostartLoaded}
-          onchange={onAutostartChange}
-        />
-        Launch at login
-      </label>
+      <button
+        class="settings-btn"
+        title={`Settings (${mod},)`}
+        onclick={() => (store.settingsOpen = true)}
+      >
+        Settings
+      </button>
     </div>
     {#if menu}
       <ContextMenu
@@ -305,17 +289,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .agent-status,
-  .agent-loc {
+  .agent-cli {
     flex: 0 0 auto;
+    margin-left: auto;
+    max-width: 96px;
     color: var(--text-subtle);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .agent-loc {
-    margin-left: auto;
-    max-width: 62px;
   }
   .footer {
     margin-top: auto;
@@ -323,29 +304,21 @@
     border-top: 1px solid var(--border);
     color: var(--text-muted);
   }
-  .theme-setting {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 5px;
-    margin-bottom: 10px;
-    color: var(--text-muted);
-  }
-  .theme-setting select {
+  .settings-btn {
     width: 100%;
     box-sizing: border-box;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 7px;
-    background: var(--input-bg);
-    color: var(--text);
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
     font: inherit;
-  }
-  .autostart-setting {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    text-align: left;
+    padding: 6px;
+    border-radius: 6px;
     cursor: pointer;
+  }
+  .settings-btn:hover {
+    color: var(--text-strong);
+    background: var(--surface-bg);
   }
   .attention {
     background: var(--attention-bg);
@@ -374,5 +347,23 @@
   }
   .dot.attention {
     background: var(--attention);
+  }
+  .dot.idle {
+    background: transparent;
+    border: 1px solid var(--text-subtle);
+    box-sizing: border-box;
+  }
+  .done-check {
+    display: inline-block;
+    color: var(--success);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    margin-left: 6px;
+    vertical-align: baseline;
+  }
+  .agent-row .done-check {
+    margin-left: 0;
+    flex: 0 0 auto;
   }
 </style>

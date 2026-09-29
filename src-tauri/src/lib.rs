@@ -1,6 +1,7 @@
 pub mod agent_watch;
 pub mod layout_store;
 pub mod pty_manager;
+pub mod sound;
 
 use agent_watch::poll_once;
 use layout_store::{data_dir, load_layout_from, save_layout_to};
@@ -87,14 +88,46 @@ fn autostart_set(app: AppHandle, enabled: bool) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct AppInfo {
+    name: String,
+    version: String,
+}
+
 #[tauri::command]
-fn notify_agent(app: AppHandle, title: String, body: String) -> Result<(), String> {
+fn app_info() -> AppInfo {
+    AppInfo {
+        name: "Ubra".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+#[tauri::command]
+fn notify_agent(
+    app: AppHandle,
+    title: String,
+    body: String,
+    kind: Option<sound::SoundKind>,
+) -> Result<(), String> {
+    if let Some(kind) = kind {
+        eprintln!("ubra: agent notification ({kind:?}): {title}");
+    }
     app.notification()
         .builder()
         .title(title)
         .body(body)
         .show()
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn play_sound(kind: sound::SoundKind, file: Option<String>) -> Result<(), String> {
+    sound::play(kind, file.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_sound_file(path: String) -> bool {
+    sound::file_decodes(&path)
 }
 
 #[derive(Default)]
@@ -229,7 +262,10 @@ pub fn run() {
             save_layout,
             autostart_enabled,
             autostart_set,
-            notify_agent
+            notify_agent,
+            play_sound,
+            check_sound_file,
+            app_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

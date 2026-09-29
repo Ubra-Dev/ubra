@@ -4,6 +4,8 @@ import {
   activeWorkspace,
   clearStaleZoom,
   closePaneInTab,
+  collectPaneIds,
+  countPanes,
   defaultLayout,
   defaultTab,
   defaultWorkspace,
@@ -17,17 +19,42 @@ import {
   type Workspace,
 } from "./layout";
 import {
+  DEFAULT_DELIVERY,
+  DEFAULT_TOAST_POSITION,
+  parseDelivery,
+  parseToastPosition,
+  type NotifyDelivery,
+  type ToastPosition,
+} from "./notify";
+import {
   DEFAULT_THEME_ID,
   THEMES,
   isThemeId,
   type ThemeId,
 } from "./themes";
 
+export const DEFAULT_TERM_FONT_SIZE = 13;
+export const MIN_TERM_FONT_SIZE = 9;
+export const MAX_TERM_FONT_SIZE = 24;
+
 class AppStore {
   layout = $state<Layout | null>(null);
   loaded = $state(false);
   loadError = $state<string | null>(null);
   themeId = $state<ThemeId>(DEFAULT_THEME_ID);
+  termFontSize = $state<number>(DEFAULT_TERM_FONT_SIZE);
+  notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
+  toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
+  soundEnabled = $state<boolean>(true);
+  /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
+  mutedAgents = $state<string[]>(["droid"]);
+  /** Custom notification sound file (blank = synthesized default chime). */
+  soundFile = $state<string>("");
+  settingsOpen = $state(false);
+  /** Last-focused pane node id (session-only, for shortcuts). */
+  focusedPaneId = $state<string | null>(null);
+  /** Pane node id that should enter rename editing (F2); cleared on take. */
+  paneRenameTarget = $state<string | null>(null);
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   get theme() {
@@ -48,8 +75,31 @@ class AppStore {
     try {
       const savedTheme = window.localStorage.getItem("ubra.theme");
       if (isThemeId(savedTheme)) this.themeId = savedTheme;
+      const savedFont = window.localStorage.getItem("ubra.termFontSize");
+      if (savedFont !== null) this.termFontSize = this.clampFontSize(Number(savedFont));
+      const savedDelivery = window.localStorage.getItem("ubra.notifyDelivery");
+      if (savedDelivery !== null) this.notifyDelivery = parseDelivery(savedDelivery);
+      const savedPosition = window.localStorage.getItem("ubra.toastPosition");
+      if (savedPosition !== null) this.toastPosition = parseToastPosition(savedPosition);
+      const savedSound = window.localStorage.getItem("ubra.soundEnabled");
+      if (savedSound !== null) this.soundEnabled = savedSound !== "false";
+      try {
+        const savedMuted = window.localStorage.getItem("ubra.mutedAgents");
+        if (savedMuted !== null) {
+          const parsed: unknown = JSON.parse(savedMuted);
+          if (Array.isArray(parsed)) {
+            this.mutedAgents = parsed.filter(
+              (v): v is string => typeof v === "string",
+            );
+          }
+        }
+      } catch {
+        // Keep the default mute list when the saved value is corrupt.
+      }
+      const savedFile = window.localStorage.getItem("ubra.soundFile");
+      if (savedFile !== null) this.soundFile = savedFile;
     } catch {
-      // The app can still start with its default theme if storage is unavailable.
+      // The app can still start with its defaults if storage is unavailable.
     }
 
     try {
@@ -75,6 +125,73 @@ class AppStore {
     } catch (e) {
       console.error("ubra: failed to save theme", e);
     }
+  }
+
+  private clampFontSize(px: number): number {
+    if (!Number.isFinite(px)) return DEFAULT_TERM_FONT_SIZE;
+    return Math.min(
+      MAX_TERM_FONT_SIZE,
+      Math.max(MIN_TERM_FONT_SIZE, Math.round(px)),
+    );
+  }
+
+  setTermFontSize(px: number): void {
+    const clamped = this.clampFontSize(px);
+    if (clamped === this.termFontSize) return;
+    this.termFontSize = clamped;
+    try {
+      window.localStorage.setItem("ubra.termFontSize", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save terminal font size", e);
+    }
+  }
+
+  bumpTermFontSize(delta: number): void {
+    this.setTermFontSize(this.termFontSize + delta);
+  }
+
+  resetTermFontSize(): void {
+    this.setTermFontSize(DEFAULT_TERM_FONT_SIZE);
+  }
+
+  private savePref(key: string, value: string): void {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (e) {
+      console.error(`ubra: failed to save ${key}`, e);
+    }
+  }
+
+  setNotifyDelivery(delivery: NotifyDelivery): void {
+    this.notifyDelivery = delivery;
+    this.savePref("ubra.notifyDelivery", delivery);
+  }
+
+  setToastPosition(position: ToastPosition): void {
+    this.toastPosition = position;
+    this.savePref("ubra.toastPosition", position);
+  }
+
+  setSoundEnabled(enabled: boolean): void {
+    this.soundEnabled = enabled;
+    this.savePref("ubra.soundEnabled", String(enabled));
+  }
+
+  setSoundFile(path: string): void {
+    this.soundFile = path;
+    this.savePref("ubra.soundFile", path);
+  }
+
+  setAgentMuted(cli: string, muted: boolean): void {
+    const lower = cli.toLowerCase();
+    this.mutedAgents = muted
+      ? [...new Set([...this.mutedAgents, lower])]
+      : this.mutedAgents.filter((m) => m.toLowerCase() !== lower);
+    this.savePref("ubra.mutedAgents", JSON.stringify(this.mutedAgents));
+  }
+
+  isAgentMuted(cli: string): boolean {
+    return this.mutedAgents.some((m) => m.toLowerCase() === cli.toLowerCase());
   }
 
   saveSoon(immediate = false): void {
@@ -226,6 +343,57 @@ class AppStore {
     this.layout.activeWorkspaceId = found.ws.id;
     found.ws.activeTabId = found.tab.id;
     this.saveSoon();
+  }
+
+  focusPane(nodeId: string): void {
+    this.focusedPaneId = nodeId;
+  }
+
+  /** Shortcut target: focused pane when it is in the active tab, else its first pane. */
+  currentPane(): { tab: Tab; paneId: string } | null {
+    const ws = this.workspace();
+    if (!ws) return null;
+    const tab = activeTab(ws);
+    if (this.focusedPaneId && findPane(tab.root, this.focusedPaneId)) {
+      return { tab, paneId: this.focusedPaneId };
+    }
+    const first = collectPaneIds(tab.root)[0];
+    return first ? { tab, paneId: first } : null;
+  }
+
+  cycleTab(dir: 1 | -1): void {
+    const ws = this.workspace();
+    if (!ws || ws.tabs.length < 2) return;
+    const at = ws.tabs.findIndex((t) => t.id === ws.activeTabId);
+    const cur = at < 0 ? 0 : at;
+    this.switchTab(ws.tabs[(cur + dir + ws.tabs.length) % ws.tabs.length].id);
+  }
+
+  cycleWorkspace(dir: 1 | -1): void {
+    if (!this.layout || this.layout.workspaces.length < 2) return;
+    const all = this.layout.workspaces;
+    const at = all.findIndex((w) => w.id === this.layout!.activeWorkspaceId);
+    const cur = at < 0 ? 0 : at;
+    this.switchWorkspace(all[(cur + dir + all.length) % all.length].id);
+  }
+
+  jumpTab(index: number): void {
+    const ws = this.workspace();
+    const tab = ws?.tabs[index];
+    if (tab) this.switchTab(tab.id);
+  }
+
+  /** Close the shortcut-target pane; when it is the tab's last pane, close the tab. */
+  closePaneOrTab(): void {
+    const cur = this.currentPane();
+    if (!cur) return;
+    if (countPanes(cur.tab.root) > 1) this.closePane(cur.paneId);
+    else this.closeTab(cur.tab.id);
+  }
+
+  requestPaneRename(): void {
+    const cur = this.currentPane();
+    if (cur) this.paneRenameTarget = cur.paneId;
   }
 
   paneSizesChanged(): void {

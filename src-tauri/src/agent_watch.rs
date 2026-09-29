@@ -6,6 +6,8 @@
 //! target exactly equals a known agent binary name (case-insensitive,
 //! `.exe`-tolerant). Wrapper scripts named like an agent match via the
 //! script-target rule (see [`script_target`][self::script_target]).
+//! The one exception is versioned binaries such as Muse's
+//! `muse-bin-<version>-<build>`, which match by prefix (see [`match_agent`]).
 
 use crate::pty_manager::PaneId;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -53,7 +55,7 @@ pub const AGENT_TABLE: &[(&str, &str)] = &[
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum PaneAgent {
-    Working { agent: String },
+    Working { agent: String, cli: String },
     Idle,
 }
 
@@ -65,13 +67,23 @@ pub struct PaneRoots {
 }
 
 /// Match an executable/process-name stem against the agent table.
-pub fn match_agent(stem: &str) -> Option<&'static str> {
+///
+/// Returns the canonical `(cli, label)` pair: `cli` is the binary name from
+/// [`AGENT_TABLE`] (what the user typed), `label` is the display name.
+/// Besides exact matches, recognizes versioned `muse-bin-*` binaries: the
+/// `muse` launcher is a shell script that execs `muse-bin-<version>-<build>`
+/// (e.g. `muse-bin-1.4.1-R4503.1`), so the running agent process never bears
+/// the bare `muse` name; those map to canonical cli `muse`.
+pub fn match_agent(stem: &str) -> Option<(&'static str, &'static str)> {
     let lower = stem.to_lowercase();
     let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
-    AGENT_TABLE
-        .iter()
-        .find(|(name, _)| *name == stem)
-        .map(|(_, label)| *label)
+    if let Some(&(cli, label)) = AGENT_TABLE.iter().find(|(name, _)| *name == stem) {
+        return Some((cli, label));
+    }
+    if stem == "muse-bin" || stem.starts_with("muse-bin-") {
+        return Some(("muse", "Muse"));
+    }
+    None
 }
 
 /// Script interpreters whose argv[1] names the executed script.
@@ -117,28 +129,28 @@ fn script_target(cmd: &[std::ffi::OsString]) -> Option<&str> {
     stem_of(std::ffi::OsStr::new(script))
 }
 
-fn identify(proc: &Process) -> Option<&'static str> {
+fn identify(proc: &Process) -> Option<(&'static str, &'static str)> {
     if let Some(exe) = proc.exe() {
         if let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) {
-            if let Some(label) = match_agent(stem) {
-                return Some(label);
+            if let Some(found) = match_agent(stem) {
+                return Some(found);
             }
         }
     }
-    if let Some(label) = match_agent(&proc.name().to_string_lossy()) {
-        return Some(label);
+    if let Some(found) = match_agent(&proc.name().to_string_lossy()) {
+        return Some(found);
     }
     if let Some(argv0) = proc.cmd().first() {
         if let Some(stem) = stem_of(argv0) {
             let stem = stem.strip_prefix('-').unwrap_or(stem); // login shells: "-zsh"
-            if let Some(label) = match_agent(stem) {
-                return Some(label);
+            if let Some(found) = match_agent(stem) {
+                return Some(found);
             }
         }
     }
     if let Some(script) = script_target(proc.cmd()) {
-        if let Some(label) = match_agent(script) {
-            return Some(label);
+        if let Some(found) = match_agent(script) {
+            return Some(found);
         }
     }
     None
@@ -162,8 +174,9 @@ pub fn scan_panes(sys: &System, panes: &[PaneRoots]) -> BTreeMap<PaneId, PaneAge
             } else {
                 find_agent(processes, &children, Pid::from_u32(pane.root_pid))
             };
-            let state = agent.map_or(PaneAgent::Idle, |a| PaneAgent::Working {
-                agent: a.to_string(),
+            let state = agent.map_or(PaneAgent::Idle, |(cli, label)| PaneAgent::Working {
+                agent: label.to_string(),
+                cli: cli.to_string(),
             });
             (pane.id, state)
         })
@@ -174,7 +187,7 @@ fn find_agent(
     processes: &HashMap<Pid, Process>,
     children: &HashMap<Pid, Vec<Pid>>,
     root: Pid,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'static str)> {
     let mut seen = HashSet::new();
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {
@@ -182,8 +195,8 @@ fn find_agent(
             continue;
         }
         if let Some(proc) = processes.get(&pid) {
-            if let Some(label) = identify(proc) {
-                return Some(label);
+            if let Some(found) = identify(proc) {
+                return Some(found);
             }
         }
         if let Some(kids) = children.get(&pid) {
@@ -220,38 +233,53 @@ mod tests {
 
     #[test]
     fn known_agents_match() {
-        assert_eq!(match_agent("claude"), Some("Claude Code"));
-        assert_eq!(match_agent("codex"), Some("Codex"));
-        assert_eq!(match_agent("cursor-agent"), Some("Cursor Agent CLI"));
-        assert_eq!(match_agent("opencode"), Some("OpenCode"));
-        assert_eq!(match_agent("copilot"), Some("GitHub Copilot CLI"));
-        assert_eq!(match_agent("muse"), Some("Muse"));
-        assert_eq!(match_agent("pi"), Some("Pi"));
-        assert_eq!(match_agent("omp"), Some("OMP"));
+        assert_eq!(match_agent("claude"), Some(("claude", "Claude Code")));
+        assert_eq!(match_agent("codex"), Some(("codex", "Codex")));
+        assert_eq!(
+            match_agent("cursor-agent"),
+            Some(("cursor-agent", "Cursor Agent CLI"))
+        );
+        assert_eq!(match_agent("opencode"), Some(("opencode", "OpenCode")));
+        assert_eq!(
+            match_agent("copilot"),
+            Some(("copilot", "GitHub Copilot CLI"))
+        );
+        assert_eq!(match_agent("muse"), Some(("muse", "Muse")));
+        assert_eq!(match_agent("pi"), Some(("pi", "Pi")));
+        assert_eq!(match_agent("omp"), Some(("omp", "OMP")));
     }
 
     #[test]
     fn extended_agents_match() {
         // Every agent beyond the original core table.
-        assert_eq!(match_agent("kimi"), Some("Kimi Code CLI"));
-        assert_eq!(match_agent("hermes"), Some("Hermes Agent"));
-        assert_eq!(match_agent("qoder"), Some("Qoder CLI"));
-        assert_eq!(match_agent("qodercli"), Some("Qoder CLI"));
-        assert_eq!(match_agent("letta"), Some("Letta Code"));
-        assert_eq!(match_agent("kilo"), Some("Kilo Code CLI"));
-        assert_eq!(match_agent("mastracode"), Some("MastraCode"));
-        assert_eq!(match_agent("antigravity"), Some("Antigravity CLI"));
-        assert_eq!(match_agent("antigravity-cli"), Some("Antigravity CLI"));
-        assert_eq!(match_agent("maki"), Some("Maki"));
+        assert_eq!(match_agent("kimi"), Some(("kimi", "Kimi Code CLI")));
+        assert_eq!(match_agent("hermes"), Some(("hermes", "Hermes Agent")));
+        assert_eq!(match_agent("qoder"), Some(("qoder", "Qoder CLI")));
+        assert_eq!(match_agent("qodercli"), Some(("qodercli", "Qoder CLI")));
+        assert_eq!(match_agent("letta"), Some(("letta", "Letta Code")));
+        assert_eq!(match_agent("kilo"), Some(("kilo", "Kilo Code CLI")));
+        assert_eq!(
+            match_agent("mastracode"),
+            Some(("mastracode", "MastraCode"))
+        );
+        assert_eq!(
+            match_agent("antigravity"),
+            Some(("antigravity", "Antigravity CLI"))
+        );
+        assert_eq!(
+            match_agent("antigravity-cli"),
+            Some(("antigravity-cli", "Antigravity CLI"))
+        );
+        assert_eq!(match_agent("maki"), Some(("maki", "Maki")));
     }
 
     #[test]
     fn matching_is_case_insensitive_and_exe_tolerant() {
-        assert_eq!(match_agent("Claude"), Some("Claude Code"));
-        assert_eq!(match_agent("codex.exe"), Some("Codex"));
-        assert_eq!(match_agent("CODEX.EXE"), Some("Codex"));
-        assert_eq!(match_agent("Pi.EXE"), Some("Pi"));
-        assert_eq!(match_agent("OMP"), Some("OMP"));
+        assert_eq!(match_agent("Claude"), Some(("claude", "Claude Code")));
+        assert_eq!(match_agent("codex.exe"), Some(("codex", "Codex")));
+        assert_eq!(match_agent("CODEX.EXE"), Some(("codex", "Codex")));
+        assert_eq!(match_agent("Pi.EXE"), Some(("pi", "Pi")));
+        assert_eq!(match_agent("OMP"), Some(("omp", "OMP")));
     }
 
     #[test]
@@ -267,9 +295,26 @@ mod tests {
             "python3",
             "",
             "my-claude-notes",
+            "muse-notes",
+            "muse-binary",
         ] {
             assert_eq!(match_agent(name), None, "unexpected match for {name:?}");
         }
+    }
+
+    #[test]
+    fn versioned_muse_binaries_match() {
+        // The `muse` launcher execs a versioned binary; the running process
+        // never bears the bare `muse` name.
+        assert_eq!(
+            match_agent("muse-bin-1.4.1-R4503.1"),
+            Some(("muse", "Muse"))
+        );
+        // `file_stem` strips the trailing dotted component from exe/argv0.
+        assert_eq!(match_agent("muse-bin-1.4.1-R4503"), Some(("muse", "Muse")));
+        assert_eq!(match_agent("muse-bin"), Some(("muse", "Muse")));
+        assert_eq!(match_agent("MUSE-BIN-2.0.0"), Some(("muse", "Muse")));
+        assert_eq!(match_agent("muse-bin-1.2.3.exe"), Some(("muse", "Muse")));
     }
 
     #[test]

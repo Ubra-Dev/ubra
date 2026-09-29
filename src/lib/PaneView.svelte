@@ -2,11 +2,15 @@
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { agent } from "./agent.svelte";
+  import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import type { PaneNode } from "./layout";
 
   let { node, zoomed = false }: { node: PaneNode; zoomed?: boolean } =
     $props();
+
+  const isMac = isMacPlatform(navigator.platform);
+  const mod = modLabel(isMac);
 
   let runId = $state(0);
   let exited = $state(false);
@@ -14,6 +18,15 @@
   let draft = $state("");
   let menu = $state<{ x: number; y: number } | null>(null);
   const agentState = $derived(agent.paneState(node.id));
+
+  // F2 rename: the matching pane takes the request and clears it.
+  $effect(() => {
+    if (store.paneRenameTarget === node.id) {
+      editing = true;
+      draft = node.title ?? "";
+      store.paneRenameTarget = null;
+    }
+  });
 
   const title = $derived(
     node.title ?? node.cwd?.split("/").filter(Boolean).pop() ?? "Terminal",
@@ -53,7 +66,12 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="pane-view" oncontextmenu={openMenu}>
+<div
+  class="pane-view"
+  oncontextmenu={openMenu}
+  onfocusin={() => store.focusPane(node.id)}
+  onpointerdown={() => store.focusPane(node.id)}
+>
   <div class="pane-header">
     {#if editing}
       <input
@@ -91,13 +109,24 @@
       </button>
     {/if}
     <span class="actions">
-      <button title="Split right" onclick={() => store.splitPane(node.id, "row")}>
+      <button
+        title={`Split right (${mod}D)`}
+        onclick={() => store.splitPane(node.id, "row")}
+      >
         Split &rarr;
       </button>
-      <button title="Split down" onclick={() => store.splitPane(node.id, "col")}>
+      <button
+        title={`Split down (${mod}${isMac ? "⇧" : "Shift+"}D)`}
+        onclick={() => store.splitPane(node.id, "col")}
+      >
         Split &darr;
       </button>
-      <button title="Close pane" onclick={() => store.closePane(node.id)}>&times;</button>
+      <button
+        title={`Close pane (${mod}W)`}
+        onclick={() => store.closePane(node.id)}
+      >
+        &times;
+      </button>
     </span>
   </div>
   <div class="term-wrap">
@@ -107,6 +136,7 @@
         shell={node.cmd?.[0]}
         args={node.cmd?.slice(1)}
         theme={store.theme}
+        fontSize={store.termFontSize}
         onExit={() => (exited = true)}
         onSpawn={(id) => agent.register(id, node.id)}
         onDispose={(id) => agent.unregister(id)}

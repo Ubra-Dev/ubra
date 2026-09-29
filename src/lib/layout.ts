@@ -253,7 +253,10 @@ export function collectPaneIds(node: LayoutNode): string[] {
 }
 
 /** Agent states by live pane id, as emitted by the backend poller. */
-export type AgentSnapshot = Record<string, { state: string; agent?: string }>;
+export type AgentSnapshot = Record<
+  string,
+  { state: string; agent?: string; cli?: string }
+>;
 
 /** Live ids that transitioned from working to anything else. */
 export function detectFinished(

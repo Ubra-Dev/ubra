@@ -30,6 +30,7 @@ tauri-plugin-autostart = "2.6.0"
 sysinfo = "0.39.6"
 tauri-plugin-notification = "2.5.0"
 tauri-plugin-window-state = "2"
+rodio = "0.22.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

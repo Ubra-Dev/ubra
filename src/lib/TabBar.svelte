@@ -1,11 +1,13 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
 
   let editing = $state<string | null>(null);
   let draft = $state("");
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  const mod = modLabel(isMacPlatform(navigator.platform));
 
   function focus(el: HTMLInputElement): void {
     el.focus();
@@ -77,19 +79,27 @@
               {tab.name}
             </button>
           {/if}
-          {#if rollup !== "idle"}
+          {#if rollup === "done"}
+            <span class="done-check" title="done">&#10003;</span>
+          {:else if rollup !== "idle"}
             <span class={"dot " + rollup}></span>
           {/if}
           <button
             class="close"
-            title="Close tab"
+            title={`Close tab (${mod}W closes the pane)`}
             onclick={() => store.closeTab(tab.id)}
           >
             &times;
           </button>
         </div>
       {/each}
-      <button class="add" title="New tab" onclick={() => store.addTab()}>+</button>
+      <button
+        class="add"
+        title={`New tab (${mod}T)`}
+        onclick={() => store.addTab()}
+      >
+        +
+      </button>
     </div>
     {#if menu}
       <ContextMenu
@@ -189,5 +199,13 @@
   }
   .dot.attention {
     background: var(--attention);
+  }
+  .done-check {
+    flex: 0 0 auto;
+    color: var(--success);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    margin-right: 2px;
   }
 </style>
