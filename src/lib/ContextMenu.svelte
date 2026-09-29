@@ -1,0 +1,93 @@
+<script module lang="ts">
+  export interface MenuItem {
+    id: string;
+    label: string;
+    danger?: boolean;
+  }
+
+  /**
+   * Openers call this before showing a menu so any other open menu dismisses
+   * itself (the opener's stopPropagation blocks the shared window handler).
+   */
+  export function announceMenuOpen(): void {
+    window.dispatchEvent(new Event("ubra-menu-open"));
+  }
+</script>
+
+<script lang="ts">
+  import { onMount } from "svelte";
+
+  interface Props {
+    x: number;
+    y: number;
+    items: { id: string; label: string; danger?: boolean }[];
+    onPick: (id: string) => void;
+    onDismiss: () => void;
+  }
+  let { x, y, items, onPick, onDismiss }: Props = $props();
+
+  onMount(() => {
+    const dismiss = () => onDismiss();
+    window.addEventListener("ubra-menu-open", dismiss);
+    return () => window.removeEventListener("ubra-menu-open", dismiss);
+  });
+
+  // Clamp to the viewport; the menu is created fresh per open, at the cursor.
+  const cx = $derived(Math.max(0, Math.min(x, window.innerWidth - 158)));
+  const cy = $derived(
+    Math.max(0, Math.min(y, window.innerHeight - 24 - items.length * 30)),
+  );
+</script>
+
+<svelte:window
+  onclick={onDismiss}
+  oncontextmenu={onDismiss}
+  onkeydown={(e) => {
+    if (e.key === "Escape") onDismiss();
+  }}
+/>
+
+<div class="menu" role="menu" style:left={cx + "px"} style:top={cy + "px"}>
+  {#each items as item (item.id)}
+    <button
+      role="menuitem"
+      class:danger={item.danger}
+      onclick={() => onPick(item.id)}
+    >
+      {item.label}
+    </button>
+  {/each}
+</div>
+
+<style>
+  .menu {
+    position: fixed;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+    background: var(--surface-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 4px 16px var(--shadow-color);
+    font: 12px system-ui, sans-serif;
+  }
+  .menu button {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .menu button:hover {
+    background: var(--accent);
+    color: var(--text-strong);
+  }
+  .menu button.danger:hover {
+    background: var(--error-hover-bg);
+  }
+</style>

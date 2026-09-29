@@ -1,0 +1,17 @@
+# Auto-detect text files and normalize line endings to LF on commit.
+* text=auto
+
+# Shell scripts always need LF, even on Windows checkouts.
+*.sh text eol=lf
+
+# Windows batch files need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.webp binary

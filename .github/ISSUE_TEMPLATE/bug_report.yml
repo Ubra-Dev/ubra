@@ -1,0 +1,29 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to trigger it.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / environment
+      description: App version or commit hash + OS (macOS/Linux/Windows).
+  - type: textarea
+    id: log
+    attributes:
+      label: Logs
+      description: Relevant terminal output or error text, if any.
+      render: text
