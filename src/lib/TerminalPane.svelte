@@ -17,7 +17,8 @@
     truncatePreview,
   } from "./clipboard";
   import { findTabByPane } from "./layout";
-  import { claimLiveId, dropLiveId, peekLiveId } from "./ptySessions";
+  import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
+  import { TerminalAttachment, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
   import { toasts } from "./toasts.svelte.ts";
@@ -143,16 +144,14 @@
     let paneId: number | null = null;
     let disposed = false;
     const unlistens: UnlistenFn[] = [];
-    // Output/exit can arrive before pty_spawn resolves; buffer by pane id.
-    const pending = new Map<number, string[]>();
-    const pendingExits = new Map<
-      number,
-      { success: boolean; code: number | null }
-    >();
+    const attachment = new TerminalAttachment();
+    let lease: SessionLease | null = null;
+    let exited = false;
 
     const handleExit = (success: boolean, code: number | null) => {
-      // The live session is gone: a respawn remount must spawn fresh.
-      if (paneId !== null) dropLiveId(sessionKey, paneId);
+      if (exited) return;
+      exited = true;
+      if (lease) dropSession(sessionKey, lease);
       term.write(
         `\r\n[process exited${success ? "" : ` (code ${code})`}]\r\n`,
       );
@@ -200,6 +199,7 @@
 
     // Hidden panes (inactive tabs/workspaces) have zero size: skip fitting
     // until visible. The ResizeObserver fires on show.
+    let lastResize: { id: number; cols: number; rows: number } | null = null;
     const ensureFit = () => {
       if (
         disposed ||
@@ -209,10 +209,14 @@
       )
         return;
       fit.fit();
-      if (paneId !== null) {
-        invoke("pty_resize", { id: paneId, cols: term.cols, rows: term.rows }).catch(
-          console.error,
-        );
+      if (paneId !== null && (lastResize?.id !== paneId ||
+        lastResize.cols !== term.cols || lastResize.rows !== term.rows)) {
+        const size = { id: paneId, cols: term.cols, rows: term.rows };
+        lastResize = size;
+        invoke("pty_resize", size).catch((error) => {
+          if (lastResize === size) lastResize = null;
+          console.error(error);
+        });
       }
     };
     ensureFit();
@@ -222,17 +226,12 @@
     resizeObserver.observe(container!);
 
     (async () => {
-      const outputUnlisten = await listen<{ id: number; data: string }>(
+      const outputUnlisten = await listen<TerminalOutput>(
         "pty-output",
         (event) => {
           if (disposed) return;
-          if (paneId === null) {
-            const list = pending.get(event.payload.id) ?? [];
-            list.push(event.payload.data);
-            pending.set(event.payload.id, list);
-          } else if (event.payload.id === paneId) {
-            term.write(event.payload.data);
-          }
+          const data = attachment.output(event.payload);
+          if (data !== null) term.write(data);
         },
       );
       if (disposed) {
@@ -241,22 +240,10 @@
       }
       unlistens.push(outputUnlisten);
 
-      const exitUnlisten = await listen<{
-        id: number;
-        success: boolean;
-        code: number | null;
-      }>("pty-exit", (event) => {
+      const exitUnlisten = await listen<TerminalExit>("pty-exit", (event) => {
         if (disposed) return;
-        if (paneId === null) {
-          pendingExits.set(event.payload.id, {
-            success: event.payload.success,
-            code: event.payload.code,
-          });
-          return;
-        }
-        if (event.payload.id === paneId) {
-          handleExit(event.payload.success, event.payload.code);
-        }
+        const exit = attachment.exit(event.payload);
+        if (exit) handleExit(exit.success, exit.code);
       });
       if (disposed) {
         exitUnlisten();
@@ -269,51 +256,36 @@
           invoke("pty_write", { id: paneId, data }).catch(console.error);
         }
       });
-      // Reattach: when this pane node already owns a live PTY (its component
-      // remounted after a move across tabs/workspaces), reuse it instead of
-      // spawning a fresh shell, and repaint from a backend screen snapshot.
-      const existing = peekLiveId(sessionKey);
-      if (existing !== null) {
-        try {
-          const snap = await invoke<string>("pty_snapshot", { id: existing });
-          if (disposed) return;
-          paneId = existing;
-          onSpawn?.(paneId);
-          // Snapshot first, then buffered output: anything already in
-          // `pending` predates the snapshot and may duplicate a fragment,
-          // but nothing is lost that arrived after it was taken.
-          term.write(snap);
-          for (const chunk of pending.get(paneId) ?? []) term.write(chunk);
-          pending.clear();
-          pendingExits.clear();
-          ensureFit();
-          return;
-        } catch {
-          dropLiveId(sessionKey, existing);
-          if (disposed) return;
-          // Session is gone (process exited while unmounted): fall through
-          // to a fresh spawn below.
-        }
-      }
-      paneId = await invoke<number>("pty_spawn", {
+      lease = acquireSession(sessionKey, () => invoke<number>("pty_spawn", {
         shell: shell ?? null,
         cwd: cwd ?? null,
         args: args ?? null,
         cols: Math.max(term.cols, 2),
-        rows: Math.max(term.rows, 2),
-      });
-      if (disposed) {
-        invoke("pty_kill", { id: paneId }).catch(() => {});
-        return;
+        rows: Math.max(term.rows, 1),
+      }), (id) => invoke("pty_kill", { id }));
+      const id = await lease.ready;
+      if (disposed || lease.cancelled) return;
+      let snapshot: TerminalSnapshot | null = null;
+      let snapshotError: unknown = null;
+      try {
+        snapshot = await invoke<TerminalSnapshot>("pty_snapshot", { id });
+      } catch (error) {
+        snapshotError = error;
       }
-      claimLiveId(sessionKey, paneId);
-      onSpawn?.(paneId);
-      for (const chunk of pending.get(paneId) ?? []) term.write(chunk);
-      pending.clear();
-      const earlyExit = pendingExits.get(paneId);
-      pendingExits.clear();
-      if (earlyExit) handleExit(earlyExit.success, earlyExit.code);
-      ensureFit();
+      if (disposed || lease.cancelled) return;
+      paneId = id;
+      onSpawn?.(id);
+      if (snapshot) term.resize(snapshot.cols, snapshot.rows);
+      const restored = attachment.restore(id, snapshot);
+      for (const chunk of restored.chunks) term.write(chunk);
+      if (restored.exit) handleExit(restored.exit.success, restored.exit.code);
+      else if (snapshotError) {
+        // A session that exited while unmounted must show respawn, not silently
+        // create a replacement process or retain dead registry ownership.
+        term.write(`\r\n[snapshot unavailable: ${String(snapshotError)}]\r\n`);
+        handleExit(false, null);
+      }
+      if (!exited) ensureFit();
     })().catch((e) => {
       console.error(e);
       if (disposed) return;
@@ -333,21 +305,11 @@
       host.removeEventListener("mouseup", onMouseUp);
       resizeObserver.disconnect();
       unlistens.forEach((u) => u());
-      // A remount for a move keeps the node in the layout: leave the PTY and
-      // its registry entry (and agent mapping) alive for the new terminal to
-      // reattach to. Only a true close (node gone) kills. `paneId` can still
-      // be null when unmount wins the race with spawn/attach; the registry
-      // then holds the id to kill.
-      const liveId = paneId ?? peekLiveId(sessionKey);
-      if (liveId !== null) {
-        const stillPlaced =
-          store.layout !== null &&
-          findTabByPane(store.layout, sessionKey) !== null;
-        if (!stillPlaced) {
-          dropLiveId(sessionKey, liveId);
-          onDispose?.(liveId);
-          invoke("pty_kill", { id: liveId }).catch(() => {});
-        }
+      const stillPlaced =
+        store.layout !== null && findTabByPane(store.layout, sessionKey) !== null;
+      if (!stillPlaced) {
+        if (paneId !== null) onDispose?.(paneId);
+        closeSession(sessionKey);
       }
       term.dispose();
     };

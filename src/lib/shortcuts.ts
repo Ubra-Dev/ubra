@@ -95,20 +95,21 @@ export interface ShortcutMatch {
 
 /**
  * Match a key press against the table. All modifiers must match exactly.
- * Mod+1..8 (no Alt) jumps to tabs by number. "+" normalizes to "=" so both
- * bare and shifted equals zoom the font.
+ * Mod+1..8 (no Alt) jumps to tabs by number. Shifted punctuation uses its
+ * base binding; both bare equals and the real shifted plus enlarge the font.
  */
 export function matchShortcut(shape: KeyShape): ShortcutMatch | null {
   const key = shape.key.toLowerCase();
   if (shape.mod && !shape.shift && !shape.alt && /^[1-8]$/.test(key)) {
     return { action: "jump-tab", index: Number(key) - 1 };
   }
-  const norm = key === "+" ? "=" : key;
+  const norm = key === "+" ? "=" : key === "{" ? "[" : key === "}" ? "]" : key;
+  const shift = norm === "=" ? false : shape.shift;
   const found = SHORTCUTS.find(
     (b) =>
       b.key === norm &&
       b.mod === shape.mod &&
-      b.shift === shape.shift &&
+      b.shift === shift &&
       b.alt === shape.alt,
   );
   if (!found) return null;
@@ -116,6 +117,26 @@ export function matchShortcut(shape: KeyShape): ShortcutMatch | null {
   if (found.dir) out.dir = found.dir;
   return out;
 }
+
+/** Match native events without capturing ordinary terminal Ctrl keys on macOS. */
+export function matchShortcutEvent(
+  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "isComposing">,
+  isMac: boolean,
+  overlayOpen = false,
+): ShortcutMatch | null {
+  if (overlayOpen || event.isComposing || (isMac ? event.ctrlKey : event.metaKey)) return null;
+  // Alt on macOS can change punctuation's key value. Use the physical code
+  // only for the documented punctuation bindings, never for ordinary typing.
+  const key = event.shiftKey && event.code === "BracketLeft" ? "[" :
+    event.shiftKey && event.code === "BracketRight" ? "]" : event.key;
+  return matchShortcut({
+    key,
+    mod: isMac ? event.metaKey : event.ctrlKey,
+    shift: event.shiftKey,
+    alt: event.altKey,
+  });
+}
+
 
 /** True for text inputs, textareas, and selects that should swallow keys. */
 export function isEditableTarget(

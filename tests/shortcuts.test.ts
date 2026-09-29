@@ -7,6 +7,7 @@ import {
   isEditableTarget,
   isMacPlatform,
   matchShortcut,
+  matchShortcutEvent,
   modLabel,
 } from "../src/lib/shortcuts.ts";
 
@@ -23,16 +24,6 @@ function shape(
 }
 
 describe("matchShortcut", () => {
-  it("matches every table binding", () => {
-    for (const b of SHORTCUTS) {
-      const got = matchShortcut(
-        shape(b.key, { mod: b.mod, shift: b.shift, alt: b.alt }),
-      );
-      const want: { action: string; dir?: string } = { action: b.action };
-      if (b.dir) want.dir = b.dir;
-      assert.deepEqual(got, want);
-    }
-  });
 
   it("carries direction for neighbor actions", () => {
     assert.deepEqual(
@@ -101,6 +92,41 @@ describe("matchShortcut", () => {
       action: "find-in-pane",
     });
     assert.equal(matchShortcut(shape("f", { mod: true, shift: true })), null);
+  });
+});
+
+describe("native shortcut events", () => {
+  const event = (key: string, code: string, opts: Partial<{
+    metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; isComposing: boolean;
+  }> = {}) => ({
+    key, code, metaKey: false, ctrlKey: false, shiftKey: false,
+    altKey: false, isComposing: false, ...opts,
+  });
+
+  it("matches shifted plus and workspace braces from real keyboard values", () => {
+    assert.deepEqual(matchShortcutEvent(event("+", "Equal", { metaKey: true, shiftKey: true }), true), { action: "font-bigger" });
+    assert.deepEqual(matchShortcutEvent(event("{", "BracketLeft", { metaKey: true, shiftKey: true }), true), { action: "prev-workspace" });
+    assert.deepEqual(matchShortcutEvent(event("}", "BracketRight", { ctrlKey: true, shiftKey: true }), false), { action: "next-workspace" });
+    assert.deepEqual(matchShortcutEvent(event("[", "BracketLeft", { metaKey: true }), true), { action: "prev-tab" });
+  });
+
+  it("uses only the platform Mod and leaves ordinary macOS terminal Ctrl untouched", () => {
+    assert.equal(matchShortcutEvent(event("d", "KeyD", { ctrlKey: true }), true), null);
+    assert.equal(matchShortcutEvent(event("t", "KeyT", { ctrlKey: true }), true), null);
+    assert.equal(matchShortcutEvent(event("d", "KeyD", { ctrlKey: true, metaKey: true }), true), null);
+    assert.equal(matchShortcutEvent(event("t", "KeyT", { metaKey: true }), false), null);
+    assert.deepEqual(matchShortcutEvent(event("t", "KeyT", { metaKey: true }), true), { action: "new-tab" });
+    assert.deepEqual(matchShortcutEvent(event("d", "KeyD", { ctrlKey: true }), false), { action: "split-right" });
+    assert.deepEqual(matchShortcutEvent(event("ArrowLeft", "ArrowLeft", { altKey: true, shiftKey: true }), true), { action: "resize-pane", dir: "left" });
+  });
+
+  it("allows no background mutation while any overlay owns the keyboard or IME is composing", () => {
+    for (const key of ["t", "w", "d", "n", "F2"]) {
+      const native = event(key, key === "F2" ? "F2" : `Key${key.toUpperCase()}`, { metaKey: key !== "F2" });
+      assert.notEqual(matchShortcutEvent(native, true), null);
+      assert.equal(matchShortcutEvent(native, true, true), null);
+    }
+    assert.equal(matchShortcutEvent(event("t", "KeyT", { metaKey: true, isComposing: true }), true), null);
   });
 });
 

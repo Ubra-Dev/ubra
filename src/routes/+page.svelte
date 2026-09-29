@@ -2,8 +2,10 @@
   import { onMount } from "svelte";
   import { agent } from "$lib/agent.svelte";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+  import FirstRun from "$lib/FirstRun.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
-  import { isEditableTarget, matchShortcut } from "$lib/shortcuts";
+  import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
+  import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import TabBar from "$lib/TabBar.svelte";
@@ -17,14 +19,11 @@
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
-    // The confirm dialog owns the keyboard while open (Escape/Tab/arrows).
-    if (store.pendingClose) return;
-    const matched = matchShortcut({
-      key: e.key,
-      mod: e.metaKey || e.ctrlKey,
-      shift: e.shiftKey,
-      alt: e.altKey,
-    });
+    if (e.defaultPrevented) return;
+    const overlayOpen = store.settingsOpen || !!store.pendingClose ||
+      store.firstRun || store.onboardingOpen || store.recoveryRequired ||
+      store.recoveryBusy || !!document.querySelector("[data-keyboard-overlay]");
+    const matched = matchShortcutEvent(e, isMacPlatform(navigator.platform), overlayOpen);
     if (!matched) return;
     // Typing wins in rename inputs and selects — except settings, which opens
     // from anywhere. xterm's helper textarea is exempt: it looks editable but
@@ -129,8 +128,28 @@
 <div class="root" style={themeStyle(store.theme, store.termOpacity / 100)}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
+  {:else if store.recoveryRequired}
+    <div class="recovery" role="alertdialog" aria-modal="true" aria-labelledby="recovery-title"
+      tabindex="-1" data-keyboard-overlay use:overlayFocus>
+      <div class="recovery-content">
+        <h1 id="recovery-title">Recover your saved layout</h1>
+        <p>Your saved layout could not be loaded. It has not been replaced.</p>
+        <pre>{store.loadError}</pre>
+        <p>Retry after repairing the file, export an exact copy, or reset.
+          Reset backs up the original before replacing it with a fresh layout.</p>
+        <div class="recovery-actions">
+          <button disabled={store.recoveryBusy} onclick={() => void store.retryLayout()}>Retry</button>
+          <button disabled={store.recoveryBusy} onclick={() => void store.exportRecoveryLayout()}>Export original</button>
+          <button disabled={store.recoveryBusy} onclick={() => void store.resetRecoveryLayout()}>Back up and reset</button>
+        </div>
+        {#if store.recoveryError}<p role="alert">{store.recoveryError}</p>{/if}
+        {#if store.recoveryBackupPath}<p class="backup">Original copied to: {store.recoveryBackupPath}</p>{/if}
+      </div>
+    </div>
+  {:else if store.firstRun}
+    <FirstRun />
   {:else if store.layout}
-    <div class="app">
+    <div class="app" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen}>
       <Sidebar />
       <div class="main">
         <TabBar />
@@ -145,11 +164,17 @@
             </div>
           {/each}
         </div>
-        {#if store.loadError}
-          <div class="error">Layout load failed ({store.loadError}); started fresh.</div>
+        {#if store.saveError}
+          <div class="error" role="alert">Layout save failed: {store.saveError}</div>
+        {/if}
+        {#if store.recoveryBackupPath}
+          <div class="error backup">Original layout preserved at: {store.recoveryBackupPath}</div>
         {/if}
       </div>
     </div>
+    {#if store.onboardingOpen}
+      <FirstRun />
+    {/if}
   {/if}
   {#if store.settingsOpen}
     <SettingsModal />
@@ -172,6 +197,31 @@
     color: var(--text);
     color-scheme: var(--color-scheme);
   }
+  .recovery {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font: 14px/1.6 system-ui, sans-serif;
+    overflow-y: auto;
+  }
+  .recovery-content {
+    max-width: 620px;
+    padding: 32px;
+  }
+  .recovery h1 { font-size: 22px; color: var(--text-strong); }
+  .recovery pre, .backup { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .recovery pre { color: var(--text-muted); }
+  .recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .recovery button {
+    background: var(--surface-bg);
+    color: var(--text-strong);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  .recovery button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .recovery button:disabled { opacity: 0.5; cursor: wait; }
   .loading {
     display: flex;
     align-items: center;

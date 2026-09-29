@@ -7,7 +7,7 @@
 
 An agent runtime as a cross-platform desktop app (macOS, Linux, Windows).
 Workspaces → tabs → terminal panes running real coding-agent CLIs, with agent
-state badges, layout persistence, and agents that keep running when the window closes.
+state badges, layout persistence, and agents that keep running while the window is hidden.
 
 Built with [Tauri v2](https://v2.tauri.app/) (Rust backend), Svelte + TypeScript,
 and [xterm.js](https://xtermjs.org/) for terminal rendering.
@@ -16,10 +16,11 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 
 - **Multiplexer model** — workspaces containing tabs containing split terminal panes,
   with draggable dividers, pane zoom, and per-node rename.
-- **Layout persistence** — window size/position and the full workspace layout
-  restore across relaunches.
-- **Tray behavior** — closing the window hides the app to the tray; agents keep
-  running and the tray menu brings it back.
+- **Layout persistence and recovery** — window size/position and the full workspace
+  layout restore across relaunches. Invalid or unsupported saved layouts enter
+  recovery instead of being silently overwritten.
+- **Tray behavior** — closing the window hides the app only when the tray is
+  available; otherwise normal close quits. Settings also provides an explicit Quit.
 - **Agent awareness** — panes running agent CLIs (`claude`, `codex`, `opencode`, …)
   surface working/finished badges in pane headers, tabs, and the sidebar, plus a
   notification and sound when an agent finishes while you're elsewhere.
@@ -27,6 +28,8 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   notification, an in-app toast, or off, with done/needs-attention chimes
   (custom sound file and per-agent muting supported) that play even when the
   window is hidden to the tray.
+- **Headless automation (experimental)** — a separate authenticated local daemon
+  and JSON CLI expose terminal and agent-state operations without a window.
 
 ## Install
 
@@ -36,7 +39,7 @@ Download the latest bundle for your OS from
 Or build from source:
 
 ```sh
-npm install
+npm ci
 npm run tauri build
 ```
 
@@ -46,7 +49,17 @@ Bundles land in `src-tauri/target/release/bundle/`.
 
 - Rust via [rustup](https://rustup.rs/) + OS deps from the
   [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-- Node.js 20+ and npm
+- Node.js **24+** and npm. CI uses Node 24; direct TypeScript execution in the
+  frontend test runner is part of this baseline.
+
+On Debian/Ubuntu, install the Tauri dependencies **and ALSA development headers**
+(required by the audio backend):
+
+```sh
+sudo apt update
+sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+```
 
 Note: this workspace vendors a local Rust toolchain under `.tooling/` (gitignored)
 for sandboxed builds. On your own machine, install Rust normally and ignore that
@@ -55,7 +68,7 @@ directory (or `source .tooling/env.sh` from the repo root to reuse it here).
 ## Develop
 
 ```sh
-npm install
+npm ci
 npm run tauri dev
 ```
 
@@ -64,13 +77,99 @@ npm run tauri dev
 ```sh
 npm run check                    # svelte-check
 npm run test:unit                # frontend unit tests (node:test)
-cd src-tauri && cargo test
-cd src-tauri && cargo clippy --all-targets -- -D warnings
-cd src-tauri && cargo fmt --check
+npm run build                    # static frontend
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+npm audit
+npm run tauri build              # native bundle on the current platform
 ```
 
-Run the full set before pushing. (The `CI` workflow in
-`.github/workflows/` is currently disabled; re-enable it when ready.)
+Run these commands from the repository root. The checked-in `CI` workflow runs
+on pushes to `main`/`master`, pull requests, and calls from the tag-release
+workflow. Its macOS/Linux/Windows matrix runs frontend checks, tests, build and
+npm advisory checks, Rust tests/Clippy/formatting, and native bundle builds.
+Checked-in triggers do not establish that remote Actions is enabled or that a
+particular platform has passed.
+
+### Dependency advisory resolution
+
+SvelteKit 2.70.3 still declares `cookie ^0.6.0`. The narrowly scoped
+`@sveltejs/kit` → `cookie 0.7.2` override fixes
+[GHSA-pxg6-pf52-xh8x](https://github.com/advisories/GHSA-pxg6-pf52-xh8x)
+without downgrading SvelteKit or its adapter. The upstream
+[0.7.0 fix](https://github.com/jshttp/cookie/releases/tag/v0.7.0) retains the
+`parse`/`serialize` API and rejects invalid cookie names, paths and domains;
+[0.7.2](https://github.com/jshttp/cookie/releases/tag/v0.7.2) also fixes
+`hasOwnProperty` parsing. Ubra ships a static SPA with SSR disabled, not an
+application cookie-handling server. Keep the override until SvelteKit adopts a
+patched dependency, and verify future updates with the complete frontend and
+packaged smoke checks. Run `cargo audit` separately when `cargo-audit` is
+available; a missing scanner is not a clean Rust advisory result.
+
+### Release gates and native smoke
+
+Pushing `v*` tags invokes the full CI matrix first. Only after every platform
+passes does the release workflow build and stage its bundles. GitHub release
+publication is then **blocked by default** until all three repository Actions
+variables below contain the tagged commit's full SHA:
+
+- `NATIVE_SMOKE_SHA_MACOS`
+- `NATIVE_SMOKE_SHA_LINUX`
+- `NATIVE_SMOKE_SHA_WINDOWS`
+
+Download the `bundle-macOS`, `bundle-Linux`, and `bundle-Windows` artifacts from
+that release run and smoke-test each on its native OS. Record the commit, OS,
+bundle, checks and failures in the release review before setting that platform's
+variable. A failed or unavailable platform remains unverified: leave its variable
+unset and do not publish. After all evidence is recorded, rerun the failed publish
+job. The `release` environment can additionally require maintainer approval; the
+SHA checks fail closed even if environment reviewers are not configured.
+
+Neither automated bundle creation nor this documentation establishes a successful
+native smoke run. Signing and notarization are outside this remediation's scope.
+
+### Desktop security and process ownership
+
+Production CSP permits application assets and Tauri IPC, not remote scripts or
+arbitrary remote connections. `style-src 'unsafe-inline'` is required by
+Svelte/xterm runtime styling; `asset:`/`http://asset.localhost` and `data:` image
+sources support local application assets, while `data:` fonts support embedded
+fonts. Scripts remain restricted to `'self'`; objects, document base overrides
+and framing are denied. These are narrow compatibility exceptions, not a claim
+that packaged CSP behavior has been verified.
+
+On Unix, pane close targets the pane's terminal session with bounded TERM/KILL
+escalation. Intentionally detached `setsid` processes are outside that session and
+may survive; detached jobs must close inherited terminal handles. On Windows,
+each pane uses a kill-on-close job for ordinary descendants. Native Windows smoke
+must include children started immediately during spawn to exercise job-assignment
+timing, and pane isolation must be checked on every supported platform.
+
+Tray initialization failure requests a native warning explaining that window
+close quits. A hide failure likewise warns before quitting, rather than
+silently leaving an unreachable app. Settings provides Quit independently of
+the tray. For a repeatable tray-unavailable smoke, use a debug build with
+`UBRA_DISABLE_TRAY=1` and a fresh `UBRA_DATA_DIR`; release builds ignore this
+switch. Native window-close, hide-failure, and warning appearance remain manual
+release checks.
+
+PTY geometry is validated before OS/emulator mutation: 2–1000 columns,
+1–1000 rows, at most 250,000 cells. Shutdown closes spawn admission and
+terminates ownership sets in one bounded batch, including children that outlive
+their root shell after closing terminal handles.
+
+Moved terminals restore an atomic output watermark, primary/alternate buffers,
+cursor and supported input modes, including unfinished escape input; only newer
+chunks replay. Pending spawns belong to stable pane identities and are adopted
+across component remounts.
+
+Layout recovery blocks autosave until Retry succeeds or an explicit Reset
+preserves the original in an exact-byte backup. Export copies the original
+without changing recovery state. Saved documents are limited to 4 MiB,
+32 tree levels and 4096 workspace/tab/tree entities, with globally unique
+nonempty IDs and nondegenerate finite split ratios. Unsafe documents are
+rejected rather than silently repaired and overwritten.
 
 ## Verifying manually
 
@@ -78,30 +177,67 @@ Run the full set before pushing. (The `CI` workflow in
 npm run tauri dev
 ```
 
+For release approval, use the **packaged app**, not only `tauri dev`. Launch it
+with a fresh `UBRA_DATA_DIR` (for example `UBRA_DATA_DIR="$(mktemp -d)" <app-binary>`
+on macOS/Linux, or set `$env:UBRA_DATA_DIR` to a new temporary directory before
+launching on Windows). Preserve that scratch directory while testing relaunches.
+Never point destructive probes at your normal layout or running daemon.
+
+Native platform checklist:
+
+1. Start the installed bundle, run a command that creates a marker file, and
+   verify the file exists; input echo alone is not proof of command execution.
+2. Exercise split/move/zoom while output continues and while a full-screen
+   terminal program runs. Close one pane with a child process and verify its
+   owned processes exit while a sibling continues.
+3. Quit/relaunch to check persistence. In a separate scratch data directory,
+   load corrupt and unsupported layouts: recovery must preserve the original
+   until explicit reset, with retry/export errors visible.
+4. Verify Settings, custom-to-built-in chimes, notification delivery, terminal
+   clipboard, clickable links, and packaged webview console/CSP diagnostics.
+5. Use keyboard-only onboarding, dialogs and context menus; focus must remain
+   inside overlays and return on dismissal. Check navigation with many tabs,
+   workspaces and agent rows.
+6. Hide/show/quit with the tray; on Linux also exercise tray-unavailable close.
+   Quitting must terminate owned sessions.
+7. On Windows, also build the headless executables from the same tagged source
+   (`cargo build --release --manifest-path src-tauri/Cargo.toml --bins`). They are
+   separate from the GUI bundle. Run the daemon/CLI with a fresh `--state-dir`,
+   execute a marker-file command through ConPTY, read output, close the pane and
+   shut down. Check invalid commands return a nonzero exit code on every OS.
+
+The development checklist below complements, but does not replace, these gates.
+
 - Split panes from the hover toolbar, drag the dividers, add tabs/workspaces,
   then quit and relaunch: the layout restores.
 - Split a pane running a live process (e.g. `sleep 300`): the original pane
   keeps running after the split, and closing one side never kills the other.
   Panes also survive tab/workspace switches untouched.
 - Workspaces can be closed from the sidebar; closing the last one resets fresh.
-- Close the window: the app hides to the tray (with a "keeps running"
-  notification) and panes keep running. Left-click the tray icon to show it
-  again; Quit lives in the tray menu.
-- Run an agent CLI (e.g. `claude`, `codex`, `opencode`) in one pane and switch
-  to another tab: the pane header, tab, and sidebar show a working badge. When
-  the agent exits while you're elsewhere, you get an OS notification and a
-  review shortcut in the sidebar.
-- The sidebar Agents section lists working agents (green), finished ones
-  (check), unexpected stops needing review (amber), suspended agents
-  (blocked, red — try Ctrl+Z then `fg`), starting agents (unknown, dim),
-  and idle known agents (hollow), grouped per workspace and named by
-  working directory; clicking a row jumps to its pane.
-- Approval prompts on an agent's screen also flag it blocked (red): run
-  `claude` and trigger a permission prompt in a hidden tab to see the
-  badge. Per-agent screen rules live in
-  `<data-dir>/agent-detection/<cli>.toml` (TOML `[[blocked]]` entries with
-  `id` + `contains` substrings, all of which must appear); a file replaces
-  that CLI's bundled rules.
+- Close the window with a working tray: the app hides and panes keep running.
+  Left-click the tray icon to show it again; Quit is available in Settings and
+  the tray menu. Without a working tray, closing the window quits instead.
+- Agent badges use explicit CLI screen evidence: Working means a recognized
+  busy indicator, Blocked means an approval/question prompt or a suspended
+  process, and Idle means a recognized ready prompt before an observed task.
+  A task returning to its ready prompt becomes Done. Unknown means an agent
+  is present but its activity cannot be established. Silence, typing, focus,
+  and terminal redraws do not count as task activity or completion.
+- The sidebar groups agents by workspace and working directory. Clicking a
+  row reveals and focuses its pane. Focusing it in the foreground acknowledges
+  unread completion/attention without changing runtime status. Hovering a row
+  reveals an X that uses the existing pane-close confirmation.
+- Unexpected stops show Needs review; deliberate pane closes are silent.
+  A directly launched agent's successful exit can confirm completion, but a
+  parent shell's exit code does not establish the nested agent's success.
+- Bundled screen profiles cover recognized Codex, Claude, Gemini, and OpenCode
+  UI markers. Changed UI versions, custom keybindings, narrow truncation, and
+  other CLIs can report Unknown. Rule provenance and supported markers are
+  documented in [the screen fixture guide](src-tauri/fixtures/agent_screens/README.md).
+- Per-agent rules live in `<data-dir>/agent-detection/<cli>.toml`. Existing
+  `[[blocked]]` sections retain their forty-line matching behavior. Optional
+  `[[working]]` and `[[idle]]` sections support bounded footer matching; a file
+  replaces that CLI's complete bundled profile.
 - In Settings, switch Agent-finished delivery to in-app toast and finish an
   agent in another tab: a toast appears with a chime, and clicking it jumps
   to the pane. Muting that agent's CLI silences the chime but keeps the
@@ -132,9 +268,26 @@ npm run tauri dev
 ## Headless daemon + CLI (experimental)
 
 `ubra-daemon` owns PTYs and the agent watcher without a window, serving a
-JSON-lines protocol over loopback TCP (port file at
-`<tmp>/ubra-<user>/daemon.json`); `ubra-cli` drives it — all output is
-pretty-printed JSON, and the CLI starts the daemon on demand:
+JSON-lines protocol over loopback TCP. By default Unix runtime files live in
+`<tmp>/ubra-<effective-uid>/`; Windows uses the per-user app data directory.
+`ubra-cli` drives it — all output is pretty-printed JSON, and the CLI starts the
+daemon on demand.
+
+The macOS GUI bundle includes sibling daemon/CLI executables under
+`Ubra.app/Contents/MacOS/`; they are not automatically added to `PATH`.
+Other platform packaging must be inspected in its native release gate.
+For standalone source builds use
+`cargo build --release --manifest-path src-tauri/Cargo.toml --bins`; outputs are
+under `src-tauri/target/release/` (with `.exe` on Windows).
+
+Desktop and daemon share the same status service. Status queries read cached
+snapshots and never advance classification. State updates include a monotonic
+revision, agent-instance identity, and detection reason. The legacy
+`agent-states` event remains available; `agent-state-update` additionally
+contains explicit `task-completed` and `agent-stopped` transitions with unique
+event IDs. Snapshots do not replay these notifications. Process discovery runs
+once per second; output evidence is coalesced at 100 ms, with 200 ms confirmation
+for busy/ready changes and a 750 ms tolerance for partial redraws.
 
 ```sh
 cd src-tauri
@@ -151,9 +304,32 @@ cargo run -q --bin ubra-cli -- snapshot
 cargo run -q --bin ubra-cli -- shutdown
 ```
 
-The GUI does not use the daemon yet (it keeps its in-process backend), and
-the protocol has no authentication — localhost-only by design, but any
-local process can drive panes. Both change before the GUI migrates.
+The GUI does not use the daemon (it keeps its in-process backend). Protocol 2
+uses mutual nonce-bound HMAC-SHA256 authentication before commands or pushed pane
+data; the credential never travels over TCP. Runtime directories/files are
+current-user-only (Unix `0700`/`0600`, Windows protected owner-only DACLs).
+Authentication does not isolate clients from processes able to read the same
+user's credential. `daemon.lock` is a persistent OS-locked file: do not delete it
+during operation or after a crash. Stale endpoint recovery occurs under that lock.
+
+The daemon allows 32 connections including unauthenticated clients, 64 panes,
+256 KiB request frames and, per peer, 2 MiB outstanding output / 256 queued
+messages. Overflowing or stalled peers disconnect instead of continuing with
+dropped terminal bytes.
+
+CLI daemon errors (`ok:false`), malformed replies and transport failures exit
+nonzero; daemon JSON errors remain visible. Shutdown succeeds only after an
+authenticated matching-ID acknowledgement with `ok:true` and `shutdown:true`.
+Shutting down a missing or silent daemon fails without starting one or deleting
+runtime files. Requests have a 10-second deadline, waits clamp to 1–600 seconds
+with a five-second CLI margin, authentication is bounded to five seconds and
+startup to ten. Agent watch is intentionally streaming but has a 60-second idle
+deadline.
+
+Use `--state-dir <fresh-directory>` for isolated experiments and shut that daemon
+down afterward. The headless interface remains experimental; native Windows ACL,
+cross-user authentication and ConPTY execution must pass platform release gates
+rather than being inferred from Unix tests.
 
 ## Roadmap
 
@@ -161,7 +337,10 @@ local process can drive panes. Both change before the GUI migrates.
 - [x] Phase 1: PTY vertical slice (`portable-pty` + xterm.js pane)
 - [x] Phase 2: multiplexer model, layout persistence, tray behavior
 - [x] Phase 3: agent awareness v1 (process detection + badges)
-- [ ] Phase 4 (later): blocked/done heuristics, split daemon + CLI, SSH remotes
+- [x] Explicit working/blocked/idle/done/unknown status and completion transitions
+- [x] Experimental local daemon + CLI (separate from the GUI backend)
+- [ ] GUI daemon migration and SSH remotes
+- [ ] Native smoke approval for each release on macOS, Linux, and Windows
 
 ## Contributing
 

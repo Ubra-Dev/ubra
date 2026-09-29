@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
 
 jobs:
   build:
@@ -31,6 +32,7 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
+            libasound2-dev \
             librsvg2-dev
 
       - name: Setup Node
@@ -57,6 +59,12 @@ jobs:
 
       - name: Frontend typecheck
         run: npm run check
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Frontend dependency advisories
+        run: npm audit
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml

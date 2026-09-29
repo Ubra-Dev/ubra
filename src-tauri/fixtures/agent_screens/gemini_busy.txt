@@ -1,0 +1,2 @@
+Thinking... (esc to cancel, 3s)
+> Type your message or @path/to/file

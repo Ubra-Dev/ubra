@@ -1,0 +1,3 @@
+△ Run shell command
+  Allow once  Allow always  Reject
+  ⇆ select  enter confirm

@@ -1,37 +1,67 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import {
-  claimLiveId,
-  dropLiveId,
-  peekLiveId,
-} from "../src/lib/ptySessions.ts";
+import { acquireSession, closeSession, dropSession } from "../src/lib/ptySessions.ts";
 
-describe("ptySessions", () => {
-  it("returns null for unknown panes", () => {
-    assert.equal(peekLiveId("missing-pane"), null);
+function deferred() {
+  let resolve!: (id: number) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<number>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+describe("pane session ownership", () => {
+  it("rapid remounts adopt one pending spawn and preserve the resolved session", async () => {
+    const pending = deferred();
+    let spawns = 0;
+    const killed: number[] = [];
+    const spawn = () => { spawns++; return pending.promise; };
+    const kill = async (id: number) => { killed.push(id); };
+    const first = acquireSession("moving", spawn, kill);
+    const second = acquireSession("moving", spawn, kill);
+    const third = acquireSession("moving", spawn, kill);
+    pending.resolve(7);
+    assert.equal(await first.ready, 7);
+    assert.equal(second, first);
+    assert.equal(third, first);
+    assert.equal(spawns, 1);
+    assert.deepEqual(killed, []);
+    closeSession("moving");
+    closeSession("moving");
+    assert.deepEqual(killed, [7]);
   });
 
-  it("claims and peeks a live id", () => {
-    claimLiveId("pane-a", 7);
-    assert.equal(peekLiveId("pane-a"), 7);
+  it("close before resolution kills once without replacing a newer lease", async () => {
+    const pending = deferred();
+    const killed: number[] = [];
+    const kill = async (id: number) => { killed.push(id); };
+    const old = acquireSession("closed", () => pending.promise, kill);
+    closeSession("closed");
+    closeSession("closed");
+    const replacement = acquireSession("closed", async () => 11, kill);
+    pending.resolve(10);
+    await old.ready;
+    await replacement.ready;
+    dropSession("closed", old);
+    assert.equal(acquireSession("closed", async () => 99, kill), replacement);
+    assert.deepEqual(killed, [10]);
+    closeSession("closed");
+    assert.deepEqual(killed, [10, 11]);
   });
 
-  it("claim overwrites a stale entry (respawn replaces)", () => {
-    claimLiveId("pane-b", 1);
-    claimLiveId("pane-b", 2);
-    assert.equal(peekLiveId("pane-b"), 2);
-  });
-
-  it("drop removes only the matching live id", () => {
-    claimLiveId("pane-c", 10);
-    dropLiveId("pane-c", 9);
-    assert.equal(peekLiveId("pane-c"), 10);
-    dropLiveId("pane-c", 10);
-    assert.equal(peekLiveId("pane-c"), null);
-  });
-
-  it("drop of an unknown key is a no-op", () => {
-    dropLiveId("never-claimed", 1);
-    assert.equal(peekLiveId("never-claimed"), null);
+  it("failed spawn permits retry, while stale failure cannot clear replacement", async () => {
+    const pending = deferred();
+    const kill = async () => {};
+    const failed = acquireSession("failure", () => pending.promise, kill);
+    const observed = assert.rejects(failed.ready, /spawn failed/);
+    closeSession("failure");
+    const replacement = acquireSession("failure", async () => 12, kill);
+    pending.reject(new Error("spawn failed"));
+    await observed;
+    await replacement.ready;
+    assert.equal(acquireSession("failure", async () => 99, kill), replacement);
+    dropSession("failure", replacement);
+    const retried = acquireSession("failure", async () => 13, kill);
+    assert.equal(await retried.ready, 13);
+    closeSession("failure");
   });
 });

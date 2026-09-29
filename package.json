@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Agent runtime desktop app",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
@@ -24,6 +27,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2.6.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
@@ -40,5 +44,10 @@
     "svelte-check": "^4.6.0",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
+  },
+  "overrides": {
+    "@sveltejs/kit": {
+      "cookie": "0.7.2"
+    }
   }
 }

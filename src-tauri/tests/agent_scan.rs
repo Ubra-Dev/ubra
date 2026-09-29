@@ -1,5 +1,5 @@
 //! Agent detection against real processes: a fake agent (an executable named
-//! like a known CLI) running in a real PTY must scan as working, while a
+//! like a known CLI) running in a real PTY must scan as unknown, while a
 //! plain shell scans as idle.
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct Sink;
 impl PtyEventSink for Sink {
-    fn output(&self, _id: PaneId, _data: String) {}
+    fn output(&self, _id: PaneId, _data: String, _sequence: u64) {}
     fn exited(&self, _id: PaneId, _success: bool, _code: Option<i32>) {}
 }
 
@@ -122,14 +122,14 @@ fn expect_state(manager: &PtyManager, pane: PaneId, expected: PaneAgent, grace_s
     expect_with(pane, expected, || poll_once_with_grace(manager, grace_secs));
 }
 
-/// Poll until the pane scans as working with the expected label + CLI, or
+/// Poll until the pane scans as unknown with the expected label + CLI, or
 /// panic. Uses zero starting grace so detection itself is deterministic;
 /// the default grace path is covered by `detects_agent_process_in_pane`.
-fn expect_working(manager: &PtyManager, pane: PaneId, agent: &str, cli: &str) {
+fn expect_unknown(manager: &PtyManager, pane: PaneId, agent: &str, cli: &str) {
     expect_state(
         manager,
         pane,
-        PaneAgent::Working {
+        PaneAgent::Unknown {
             agent: agent.to_string(),
             cli: cli.to_string(),
             cwd: None,
@@ -154,7 +154,7 @@ fn detects_agent_process_in_pane() {
         let states = poll_once(&manager);
         let agent_state = states.get(&agent_pane);
         let shell_state = states.get(&shell_pane);
-        let working = PaneAgent::Working {
+        let working = PaneAgent::Unknown {
             agent: "Codex".to_string(),
             cli: "codex".to_string(),
             cwd: None,
@@ -165,15 +165,15 @@ fn detects_agent_process_in_pane() {
             break;
         }
         if Instant::now() > deadline {
-            panic!("agent pane never scanned as working (states: {states:?})");
+            panic!("agent pane never scanned as unknown (states: {states:?})");
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    // The working state must carry the agent process's cwd.
+    // The unknown state must carry the agent process's cwd.
     let states = poll_once(&manager);
     match states.get(&agent_pane) {
-        Some(PaneAgent::Working { cwd: Some(_), .. }) => {}
-        other => panic!("working state must carry agent cwd, got: {other:?}"),
+        Some(PaneAgent::Unknown { cwd: Some(_), .. }) => {}
+        other => panic!("unknown state must carry agent cwd, got: {other:?}"),
     }
 
     manager.kill(agent_pane).unwrap();
@@ -189,7 +189,7 @@ fn detects_agent_process_in_pane() {
 #[test]
 fn detects_versioned_muse_binary_in_pane() {
     // The `muse` launcher execs a versioned `muse-bin-<version>-<build>`
-    // binary; a pane running it must scan as working "Muse".
+    // binary; a pane running it must scan as unknown "Muse".
     let dir = scratch_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let (program, args) = fake_agent(&dir, "muse-bin-1.4.1-R4503.1");
@@ -197,14 +197,14 @@ fn detects_versioned_muse_binary_in_pane() {
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
     let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
 
-    expect_working(&manager, agent_pane, "Muse", "muse");
+    expect_unknown(&manager, agent_pane, "Muse", "muse");
 
     manager.kill(agent_pane).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn starting_grace_reports_unknown_then_working() {
+fn process_age_never_implies_working() {
     let dir = scratch_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let (program, args) = fake_agent(&dir, "codex");
@@ -212,7 +212,7 @@ fn starting_grace_reports_unknown_then_working() {
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
     let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
 
-    // A huge grace keeps the fresh process unknown; zero grace reads working.
+    // A huge grace keeps the fresh process unknown; zero grace still reads unknown.
     expect_state(
         &manager,
         agent_pane,
@@ -226,7 +226,7 @@ fn starting_grace_reports_unknown_then_working() {
     expect_state(
         &manager,
         agent_pane,
-        PaneAgent::Working {
+        PaneAgent::Unknown {
             agent: "Codex".to_string(),
             cli: "codex".to_string(),
             cwd: None,
@@ -266,7 +266,7 @@ fn stopped_agent_reports_blocked_until_resumed() {
         .unwrap()
         .root_pid;
 
-    let working = PaneAgent::Working {
+    let working = PaneAgent::Unknown {
         agent: "Codex".to_string(),
         cli: "codex".to_string(),
         cwd: None,
@@ -296,7 +296,7 @@ fn approval_screen_reports_blocked() {
     let (program, args) = fake_agent_with_output(
         &dir,
         "claude",
-        "Do you want to proceed?\n❯ 1. Yes\n  2. No\n",
+        "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n",
     );
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
@@ -347,7 +347,7 @@ fn detection_override_file_adds_rules() {
         || watcher.poll_with_grace(&manager, 0),
     );
 
-    // Rewrite with a non-matching rule and reload: back to working.
+    // Rewrite with a non-matching rule and reload: back to unknown.
     std::fs::write(
         rules_dir.join("codex.toml"),
         "[[blocked]]\nid = \"custom\"\ncontains = [\"nothing like this\"]\n",
@@ -356,7 +356,7 @@ fn detection_override_file_adds_rules() {
     watcher.reload_rules();
     expect_with(
         agent_pane,
-        PaneAgent::Working {
+        PaneAgent::Unknown {
             agent: "Codex".to_string(),
             cli: "codex".to_string(),
             cwd: None,

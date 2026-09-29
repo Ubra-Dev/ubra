@@ -22,14 +22,15 @@
     }
   }
 
-  let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  let menu = $state<{ id: string; x: number; y: number; opener: HTMLElement | null } | null>(null);
 
   function openMenu(e: MouseEvent, id: string): void {
     e.preventDefault();
     e.stopPropagation();
     if (editing) commitRename(editing);
     announceMenuOpen();
-    menu = { id, x: e.clientX, y: e.clientY };
+    menu = { id, x: e.clientX, y: e.clientY,
+      opener: (e.currentTarget as HTMLElement).querySelector<HTMLElement>(".name") };
   }
 
   function onPick(action: string): void {
@@ -47,10 +48,64 @@
     }
   }
 
+  // Workspace drag-reorder (HTML5 DnD). The drop position is the hovered
+  // row's top/bottom half, shown as an insertion line.
+  let dragId = $state<string | null>(null);
+  let dropId = $state<string | null>(null);
+  let dropPos = $state<"before" | "after" | null>(null);
+
+  function dropPosition(e: DragEvent): "before" | "after" {
+    const el = e.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
+    return e.clientY > rect.top + rect.height / 2 ? "after" : "before";
+  }
+
+  function onDragStart(e: DragEvent, id: string): void {
+    dragId = id;
+    dropId = null;
+    dropPos = null;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", id);
+    }
+  }
+
+  function onDragOver(e: DragEvent, id: string): void {
+    if (!dragId || dragId === id) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    dropId = id;
+    dropPos = dropPosition(e);
+  }
+
+  function onDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    const source = dragId;
+    const pos = dropId === id && dropPos ? dropPos : dropPosition(e);
+    dragId = null;
+    dropId = null;
+    dropPos = null;
+    if (source && source !== id) store.moveWorkspace(source, id, pos);
+  }
+
+  function onDragEnd(): void {
+    dragId = null;
+    dropId = null;
+    dropPos = null;
+  }
+
+  function onDragLeave(id: string): void {
+    if (dropId === id) {
+      dropId = null;
+      dropPos = null;
+    }
+  }
+
 </script>
 
 {#if store.layout}
   <aside class="sidebar">
+    <div class="navigation-scroll">
     <div class="section"><Icon name="layers" size={12} /> Workspaces</div>
     {#if agent.attention.length + agent.done.length > 0}
       {@const reviewCount = agent.attention.length + agent.done.length}
@@ -68,7 +123,16 @@
       <div
         class="ws"
         class:active={ws.id === store.layout.activeWorkspaceId}
+        class:dragging={dragId === ws.id}
+        class:drop-before={dropId === ws.id && dropPos === "before"}
+        class:drop-after={dropId === ws.id && dropPos === "after"}
+        draggable={editing !== ws.id}
         oncontextmenu={(e) => openMenu(e, ws.id)}
+        ondragstart={(e) => onDragStart(e, ws.id)}
+        ondragover={(e) => onDragOver(e, ws.id)}
+        ondrop={(e) => onDrop(e, ws.id)}
+        ondragend={onDragEnd}
+        ondragleave={() => onDragLeave(ws.id)}
       >
         {#if editing === ws.id}
           <input
@@ -108,14 +172,6 @@
         </button>
       </div>
     {/each}
-    <button
-      class="add"
-      title={`New workspace (${mod}N)`}
-      onclick={() => store.addWorkspace()}
-    >
-      <Icon name="plus" size={12} />
-      <span>Workspace</span>
-    </button>
     <div class="section agents"><Icon name="cpu" size={12} /> Agents</div>
     {#if agents.length === 0}
       <div class="none">
@@ -126,32 +182,64 @@
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
-          <button
-            class="agent-row"
-            title={a.dirPath
-              ? `${a.dirPath} — ${a.paneTitle ?? a.tabName}`
-              : (a.paneTitle ?? a.tabName)}
-            onclick={() => agent.jumpToPane(a.nodeId)}
-          >
-            {#if a.status === "done"}
-              <span class="done-check" title="done">
-                <Icon name="check" size={10} />
-              </span>
-            {:else}
-              <span
-                class={"dot " + a.status}
-                title={a.status === "attention" ? "needs review" : a.status}
-              ></span>
-            {/if}
-            <span class="agent-name">{a.dir}</span>
-            {#if a.cli}
-              <span class="agent-cli">{a.cli}</span>
-            {/if}
-          </button>
+          <div class="agent-item">
+            <button
+              class="agent-row"
+              title={a.dirPath
+                ? `${a.statusTitle} — ${a.dirPath} — ${a.paneTitle ?? a.tabName}`
+                : `${a.statusTitle} — ${a.paneTitle ?? a.tabName}`}
+              onclick={() => agent.jumpToPane(a.nodeId)}
+            >
+              {#if a.status === "done"}
+                <span class="done-check" title={a.statusTitle}>
+                  <Icon name="check" size={10} />
+                </span>
+              {:else}
+                <span
+                  class={"dot " + a.status}
+                  title={a.statusTitle}
+                ></span>
+              {/if}
+              <span class="agent-name">{a.dir}</span>
+              {#if a.cli}
+                <span class="agent-cli">{a.cli}</span>
+              {/if}
+            </button>
+            <button
+              class="close"
+              title={`Close ${a.dir} pane`}
+              aria-label={`Close ${a.dir} pane`}
+              onclick={(e) => {
+                e.stopPropagation();
+                store.requestClosePane(a.nodeId);
+              }}
+            >
+              <Icon name="x" size={12} />
+            </button>
+          </div>
         {/each}
       {/each}
     {/if}
+    </div>
     <div class="footer">
+    <div class="add-workspace">
+      <button
+        class="add"
+        title={`New workspace (${mod}N)`}
+        onclick={() => store.addWorkspace()}
+      >
+        <Icon name="plus" size={12} />
+        <span>Workspace</span>
+      </button>
+      <button
+        class="add-grid"
+        title="New workspace with 4 terminals (2×2)"
+        aria-label="New workspace with 4 terminals in a 2 by 2 grid"
+        onclick={() => store.addWorkspace(true)}
+      >
+        <Icon name="grid" size={14} />
+      </button>
+    </div>
       <button
         class="settings-btn"
         title={`Settings (${mod},)`}
@@ -165,6 +253,7 @@
       <ContextMenu
         x={menu.x}
         y={menu.y}
+        opener={menu.opener}
         items={[
           { id: "rename", label: "Rename", icon: "edit" },
           { id: "close", label: "Close", danger: true, icon: "x" },
@@ -183,11 +272,21 @@
     gap: 2px;
     width: 190px;
     flex: 0 0 190px;
+    min-height: 0;
+    overflow: hidden;
     background: var(--sidebar-bg);
     padding: 10px 8px;
     font: 12px system-ui, sans-serif;
     color: var(--text);
     user-select: none;
+  }
+  .navigation-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
   }
   .section {
     display: flex;
@@ -205,12 +304,33 @@
     border-top: 1px solid var(--border);
   }
   .ws {
+    position: relative;
     display: flex;
     align-items: center;
     border-radius: 6px;
   }
   .ws.active {
     background: var(--surface-active);
+  }
+  .ws.dragging {
+    opacity: 0.5;
+  }
+  .ws.drop-before::before,
+  .ws.drop-after::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+    pointer-events: none;
+  }
+  .ws.drop-before::before {
+    top: -2px;
+  }
+  .ws.drop-after::after {
+    bottom: -2px;
   }
   .name {
     flex: 1 1 auto;
@@ -237,6 +357,15 @@
     padding: 4px 8px;
     cursor: pointer;
     border-radius: 4px;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .ws:hover .close,
+  .ws:focus-within .close,
+  .agent-item:hover .close,
+  .agent-item:focus-within .close {
+    opacity: 1;
+    pointer-events: auto;
   }
   .close:hover {
     color: var(--text-strong);
@@ -254,11 +383,50 @@
     font: inherit;
     padding: 4px 6px;
   }
-  .add {
+  .add-workspace {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
     margin-top: 6px;
+  }
+  .add-grid {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .add-workspace:hover .add-grid,
+  .add-workspace:focus-within .add-grid {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .add-grid:hover {
+    color: var(--text-strong);
+    background: var(--surface-bg);
+  }
+  .add-grid:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  @media (hover: none) {
+    .add-grid {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+  .add {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 6px;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -287,9 +455,17 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .agent-item {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    border-radius: 6px;
+  }
   .agent-row {
     display: flex;
     align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
     gap: 6px;
     width: 100%;
     box-sizing: border-box;
@@ -303,7 +479,8 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .agent-row:hover {
+  .agent-row:hover,
+  .agent-item:focus-within .agent-row {
     background: var(--surface-bg);
     color: var(--text-strong);
   }
@@ -327,6 +504,7 @@
   }
   .footer {
     margin-top: auto;
+    flex: 0 0 auto;
     padding: 8px 6px 0;
     border-top: 1px solid var(--border);
     color: var(--text-muted);

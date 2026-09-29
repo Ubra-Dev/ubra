@@ -1,11 +1,12 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, onMount } from "svelte";
+  import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import { overlayFocus } from "./overlayFocus";
   import {
     CUSTOM_CHIME_ID,
-    chimeStyleParam,
+    playbackPayload,
     routeNotification,
     testNotificationPayload,
     type NotifyDelivery,
@@ -25,27 +26,19 @@
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
 
   type SectionId =
-    | "general"
     | "appearance"
-    | "notifications"
-    | "sounds"
-    | "status"
+    | "alerts"
     | "shortcuts"
-    | "about";
+    | "app";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
-    { id: "general", label: "General", icon: "sliders" },
     { id: "appearance", label: "Appearance", icon: "palette" },
-    { id: "notifications", label: "Notifications", icon: "bell" },
-    { id: "sounds", label: "Sounds", icon: "volume" },
-    { id: "status", label: "Status indicators", icon: "activity" },
+    { id: "alerts", label: "Alerts", icon: "bell" },
     { id: "shortcuts", label: "Shortcuts", icon: "command" },
-    { id: "about", label: "About", icon: "info" },
+    { id: "app", label: "App", icon: "info" },
   ];
 
-  let section = $state<SectionId>("general");
-  let dialogEl = $state<HTMLDivElement | null>(null);
-  let previousFocus: HTMLElement | null = null;
+  let section = $state<SectionId>("app");
 
   let autostart = $state(false);
   let autostartLoaded = $state(false);
@@ -65,29 +58,13 @@
 
   function onDialogKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
+      e.preventDefault();
       close();
       return;
-    }
-    if (e.key !== "Tab" || !dialogEl) return;
-    // Focus trap: Tab wraps within the dialog.
-    const items = [...dialogEl.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    )].filter((el) => el.offsetParent !== null);
-    if (items.length === 0) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
     }
   }
 
   onMount(() => {
-    previousFocus = document.activeElement as HTMLElement | null;
-    dialogEl?.focus();
     invoke<boolean>("autostart_enabled")
       .then((v) => {
         autostart = v;
@@ -102,13 +79,6 @@
       .catch((e) => console.error("ubra: app info failed", e));
   });
 
-  onDestroy(() => {
-    try {
-      previousFocus?.focus?.();
-    } catch {
-      // Opener may be gone; nothing to restore.
-    }
-  });
 
   function onAutostartChange(e: Event): void {
     const checked = (e.target as HTMLInputElement).checked;
@@ -148,11 +118,8 @@
       }).catch((e) => console.error("ubra: test notification failed", e));
     }
     if (route.sound) {
-      invoke("play_sound", {
-        kind: test.kind,
-        style: chimeStyleParam(store.soundStyle),
-        file: store.soundFile.trim() === "" ? null : store.soundFile,
-      }).catch((e) => console.error("ubra: test sound failed", e));
+      invoke("play_sound", playbackPayload(test.kind, store.soundStyle, store.soundFile))
+        .catch((e) => console.error("ubra: test sound failed", e));
     }
   }
 
@@ -202,19 +169,12 @@
   }
 
   function onTestSound(): void {
-    invoke("play_sound", {
-      kind: "done",
-      style: chimeStyleParam(store.soundStyle),
-      file: store.soundFile.trim() === "" ? null : store.soundFile,
-    }).catch((e) => console.error("ubra: test sound failed", e));
+    invoke("play_sound", playbackPayload("done", store.soundStyle, store.soundFile))
+      .catch((e) => console.error("ubra: test sound failed", e));
   }
 
   function onSoundStyleChange(e: Event): void {
     store.setSoundStyle((e.target as HTMLSelectElement).value);
-  }
-
-  function onMuteChange(cli: string, e: Event): void {
-    store.setAgentMuted(cli, (e.target as HTMLInputElement).checked);
   }
 
   const REPO_URL = "https://github.com/stackwares/ubra-tauri";
@@ -239,7 +199,8 @@
     aria-modal="true"
     aria-label="Settings"
     tabindex="-1"
-    bind:this={dialogEl}
+    data-keyboard-overlay
+    use:overlayFocus
     onkeydown={onDialogKeydown}
   >
     <div class="header">
@@ -263,26 +224,7 @@
         {/each}
       </nav>
       <div class="content">
-        {#if section === "general"}
-          <section aria-label="General">
-            <h2>General</h2>
-            <label class="toggle">
-              <input
-                type="checkbox"
-                checked={autostart}
-                disabled={!autostartLoaded}
-                onchange={onAutostartChange}
-              />
-              <span class="track" aria-hidden="true">
-                <span class="thumb"></span>
-              </span>
-              <span>Launch at login</span>
-            </label>
-            {#if autostartError}
-              <div class="hint error-hint" role="alert">{autostartError}</div>
-            {/if}
-          </section>
-        {:else if section === "appearance"}
+        {#if section === "appearance"}
           <section aria-label="Appearance">
             <h2>Appearance</h2>
             <div class="row">
@@ -384,9 +326,10 @@
               {/each}
             </div>
           </section>
-        {:else if section === "notifications"}
-          <section aria-label="Notifications">
-            <h2>Notifications</h2>
+        {:else if section === "alerts"}
+          <section aria-label="Alerts">
+            <h2>Alerts</h2>
+            <h3 class="subheading">Notifications</h3>
             <label class="row">
               <span class="label">Agent finished</span>
               <span class="select-wrap">
@@ -428,117 +371,69 @@
             <div class="hint">
               Fires a sample Codex finish through the settings above.
             </div>
-          </section>
-        {:else if section === "sounds"}
-          <section aria-label="Sounds">
-            <h2>Sounds</h2>
-            <label class="toggle">
-              <input
-                type="checkbox"
-                checked={store.soundEnabled}
-                onchange={onSoundEnabledChange}
-              />
-              <span class="track" aria-hidden="true">
-                <span class="thumb"></span>
-              </span>
-              <span>Play sound when an agent finishes</span>
-            </label>
-            <label class="row">
-              <span class="label">Chime</span>
-              <span class="select-wrap">
-                <select
-                  value={store.soundStyle}
-                  onchange={onSoundStyleChange}
-                  aria-label="Notification chime"
-                >
-                  <option value="default">Default chime</option>
-                  <option value="bright">Bright</option>
-                  <option value="soft">Soft</option>
-                  <option value="pop">Pop</option>
-                  <option value={CUSTOM_CHIME_ID}>Custom audio file…</option>
-                </select>
-              </span>
-            </label>
-            {#if store.soundStyle === CUSTOM_CHIME_ID}
-              <label class="row">
-                <span class="label">Custom sound</span>
+            <div class="subsection">
+              <h3 class="subheading">Sounds</h3>
+              <label class="toggle">
                 <input
-                  type="text"
-                  bind:value={soundFile}
-                  onchange={onSoundFileChange}
-                  placeholder="~/Music/chime.mp3"
-                  aria-label="Custom sound file path"
-                  aria-invalid={soundFileValid === false}
-                  aria-describedby={soundFile.trim() !== "" ? "sound-hint" : undefined}
-                  class="file-input"
+                  type="checkbox"
+                  checked={store.soundEnabled}
+                  onchange={onSoundEnabledChange}
                 />
-              </label>
-              {#if soundFile.trim() !== ""}
-                <div class="hint" id="sound-hint">
-                  {#if soundFileChecking}
-                    <span class="checking">Checking file…</span>
-                  {:else if soundFileValid === false}
-                    <span class="error-hint" role="alert">
-                      File not found or not playable audio; default chime is used.
-                    </span>
-                  {:else if soundFileValid === true}
-                    <span class="ok-hint">Custom sound ready.</span>
-                  {/if}
-                </div>
-              {/if}
-            {/if}
-            <div class="row">
-              <span class="label">Preview</span>
-              <button class="test-button" onclick={onTestSound}>
-                <Icon name="play" size={12} />
-                <span>Play test sound</span>
-              </button>
-            </div>
-            {#if agent.knownClis().length > 0}
-              <div class="mute-list">
-                <span class="mute-heading">Mute sounds per agent</span>
-                {#each agent.knownClis() as entry (entry.cli)}
-                  <label class="toggle mute-row">
-                    <input
-                      type="checkbox"
-                      checked={store.isAgentMuted(entry.cli)}
-                      onchange={(e) => onMuteChange(entry.cli, e)}
-                    />
-                    <span class="track" aria-hidden="true">
-                      <span class="thumb"></span>
-                    </span>
-                    <span>
-                      {entry.label}
-                      {#if entry.label.toLowerCase() !== entry.cli}
-                        <span class="cli">({entry.cli})</span>
-                      {/if}
-                    </span>
-                  </label>
-                {/each}
-              </div>
-            {/if}
-          </section>
-        {:else if section === "status"}
-          <section aria-label="Status indicators">
-            <h2>Status indicators</h2>
-            <div class="legend">
-              <div class="legend-row">
-                <span class="dot working"></span>
-                <span>Working — agent is running</span>
-              </div>
-              <div class="legend-row">
-                <span class="done-check">
-                  <Icon name="check" size={10} />
+                <span class="track" aria-hidden="true">
+                  <span class="thumb"></span>
                 </span>
-                <span>Done — agent finished its task</span>
-              </div>
-              <div class="legend-row">
-                <span class="dot attention"></span>
-                <span>Needs review — agent stopped unexpectedly</span>
-              </div>
-              <div class="legend-row">
-                <span class="dot idle"></span>
-                <span>Idle — no agent running, last agent remembered</span>
+                <span>Play sound when an agent finishes</span>
+              </label>
+              <label class="row">
+                <span class="label">Chime</span>
+                <span class="select-wrap">
+                  <select
+                    value={store.soundStyle}
+                    onchange={onSoundStyleChange}
+                    aria-label="Notification chime"
+                  >
+                    <option value="default">Default chime</option>
+                    <option value="bright">Bright</option>
+                    <option value="soft">Soft</option>
+                    <option value="pop">Pop</option>
+                    <option value={CUSTOM_CHIME_ID}>Custom audio file…</option>
+                  </select>
+                </span>
+              </label>
+              {#if store.soundStyle === CUSTOM_CHIME_ID}
+                <label class="row">
+                  <span class="label">Custom sound</span>
+                  <input
+                    type="text"
+                    bind:value={soundFile}
+                    onchange={onSoundFileChange}
+                    placeholder="~/Music/chime.mp3"
+                    aria-label="Custom sound file path"
+                    aria-invalid={soundFileValid === false}
+                    aria-describedby={soundFile.trim() !== "" ? "sound-hint" : undefined}
+                    class="file-input"
+                  />
+                </label>
+                {#if soundFile.trim() !== ""}
+                  <div class="hint" id="sound-hint">
+                    {#if soundFileChecking}
+                      <span class="checking">Checking file…</span>
+                    {:else if soundFileValid === false}
+                      <span class="error-hint" role="alert">
+                        File not found or not playable audio; default chime is used.
+                      </span>
+                    {:else if soundFileValid === true}
+                      <span class="ok-hint">Custom sound ready.</span>
+                    {/if}
+                  </div>
+                {/if}
+              {/if}
+              <div class="row">
+                <span class="label">Preview</span>
+                <button class="test-button" onclick={onTestSound}>
+                  <Icon name="play" size={12} />
+                  <span>Play test sound</span>
+                </button>
               </div>
             </div>
           </section>
@@ -554,37 +449,78 @@
               {/each}
             </div>
           </section>
-        {:else if section === "about"}
-          <section aria-label="About">
-            <h2>About</h2>
-            <div class="about">
-              {appName}{#if appVersion} {appVersion}{/if}
+        {:else if section === "app"}
+          <section aria-label="App">
+            <h2>App</h2>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                checked={autostart}
+                disabled={!autostartLoaded}
+                onchange={onAutostartChange}
+              />
+              <span class="track" aria-hidden="true">
+                <span class="thumb"></span>
+              </span>
+              <span>Launch at login</span>
+            </label>
+            {#if autostartError}
+              <div class="hint error-hint" role="alert">{autostartError}</div>
+            {/if}
+            <div class="subsection">
+              <h3 class="subheading">Onboarding</h3>
+              <div class="row">
+                <span class="label">Set up another project and agent session</span>
+                <button class="test-btn" onclick={() => store.openOnboarding()}>
+                  <Icon name="layers" size={12} />
+                  <span>Run onboarding</span>
+                </button>
+              </div>
+              <div class="hint">
+                Completing setup opens a new workspace and keeps your current work.
+              </div>
             </div>
-            <div class="about-sub">Agent runtime desktop app</div>
-            <div class="links">
-              <button class="link" onclick={() => openExternal(REPO_URL)}>
-                GitHub
-              </button>
-              <button
-                class="link"
-                onclick={() => openExternal(`${REPO_URL}/issues`)}
-              >
-                Report an issue
-              </button>
-              <button
-                class="link"
-                onclick={() => openExternal(`${REPO_URL}/releases`)}
-              >
-                Releases
-              </button>
-              <button
-                class="link"
-                onclick={() => openExternal(`${REPO_URL}/blob/main/LICENSE`)}
-              >
-                MIT License
-              </button>
+            <div class="subsection">
+              <h3 class="subheading">Quit</h3>
+              <div class="row">
+                <span class="label">Quit Ubra and terminate owned pane processes</span>
+                <button class="test-btn" onclick={() => {
+                  invoke("quit_app").catch((error) =>
+                    toasts.push("Quit failed", String(error), "", { kind: "copy" }));
+                }}>Quit Ubra</button>
+              </div>
             </div>
-            <div class="about-sub">© 2026 Oliver Martinez</div>
+            <div class="subsection">
+              <h3 class="subheading">About</h3>
+              <div class="about">
+                {appName}{#if appVersion} v{appVersion}{/if}
+              </div>
+              <div class="about-sub">Agent runtime desktop app</div>
+              <div class="links">
+                <button class="link" onclick={() => openExternal(REPO_URL)}>
+                  GitHub
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(`${REPO_URL}/issues`)}
+                >
+                  Report an issue
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(`${REPO_URL}/releases`)}
+                >
+                  Releases
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(`${REPO_URL}/blob/main/LICENSE`)}
+                >
+                  MIT License
+                </button>
+              </div>
+              <div class="about-sub">© 2026 Oliver Martinez</div>
+            </div>
           </section>
         {/if}
       </div>
@@ -697,6 +633,17 @@
     font-weight: 600;
     color: var(--text-strong);
     margin: 0 0 10px;
+  }
+  .subheading {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 4px;
+  }
+  .subsection {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--separator);
   }
   .field-label {
     font-size: 12px;
@@ -948,59 +895,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .mute-list {
-    display: flex;
-    flex-direction: column;
-    padding-top: 6px;
-    margin-top: 4px;
-    border-top: 1px solid var(--separator);
-  }
-  .mute-heading {
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 6px 0 2px;
-  }
-  .mute-row {
-    padding: 5px 0;
-  }
-  .cli {
-    color: var(--text-subtle);
-  }
-  .legend {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 2px 0;
-  }
-  .legend-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .dot {
-    flex: 0 0 auto;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-  }
-  .dot.working {
-    background: var(--success);
-  }
-  .dot.attention {
-    background: var(--attention);
-  }
-  .dot.idle {
-    background: transparent;
-    border: 1px solid var(--text-subtle);
-    box-sizing: border-box;
-  }
-  .done-check {
-    display: inline-flex;
-    justify-content: center;
-    flex: 0 0 auto;
-    width: 8px;
-    color: var(--success);
   }
   .shortcuts {
     display: flex;

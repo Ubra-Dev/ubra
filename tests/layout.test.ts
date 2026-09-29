@@ -9,8 +9,7 @@ import {
   countPanes,
   defaultLayout,
   defaultTab,
-  detectFinished,
-  detectVanished,
+  defaultWorkspace,
   extractPane,
   extractPaneToNewTab,
   extractPaneToNewWorkspace,
@@ -19,8 +18,14 @@ import {
   findPaneAtPoint,
   findSplit,
   findTabByPane,
+  gridTab,
   isActiveAgentState,
+  moveWorkspace,
   resizePaneInTab,
+  MAX_LAYOUT_BYTES,
+  MAX_LAYOUT_DEPTH,
+  MAX_LAYOUT_ENTITIES,
+  newId,
   sanitizeLayout,
   swapPanesInTab,
   setZoomedPane,
@@ -41,6 +46,30 @@ describe("defaultLayout", () => {
     assert.equal(layout.activeWorkspaceId, layout.workspaces[0].id);
     assert.equal(layout.workspaces[0].tabs.length, 1);
     assert.equal(countPanes(layout.workspaces[0].tabs[0].root), 1);
+  });
+});
+
+describe("gridTab", () => {
+  it("creates four distinct terminals in equal 2×2 quadrants", () => {
+    const tab = gridTab();
+    assert.equal(tab.name, "Tab 1");
+    assert.equal(countPanes(tab.root), 4);
+    const panes = computeLayout(tab.root).panes;
+    assert.equal(new Set(panes.map((p) => p.node.id)).size, 4);
+    assert.deepEqual(panes.map((p) => p.rect), [
+      [0, 0, 0.5, 0.5],
+      [0.5, 0, 0.5, 0.5],
+      [0, 0.5, 0.5, 0.5],
+      [0.5, 0.5, 0.5, 0.5],
+    ]);
+  });
+
+  it("preserves the grid when saving and restoring a layout", () => {
+    const layout = defaultLayout();
+    const tab = gridTab("Grid");
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
   });
 });
 
@@ -123,58 +152,134 @@ describe("findTabByPane", () => {
 });
 
 describe("sanitizeLayout", () => {
-  it("rejects garbage with a fresh default", () => {
+  it("rejects corrupt and unsupported documents instead of starting fresh", () => {
     for (const bad of [null, 42, "x", {}, { version: 999 }, { version: 1 }]) {
-      const layout = sanitizeLayout(bad);
-      assert.equal(layout.version, 1);
-      assert.ok(layout.workspaces.length >= 1);
-      assert.ok(layout.workspaces[0].tabs.length >= 1);
+      assert.throws(() => sanitizeLayout(bad));
     }
   });
 
-  it("preserves a valid layout", () => {
+  it("round-trips valid active and zoom references without changing identities", () => {
     const layout = defaultLayout();
-    layout.workspaces[0].name = "proj";
-    const clone = JSON.parse(JSON.stringify(layout));
-    assert.equal(sanitizeLayout(clone).workspaces[0].name, "proj");
+    const workspace = defaultWorkspace("Second");
+    const tab = gridTab("Selected");
+    workspace.tabs.push(tab);
+    workspace.activeTabId = tab.id;
+    tab.zoomedPaneId = collectPaneIds(tab.root)[2];
+    layout.workspaces.push(workspace);
+    layout.activeWorkspaceId = workspace.id;
+    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
   });
 
-  it("repairs broken ids, dirs, and sizes", () => {
-    const layout = sanitizeLayout({
-      version: 1,
-      activeWorkspaceId: "missing",
-      workspaces: [
-        {
-          id: "w",
-          name: "",
-          tabs: [
-            {
-              id: "t",
-              name: "T",
-              root: {
-                kind: "split",
-                id: "s",
-                dir: "diagonal",
-                sizes: [0, -1],
-                first: null,
-                second: { kind: "pane", id: "p" },
-              },
-            },
-          ],
-          activeTabId: "nope",
-        },
-      ],
-    });
-    assert.equal(layout.activeWorkspaceId, "w");
-    assert.equal(layout.workspaces[0].activeTabId, "t");
-    const root = layout.workspaces[0].tabs[0].root;
-    assert.equal(root.kind, "split");
-    if (root.kind === "split") {
-      assert.equal(root.dir, "row");
-      assert.deepEqual(root.sizes, [0.5, 0.5]);
-      assert.equal(root.first.kind, "pane");
-      assert.equal(root.second.kind, "pane");
+  it("rejects globally duplicated identities including cross-workspace panes", () => {
+    for (const category of ["pane", "tab", "workspace", "cross-kind"]) {
+      const layout = defaultLayout();
+      const first = layout.workspaces[0];
+      const second = defaultWorkspace("Second");
+      layout.workspaces.push(second);
+      if (category === "pane") second.tabs[0].root.id = first.tabs[0].root.id;
+      if (category === "tab") second.tabs[0].id = first.tabs[0].id;
+      if (category === "workspace") second.id = first.id;
+      if (category === "cross-kind") second.tabs[0].root.id = first.id;
+      assert.throws(() => sanitizeLayout(layout), /duplicate identity/);
     }
+  });
+
+  it("rejects empty node identities and missing active references", () => {
+    const layout = defaultLayout();
+    layout.workspaces[0].tabs[0].root.id = " ";
+    assert.throws(() => sanitizeLayout(layout), /nonempty/);
+    layout.workspaces[0].tabs[0].root.id = "p";
+    layout.workspaces[0].activeTabId = "missing";
+    assert.throws(() => sanitizeLayout(layout), /active tab/);
+    layout.workspaces[0].activeTabId = layout.workspaces[0].tabs[0].id;
+    layout.activeWorkspaceId = "missing";
+    assert.throws(() => sanitizeLayout(layout), /active workspace/);
+  });
+
+  it("normalizes extreme finite weights without overflow or lost geometry", () => {
+    const layout = defaultLayout();
+    const tab = gridTab();
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    if (tab.root.kind !== "split") throw new Error("Expected split");
+    tab.root.sizes = [1e308, 1e308];
+    const loaded = sanitizeLayout(layout).workspaces[0].tabs[0].root;
+    if (loaded.kind !== "split") throw new Error("Expected split");
+    assert.deepEqual(loaded.sizes, [0.5, 0.5]);
+    assert.deepEqual(computeLayout(loaded).panes.map((pane) => pane.rect), [
+      [0, 0, 0.5, 0.5], [0.5, 0, 0.5, 0.5],
+      [0, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5],
+    ]);
+  });
+
+  it("keeps representable geometry at both ratio boundaries and subnormal weights", () => {
+    const layout = defaultLayout();
+    const tab = gridTab();
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    if (tab.root.kind !== "split") throw new Error("Expected split");
+    for (const sizes of [[0.05, 0.95], [0.95, 0.05], [Number.MIN_VALUE, Number.MIN_VALUE]]) {
+      tab.root.sizes = sizes as [number, number];
+      const loaded = sanitizeLayout(layout).workspaces[0].tabs[0].root;
+      if (loaded.kind !== "split") throw new Error("Expected split");
+      assert.deepEqual(loaded.sizes, sizes[0] === Number.MIN_VALUE ? [0.5, 0.5] : sizes);
+    }
+  });
+
+  it("rejects nonfinite, nonpositive and degenerate weights", () => {
+    const layout = defaultLayout();
+    const tab = gridTab();
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    if (tab.root.kind !== "split") throw new Error("Expected split");
+    for (const sizes of [[Infinity, 1], [NaN, 1], [0, 1], [-1, 1], [1e308, 1e-308]]) {
+      tab.root.sizes = sizes as [number, number];
+      assert.throws(() => sanitizeLayout(layout), /split sizes/);
+    }
+  });
+
+  it("rejects documents above byte, depth and global entity limits", () => {
+    const large = defaultLayout();
+    if (large.workspaces[0].tabs[0].root.kind !== "pane") throw new Error("Expected pane");
+    large.workspaces[0].tabs[0].root.cwd = "x".repeat(MAX_LAYOUT_BYTES);
+    assert.throws(() => sanitizeLayout(large), /byte limit/);
+    const deep = defaultLayout();
+    const tab = deep.workspaces[0].tabs[0];
+    for (let i = 0; i < MAX_LAYOUT_DEPTH; i++) {
+      tab.root = {
+        kind: "split", id: `split-${i}`, dir: "row", sizes: [0.5, 0.5],
+        first: tab.root, second: { kind: "pane", id: `side-${i}` },
+      };
+    }
+    assert.throws(() => sanitizeLayout(deep), /depth limit/);
+    const crowded = defaultLayout();
+    for (let i = 0; i < Math.ceil(MAX_LAYOUT_ENTITIES / 3); i++) {
+      crowded.workspaces.push(defaultWorkspace());
+    }
+    assert.throws(() => sanitizeLayout(crowded), /entity limit/);
+  });
+
+  it("accepts the maximum tree depth and entity count without recursive overflow", () => {
+    const layout = defaultLayout();
+    const tab = layout.workspaces[0].tabs[0];
+    for (let i = 1; i < MAX_LAYOUT_DEPTH; i++) {
+      tab.root = {
+        kind: "split", id: `split-${i}`, dir: "row", sizes: [0.5, 0.5],
+        first: tab.root, second: { kind: "pane", id: `side-${i}` },
+      };
+    }
+    assert.deepEqual(sanitizeLayout(layout), layout);
+    const crowded = defaultLayout();
+    crowded.workspaces.push(defaultWorkspace("Second"));
+    // Two workspaces/tabs/panes use six entities; each added tab/pane uses two.
+    for (let i = 0; i < (MAX_LAYOUT_ENTITIES - 6) / 2; i++) {
+      crowded.workspaces[0].tabs.push(defaultTab());
+    }
+    assert.deepEqual(sanitizeLayout(crowded), crowded);
+  });
+
+  it("retains full UUIDs for lifetime identity generation", () => {
+    assert.match(newId("pane"), /^pane-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("preserves startup commands", () => {
@@ -220,79 +325,6 @@ describe("isActiveAgentState", () => {
     assert.equal(isActiveAgentState("done"), false);
     assert.equal(isActiveAgentState(undefined), false);
     assert.equal(isActiveAgentState("bogus"), false);
-  });
-});
-
-describe("detectFinished", () => {
-  it("reports working-to-idle transitions only", () => {
-    const prev = {
-      "1": { state: "working", agent: "Codex" },
-      "2": { state: "working", agent: "Claude Code" },
-      "3": { state: "idle" },
-    };
-    const next = {
-      "1": { state: "idle" },
-      "2": { state: "working", agent: "Claude Code" },
-      "3": { state: "idle" },
-      "4": { state: "working", agent: "Amp" },
-    };
-    assert.deepEqual(detectFinished(prev, next), ["1"]);
-    assert.deepEqual(detectFinished({}, next), []);
-  });
-
-  it("treats a live backend done as a finish (interactive agent at prompt)", () => {
-    const prev = {
-      "1": { state: "working", agent: "Codex" },
-      "2": { state: "working", agent: "Claude Code" },
-    };
-    const next = {
-      "1": { state: "done", agent: "Codex" },
-      "2": { state: "working", agent: "Claude Code" },
-    };
-    assert.deepEqual(detectFinished(prev, next), ["1"]);
-    // Steady done is not a repeat finish.
-    assert.deepEqual(detectFinished(next, next), []);
-  });
-
-  it("finishes blocked and unknown panes, not active-to-active moves", () => {
-    const prev = {
-      "1": { state: "blocked", agent: "Codex" },
-      "2": { state: "unknown", agent: "Codex" },
-      "3": { state: "unknown", agent: "Codex" },
-      "4": { state: "working", agent: "Codex" },
-    };
-    const next = {
-      "1": { state: "idle" },
-      "2": { state: "idle" },
-      "3": { state: "working", agent: "Codex" },
-      "4": { state: "blocked", agent: "Codex" },
-    };
-    assert.deepEqual(detectFinished(prev, next), ["1", "2"]);
-  });
-});
-
-describe("detectVanished", () => {
-  it("reports working panes missing from the next snapshot", () => {
-    const prev = {
-      "1": { state: "working", agent: "Codex" },
-      "2": { state: "idle" },
-      "3": { state: "working", agent: "Amp" },
-    };
-    assert.deepEqual(detectVanished(prev, { "3": { state: "working" } }), ["1"]);
-    assert.deepEqual(detectVanished(prev, prev), []);
-  });
-
-  it("reports blocked and unknown panes missing from the next snapshot", () => {
-    const prev = {
-      "1": { state: "blocked", agent: "Codex" },
-      "2": { state: "unknown", agent: "Codex" },
-      "3": { state: "working", agent: "Amp" },
-      "4": { state: "idle" },
-    };
-    assert.deepEqual(detectVanished(prev, { "3": { state: "working" } }), [
-      "1",
-      "2",
-    ]);
   });
 });
 
@@ -604,7 +636,7 @@ describe("zoom", () => {
     assert.equal(tab.zoomedPaneId, sibling.id);
   });
 
-  it("sanitize keeps valid zooms and drops broken ones", () => {
+  it("sanitize keeps valid zooms and rejects missing targets for recovery", () => {
     const tab = defaultTab();
     const firstId = rootPaneId(tab);
     const sibling = splitPaneInTab(tab, firstId, "row");
@@ -616,7 +648,51 @@ describe("zoom", () => {
     const good = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
     assert.equal(good.workspaces[0].tabs[0].zoomedPaneId, sibling.id);
     tab.zoomedPaneId = "ghost";
-    const bad = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
-    assert.equal(bad.workspaces[0].tabs[0].zoomedPaneId, undefined);
+    assert.throws(() => sanitizeLayout(JSON.parse(JSON.stringify(layout))), /zoomed pane/);
+  });
+});
+
+describe("moveWorkspace", () => {
+  function three() {
+    const layout = defaultLayout();
+    const a = layout.workspaces[0];
+    const b = defaultWorkspace("B");
+    const c = defaultWorkspace("C");
+    layout.workspaces.push(b, c);
+    return { layout, ids: [a.id, b.id, c.id] };
+  }
+
+  function order(layout: { workspaces: { id: string }[] }): string[] {
+    return layout.workspaces.map((w) => w.id);
+  }
+
+  it("moves a workspace before another", () => {
+    const { layout, ids } = three();
+    assert.equal(moveWorkspace(layout, ids[2], ids[0], "before"), true);
+    assert.deepEqual(order(layout), [ids[2], ids[0], ids[1]]);
+  });
+
+  it("moves a workspace after another", () => {
+    const { layout, ids } = three();
+    assert.equal(moveWorkspace(layout, ids[0], ids[2], "after"), true);
+    assert.deepEqual(order(layout), [ids[1], ids[2], ids[0]]);
+  });
+
+  it("keeps the active workspace selected by id", () => {
+    const { layout, ids } = three();
+    layout.activeWorkspaceId = ids[0];
+    assert.equal(moveWorkspace(layout, ids[0], ids[2], "after"), true);
+    assert.equal(layout.activeWorkspaceId, ids[0]);
+    assert.deepEqual(order(layout), [ids[1], ids[2], ids[0]]);
+  });
+
+  it("rejects unknown ids, self-drops, and no-op adjacent moves", () => {
+    const { layout, ids } = three();
+    assert.equal(moveWorkspace(layout, "nope", ids[0]), false);
+    assert.equal(moveWorkspace(layout, ids[0], "nope"), false);
+    assert.equal(moveWorkspace(layout, ids[0], ids[0]), false);
+    assert.equal(moveWorkspace(layout, ids[0], ids[1], "before"), false);
+    assert.equal(moveWorkspace(layout, ids[1], ids[0], "after"), false);
+    assert.deepEqual(order(layout), ids);
   });
 });

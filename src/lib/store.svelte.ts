@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   activeTab,
   activeWorkspace,
+  baseName,
   clearStaleZoom,
   closePaneInTab,
   collectPaneIds,
@@ -14,6 +15,8 @@ import {
   findNeighbor,
   findPane,
   findTabByPane,
+  gridTab,
+  moveWorkspace,
   resizePaneInTab,
   sanitizeLayout,
   setZoomedPane,
@@ -65,7 +68,14 @@ export const MAX_TERM_OPACITY = 100;
 class AppStore {
   layout = $state<Layout | null>(null);
   loaded = $state(false);
+  firstRun = $state(false);
+  onboardingOpen = $state(false);
   loadError = $state<string | null>(null);
+  saveError = $state<string | null>(null);
+  recoveryRequired = $state(false);
+  recoveryBusy = $state(false);
+  recoveryError = $state<string | null>(null);
+  recoveryBackupPath = $state<string | null>(null);
   themeId = $state<ThemeId>(DEFAULT_THEME_ID);
   termFontSize = $state<number>(DEFAULT_TERM_FONT_SIZE);
   termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
@@ -91,6 +101,8 @@ class AppStore {
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingTerminalCommand: { paneId: string; command: string } | null =
+    null;
 
   get theme() {
     return THEMES[this.themeId];
@@ -150,19 +162,66 @@ class AppStore {
       // The app can still start with its defaults if storage is unavailable.
     }
 
+    await this.retryLayout();
+  }
+
+  /** A failed load never installs a renderable/default layout or enables autosave. */
+  async retryLayout(): Promise<void> {
+    if (this.recoveryBusy) return;
+    this.recoveryBusy = true;
+    this.recoveryRequired = true;
+    this.layout = null;
+    this.firstRun = false;
+    this.recoveryError = null;
+    clearTimeout(this.saveTimer ?? undefined);
+    this.saveTimer = null;
     try {
       const raw = await invoke<unknown>("load_layout");
-      if (raw == null) {
-        this.layout = defaultLayout();
-        this.saveSoon();
-      } else {
-        this.layout = sanitizeLayout(raw);
-      }
+      this.layout = raw == null ? defaultLayout() : sanitizeLayout(raw);
+      this.firstRun = raw == null;
+      this.recoveryRequired = false;
+      this.loadError = null;
+      this.saveError = null;
     } catch (e) {
       this.loadError = e instanceof Error ? e.message : String(e);
-      this.layout = defaultLayout();
     } finally {
+      this.recoveryBusy = false;
       this.loaded = true;
+    }
+  }
+
+  /** Export keeps exact original bytes, including corrupt/unsupported documents. */
+  async exportRecoveryLayout(): Promise<void> {
+    if (!this.recoveryRequired || this.recoveryBusy) return;
+    this.recoveryBusy = true;
+    this.recoveryError = null;
+    try {
+      this.recoveryBackupPath = await invoke<string>("export_layout");
+    } catch (e) {
+      this.recoveryError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.recoveryBusy = false;
+    }
+  }
+
+  /** Call only from the explicit recovery reset action, never automatically. */
+  async resetRecoveryLayout(): Promise<void> {
+    if (!this.recoveryRequired || this.recoveryBusy) return;
+    this.recoveryBusy = true;
+    this.recoveryError = null;
+    const fresh = defaultLayout();
+    try {
+      const backup = await invoke<string | null>("reset_layout", { layout: fresh });
+      if (backup) this.recoveryBackupPath = backup;
+      this.layout = fresh;
+      this.firstRun = false;
+      this.recoveryRequired = false;
+      this.loadError = null;
+      this.saveError = null;
+    } catch (e) {
+      this.recoveryError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.recoveryBusy = false;
     }
   }
 
@@ -278,8 +337,9 @@ class AppStore {
   }
 
   saveSoon(immediate = false): void {
-    if (this.saveTimer) clearTimeout(this.saveTimer);
+    clearTimeout(this.saveTimer ?? undefined);
     this.saveTimer = null;
+    if (!this.loaded || this.recoveryRequired || this.recoveryBusy || !this.layout) return;
     if (immediate) {
       void this.flush();
       return;
@@ -291,17 +351,25 @@ class AppStore {
   }
 
   private async flush(): Promise<void> {
-    if (!this.layout) return;
+    if (!this.layout || !this.loaded || this.recoveryRequired || this.recoveryBusy) return;
     try {
-      await invoke("save_layout", { layout: this.layout });
+      const layout = sanitizeLayout($state.snapshot(this.layout));
+      await invoke("save_layout", { layout });
+      this.saveError = null;
     } catch (e) {
-      console.error("ubra: failed to save layout", e);
+      this.saveError = e instanceof Error ? e.message : String(e);
     }
   }
 
-  addWorkspace(): void {
+  addWorkspace(withGrid = false): void {
     if (!this.layout) return;
     const ws = defaultWorkspace(`Workspace ${this.layout.workspaces.length + 1}`);
+    if (withGrid) {
+      const tab = gridTab();
+      ws.tabs = [tab];
+      ws.activeTabId = tab.id;
+      this.paneFocusTarget = collectPaneIds(tab.root)[0];
+    }
     this.layout.workspaces.push(ws);
     this.layout.activeWorkspaceId = ws.id;
     this.saveSoon();
@@ -319,6 +387,17 @@ class AppStore {
     const ws = this.layout?.workspaces.find((w) => w.id === id);
     if (ws && name.trim()) {
       ws.name = name.trim();
+      this.saveSoon();
+    }
+  }
+
+  moveWorkspace(
+    sourceId: string,
+    targetId: string,
+    position: "before" | "after" = "before",
+  ): void {
+    if (!this.layout) return;
+    if (moveWorkspace(this.layout, sourceId, targetId, position)) {
       this.saveSoon();
     }
   }
@@ -507,6 +586,66 @@ class AppStore {
     }
     const first = collectPaneIds(tab.root)[0];
     return first ? { tab, paneId: first } : null;
+  }
+
+  openOnboarding(): void {
+    if (!this.layout || this.firstRun) return;
+    this.settingsOpen = false;
+    this.onboardingOpen = true;
+  }
+
+  completeOnboarding(
+    projectDirectory: string | null,
+    command: string | null,
+  ): string | null {
+    if (!this.layout || (!this.firstRun && !this.onboardingOpen)) return null;
+
+    let pane: ReturnType<typeof findPane> = null;
+    if (this.firstRun) {
+      const current = this.currentPane();
+      if (!current) return null;
+      pane = findPane(current.tab.root, current.paneId);
+      if (!pane) return null;
+      if (projectDirectory) {
+        pane.cwd = projectDirectory;
+        const workspace = this.layout.workspaces.find((ws) =>
+          ws.tabs.some((tab) => tab.id === current.tab.id),
+        );
+        if (workspace) workspace.name = baseName(projectDirectory) || "Project";
+      }
+    } else {
+      if (!projectDirectory) return null;
+      const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
+      this.layout.workspaces.push(workspace);
+      this.layout.activeWorkspaceId = workspace.id;
+      pane = findPane(workspace.tabs[0].root, workspace.tabs[0].root.id);
+      if (!pane) return null;
+      pane.cwd = projectDirectory;
+    }
+
+    const trimmedCommand = command?.trim() ?? "";
+    this.pendingTerminalCommand = trimmedCommand
+      ? { paneId: pane.id, command: trimmedCommand }
+      : null;
+    this.firstRun = false;
+    this.onboardingOpen = false;
+    this.saveSoon(true);
+    return pane.id;
+  }
+
+  skipOnboarding(): void {
+    if (this.firstRun) {
+      this.firstRun = false;
+      this.saveSoon(true);
+    }
+    this.onboardingOpen = false;
+  }
+
+  takePendingTerminalCommand(paneId: string): string | null {
+    if (this.pendingTerminalCommand?.paneId !== paneId) return null;
+    const command = this.pendingTerminalCommand.command;
+    this.pendingTerminalCommand = null;
+    return command;
   }
 
   cycleTab(dir: 1 | -1): void {

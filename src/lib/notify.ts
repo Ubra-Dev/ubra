@@ -43,6 +43,15 @@ export function chimeStyleParam(style: string): string | null {
     : DEFAULT_CHIME_STYLE;
 }
 
+/** One selection contract for preview, test, and real notification playback. */
+export function playbackPayload(kind: SoundKind, style: string, retainedFile: string) {
+  return {
+    kind,
+    style: chimeStyleParam(style),
+    file: style === CUSTOM_CHIME_ID && retainedFile.trim() !== "" ? retainedFile : null,
+  };
+}
+
 export function parseDelivery(value: unknown): NotifyDelivery {
   return value === "off" || value === "inapp" || value === "system"
     ? value

@@ -9,13 +9,17 @@
 //!   rules-reload | shutdown | help
 //! ```
 
-use crate::daemon::{default_state_dir, read_port_file, PORT_FILE};
+use crate::daemon::{
+    connect_authenticated, default_state_dir, open_private_file, read_frame, write_frame,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION,
+};
 use crate::pty_manager::PaneId;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::BufReader;
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CliCommand {
@@ -296,13 +300,13 @@ fn state_dir_of(opts: &CliOptions) -> PathBuf {
     opts.state_dir.clone().unwrap_or_else(default_state_dir)
 }
 
-fn daemon_addr(state_dir: &std::path::Path) -> Option<SocketAddr> {
-    let port = read_port_file(state_dir)?;
-    format!("127.0.0.1:{}", port.port).parse().ok()
+fn try_authenticated(state_dir: &std::path::Path) -> Option<TcpStream> {
+    connect_authenticated(state_dir, Duration::from_millis(500)).ok()
 }
 
-fn try_connect(addr: SocketAddr) -> Option<TcpStream> {
-    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()
+fn daemon_log(state_dir: &std::path::Path) -> Result<std::fs::File, String> {
+    open_private_file(&state_dir.join("daemon.log"), true, true)
+        .map_err(|e| format!("cannot open private daemon log: {e}"))
 }
 
 fn daemon_binary() -> PathBuf {
@@ -323,19 +327,11 @@ fn daemon_binary() -> PathBuf {
 
 /// Connect, starting a daemon first when none answers.
 pub fn connect_or_start(state_dir: &std::path::Path) -> Result<TcpStream, String> {
-    if let Some(addr) = daemon_addr(state_dir) {
-        if let Some(stream) = try_connect(addr) {
-            return Ok(stream);
-        }
+    if let Some(stream) = try_authenticated(state_dir) {
+        return Ok(stream);
     }
-    std::fs::create_dir_all(state_dir)
-        .map_err(|e| format!("cannot create state dir {}: {e}", state_dir.display()))?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state_dir.join("daemon.log"))
-        .map_err(|e| format!("cannot open daemon log: {e}"))?;
-    Command::new(daemon_binary())
+    let log = daemon_log(state_dir)?;
+    let mut child = Command::new(daemon_binary())
         .arg("--state-dir")
         .arg(state_dir)
         .stdin(Stdio::null())
@@ -343,12 +339,19 @@ pub fn connect_or_start(state_dir: &std::path::Path) -> Result<TcpStream, String
         .stderr(log)
         .spawn()
         .map_err(|e| format!("cannot start ubra-daemon: {e}"))?;
-    for _ in 0..100 {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
-        if let Some(addr) = daemon_addr(state_dir) {
-            if let Some(stream) = try_connect(addr) {
-                return Ok(stream);
-            }
+        if let Ok(stream) = connect_authenticated(
+            state_dir,
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(250)),
+        ) {
+            return Ok(stream);
         }
     }
     Err(format!(
@@ -357,36 +360,131 @@ pub fn connect_or_start(state_dir: &std::path::Path) -> Result<TcpStream, String
     ))
 }
 
-/// Read lines until a response (`ok`) arrives, skipping pushed events.
-fn read_response(reader: &mut BufReader<TcpStream>) -> Result<serde_json::Value, String> {
-    for _ in 0..1000 {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| format!("lost daemon connection: {e}"))?;
-        if line.is_empty() {
-            return Err("lost daemon connection".to_string());
-        }
-        let value: serde_json::Value =
-            serde_json::from_str(&line).map_err(|e| format!("bad daemon reply: {e}"))?;
-        if value.get("ok").is_some() {
-            return Ok(value);
-        }
-    }
-    Err("daemon never answered".to_string())
+fn valid_pane_id(value: &serde_json::Value) -> bool {
+    value
+        .as_u64()
+        .is_some_and(|id| id > 0 && id <= u64::from(PaneId::MAX))
 }
 
-fn request(stream: &mut TcpStream, value: serde_json::Value) -> Result<serde_json::Value, String> {
-    writeln!(stream, "{value}").map_err(|e| format!("lost daemon connection: {e}"))?;
-    stream
-        .flush()
-        .map_err(|e| format!("lost daemon connection: {e}"))?;
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| format!("lost daemon connection: {e}"))?,
-    );
-    read_response(&mut reader)
+fn valid_panes(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|panes| {
+        panes.iter().all(|pane| {
+            valid_pane_id(&pane["id"])
+                && pane["rootPid"]
+                    .as_u64()
+                    .is_some_and(|pid| pid <= u64::from(u32::MAX))
+        })
+    })
+}
+
+fn valid_states(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|states| {
+        states.iter().all(|(pane, status)| {
+            pane.parse::<PaneId>().is_ok_and(|id| id != 0)
+                && status["state"].is_string()
+                && status["reason"].is_string()
+                && status["source"].is_string()
+        })
+    })
+}
+
+fn validate_response(value: &serde_json::Value, op: &str) -> Result<(), String> {
+    let Some(ok) = value["ok"].as_bool() else {
+        return Err("daemon reply missing boolean ok".into());
+    };
+    if !ok {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("daemon operation failed")
+            .to_string());
+    }
+    let shape_ok = match op {
+        "ping" => value["protocol"] == PROTOCOL_VERSION && value["version"].is_string(),
+        "pty_spawn" => valid_pane_id(&value["pane"]),
+        "pty_read" => value["screen"].is_string(),
+        "panes" => valid_panes(&value["panes"]),
+        "agent_states" => valid_states(&value["states"]) && value["revision"].as_u64().is_some(),
+        "snapshot" => {
+            value["protocol"] == PROTOCOL_VERSION
+                && value["version"].is_string()
+                && valid_panes(&value["panes"])
+                && valid_states(&value["states"])
+                && value["revision"].as_u64().is_some()
+        }
+        "wait_state" => {
+            valid_pane_id(&value["pane"])
+                && value["state"].is_string()
+                && value["reason"].is_string()
+        }
+        "wait_output" => valid_pane_id(&value["pane"]),
+        "shutdown" => value["shutdown"] == true,
+        _ => true,
+    };
+    if shape_ok {
+        Ok(())
+    } else {
+        Err(format!("malformed {op} reply"))
+    }
+}
+
+fn read_response(
+    reader: &mut BufReader<TcpStream>,
+    id: u64,
+    op: &str,
+    deadline: Instant,
+) -> Result<serde_json::Value, String> {
+    loop {
+        let line =
+            read_frame(reader, deadline).map_err(|e| format!("lost daemon connection: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| format!("bad daemon reply: {e}"))?;
+        if value["event"].is_string() {
+            continue;
+        }
+        if value["id"].as_u64().is_none() || !value["ok"].is_boolean() {
+            print(&value);
+            return Err("malformed daemon response envelope".into());
+        }
+        if value["id"] != id {
+            continue;
+        }
+        if let Err(error) = validate_response(&value, op) {
+            print(&value);
+            return Err(error);
+        }
+        return Ok(value);
+    }
+}
+
+fn request(
+    stream: &mut TcpStream,
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let op = value["op"]
+        .as_str()
+        .ok_or("missing request op")?
+        .to_string();
+    let seconds = if op == "wait_state" || op == "wait_output" {
+        value["timeout_secs"].as_u64().unwrap_or(30).clamp(1, 600) + 5
+    } else {
+        10
+    };
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    value["id"] = id.into();
+    let encoded = value.to_string();
+    if encoded.len() + 1 > MAX_FRAME_BYTES {
+        return Err("request exceeds frame byte limit".into());
+    }
+    write_frame(
+        stream,
+        &encoded,
+        deadline.min(Instant::now() + Duration::from_secs(5)),
+    )
+    .map_err(|e| format!("lost daemon connection: {e}"))?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    read_response(&mut reader, id, &op, deadline)
 }
 
 fn print(value: &serde_json::Value) {
@@ -402,17 +500,13 @@ pub fn run(opts: CliOptions) -> Result<(), String> {
         println!("{CLI_USAGE}");
         return Ok(());
     }
-    // `shutdown` against a dead daemon is already-done, not an error.
-    if opts.command == CliCommand::Shutdown {
-        let state_dir = state_dir_of(&opts);
-        if daemon_addr(&state_dir).is_none_or(|addr| try_connect(addr).is_none()) {
-            println!("daemon not running");
-            let _ = std::fs::remove_file(state_dir.join(PORT_FILE));
-            return Ok(());
-        }
-    }
     let state_dir = state_dir_of(&opts);
-    let mut stream = connect_or_start(&state_dir)?;
+    let mut stream = if opts.command == CliCommand::Shutdown {
+        connect_authenticated(&state_dir, Duration::from_secs(2))
+            .map_err(|e| format!("cannot confirm daemon shutdown: {e}"))?
+    } else {
+        connect_or_start(&state_dir)?
+    };
     match opts.command {
         CliCommand::Help => println!("{CLI_USAGE}"),
         CliCommand::Ping => print(&request(&mut stream, serde_json::json!({"op": "ping"}))?),
@@ -485,13 +579,17 @@ pub fn run(opts: CliOptions) -> Result<(), String> {
                     serde_json::json!({"op": "agent_states"}),
                 )?);
             } else {
-                let reader = BufReader::new(stream);
-                for line in reader.lines() {
-                    let line = line.map_err(|e| format!("lost daemon connection: {e}"))?;
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    if value.get("event") == Some(&serde_json::json!("agent-states")) {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let line = read_frame(&mut reader, Instant::now() + Duration::from_secs(60))
+                        .map_err(|e| format!("lost daemon watch connection: {e}"))?;
+                    let value: serde_json::Value = serde_json::from_str(&line)
+                        .map_err(|e| format!("bad daemon event: {e}"))?;
+                    if value["event"] == "agent-states" {
+                        if !valid_states(&value["states"]) {
+                            print(&value);
+                            return Err("malformed agent states event".into());
+                        }
                         print(&value);
                     }
                 }
@@ -506,20 +604,7 @@ pub fn run(opts: CliOptions) -> Result<(), String> {
             serde_json::json!({"op": "rules_reload"}),
         )?),
         CliCommand::Shutdown => {
-            writeln!(stream, "{}", serde_json::json!({"op": "shutdown"}))
-                .map_err(|e| format!("lost daemon connection: {e}"))?;
-            // The daemon exits right after answering; EOF counts as success.
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => println!("daemon stopped"),
-                Ok(_) => match serde_json::from_str::<serde_json::Value>(&line) {
-                    Ok(v) if v.get("ok") == Some(&serde_json::json!(true)) => {
-                        println!("daemon stopped")
-                    }
-                    _ => println!("daemon stopped"),
-                },
-            }
+            print(&request(&mut stream, serde_json::json!({"op":"shutdown"}))?);
         }
     }
     Ok(())

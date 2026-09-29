@@ -15,7 +15,7 @@ struct ChannelSink {
 }
 
 impl PtyEventSink for ChannelSink {
-    fn output(&self, id: PaneId, data: String) {
+    fn output(&self, id: PaneId, data: String, _sequence: u64) {
         let _ = self.tx.send(Event::Output(id, data));
     }
 
@@ -213,7 +213,7 @@ fn snapshot_repaints_live_pane_and_fails_after_kill() {
     }
     let snap = manager.snapshot(id).unwrap();
     assert!(
-        snap.contains("hello-snapshot"),
+        snap.data.contains("hello-snapshot"),
         "snapshot should repaint visible output, got: {snap:?}"
     );
 
@@ -235,4 +235,185 @@ fn snapshot_repaints_live_pane_and_fails_after_kill() {
             Err(_) => panic!("timed out waiting for killed pane to exit"),
         }
     }
+}
+
+#[test]
+fn invalid_geometry_preserves_a_usable_session() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    for (cols, rows) in [
+        (0, 24),
+        (1, 24),
+        (80, 0),
+        (1001, 24),
+        (1000, 1000),
+        (u16::MAX, u16::MAX),
+    ] {
+        assert!(manager.spawn(None, None, vec![], cols, rows).is_err());
+    }
+    assert!(manager.pane_roots().is_empty());
+    let id = manager.spawn(None, None, vec![], 80, 24).unwrap();
+    for (cols, rows) in [(0, 24), (1, 24), (80, 0), (1000, 1000)] {
+        assert!(manager.resize(id, cols, rows).is_err());
+        let snapshot = manager.snapshot(id).unwrap();
+        assert_eq!((snapshot.cols, snapshot.rows), (80, 24));
+    }
+    manager.resize(id, 2, 1).unwrap();
+    manager.resize(id, 80, 24).unwrap();
+    #[cfg(unix)]
+    manager.write(id, "printf 'healthy-%s\\n' pane\n").unwrap();
+    #[cfg(windows)]
+    manager
+        .write(id, "Write-Output ('healthy-' + 'pane')\r\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = String::new();
+    while !output.contains("healthy-pane") {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Event::Output(_, data)) => output.push_str(&data),
+            _ => panic!("rejected resize damaged session: {output:?}"),
+        }
+    }
+    manager.kill(id).unwrap();
+}
+
+#[test]
+fn close_terminates_resistant_child_but_preserves_sibling_pane() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    #[cfg(unix)]
+    let sibling = manager
+        .spawn(Some("sh".into()), None, vec![], 80, 24)
+        .unwrap();
+    #[cfg(windows)]
+    let sibling = manager
+        .spawn(
+            Some("powershell.exe".into()),
+            None,
+            vec!["-NoProfile".into()],
+            80,
+            24,
+        )
+        .unwrap();
+    #[cfg(unix)]
+    let parent = manager.spawn(Some("sh".into()), None, vec!["-c".into(),
+        "trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; echo CHILD:$$; while :; do sleep 1; done' & wait".into()], 80, 24).unwrap();
+    #[cfg(windows)]
+    let parent = manager.spawn(Some("powershell.exe".into()), None, vec!["-NoProfile".into(), "-Command".into(),
+        "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; Write-Output ('CHILD:' + $p.Id); Start-Sleep 300".into()], 80, 24).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = String::new();
+    let child = loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Event::Output(id, data)) if id == parent => {
+                output.push_str(&data);
+                if let Some(line) = output.lines().find(|line| line.starts_with("CHILD:")) {
+                    if let Ok(pid) = line.trim_start_matches("CHILD:").trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => panic!("child did not start: {output:?}"),
+        }
+    };
+    #[cfg(unix)]
+    assert_eq!(
+        unsafe { libc::getsid(child) },
+        manager
+            .pane_roots()
+            .iter()
+            .find(|p| p.id == parent)
+            .unwrap()
+            .root_pid as i32
+    );
+    manager.kill(parent).unwrap();
+    let mut processes = sysinfo::System::new();
+    processes.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    assert!(processes
+        .process(sysinfo::Pid::from_u32(child as u32))
+        .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie));
+    #[cfg(unix)]
+    manager
+        .write(sibling, "printf 'sibling-%s\\n' alive\n")
+        .unwrap();
+    #[cfg(windows)]
+    manager
+        .write(sibling, "Write-Output ('sibling-' + 'alive')\r\n")
+        .unwrap();
+    let mut output = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !output.contains("sibling-alive") {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Event::Output(id, data)) if id == sibling => output.push_str(&data),
+            Ok(_) => {}
+            Err(_) => panic!("closing another pane damaged sibling: {output:?}"),
+        }
+    }
+    manager.kill(sibling).unwrap();
+}
+
+#[test]
+fn shutdown_terminates_live_sessions_and_refuses_late_spawns() {
+    let (tx, _rx) = mpsc::channel();
+    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    manager.spawn(None, None, vec![], 80, 24).unwrap();
+    manager.spawn(None, None, vec![], 80, 24).unwrap();
+    manager.shutdown().unwrap();
+    assert!(
+        manager.pane_roots().is_empty(),
+        "live sessions escaped shutdown"
+    );
+    assert!(
+        manager.spawn(None, None, vec![], 80, 24).is_err(),
+        "closed manager admitted another process"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "ubra-exit-child-{:016x}",
+        u64::from_ne_bytes(nonce)
+    ));
+    let script = format!(
+        "trap '' HUP; sh -c 'trap \"\" HUP TERM; echo $$ > \"$1\"; exec sleep 300' sh '{}' </dev/null >/dev/null 2>&1 & \
+         while [ ! -s '{}' ]; do sleep 0.01; done; printf 'CHILD:'; cat '{}'; exit 0",
+        path.display(), path.display(), path.display()
+    );
+    let id = manager
+        .spawn(Some("sh".into()), None, vec!["-c".into(), script], 80, 24)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = String::new();
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Event::Output(_, data)) => output.push_str(&data),
+            Ok(Event::Exit(got, success)) => {
+                assert_eq!(got, id);
+                assert!(success);
+                break;
+            }
+            Err(_) => panic!("root exit was not delivered: {output:?}"),
+        }
+    }
+    let child = std::fs::read_to_string(&path)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let mut processes = sysinfo::System::new();
+    processes.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    assert!(
+        processes
+            .process(sysinfo::Pid::from_u32(child))
+            .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie),
+        "orphaned child survived root exit"
+    );
+    std::fs::remove_file(path).unwrap();
 }

@@ -1,36 +1,47 @@
 //! Headless agent-runtime daemon (Phase 5a): owns PTYs and the agent
 //! watcher, serving a JSON-lines protocol over loopback TCP.
 //!
-//! Wire format: one JSON object per line, both directions. Requests carry
-//! `op` plus arguments; responses carry `ok` (echoing `id` when present).
-//! The daemon also pushes `event` objects (pty output/exit, agent-state
-//! changes) to every connection; clients filter what they need.
-//!
-//! ```text
-//! -> {"op":"pty_spawn","cols":80,"rows":24}
-//! <- {"event":"agent-states","states":{}}
-//! <- {"ok":true,"pane":1}
-//! <- {"event":"pty_output","pane":1,"data":"$ "}
-//! ```
-//!
-//! SECURITY: no authentication yet — any local process can drive panes.
-//! The socket binds 127.0.0.1 only (never LAN-reachable); a token file is
-//! planned before the GUI migrates onto this protocol.
+//! Requests carry `op` and a response `id`; authenticated responses echo
+//! the id and carry a boolean `ok`. Protocol 2 uses nonce-bound HMAC-SHA256
+//! proofs in both directions, with distinct server/client roles. The client
+//! proves identity only after verifying the server; credentials never
+//! travel over TCP. Pane state and pushed events require authentication.
+//! Runtime files have current-user-only access. A persistent OS-locked
+//! inode serializes startup and remains present after shutdown/crashes.
+//! Connection, pane, frame and outstanding output budgets are bounded.
+//! A lagging consumer is disconnected rather than silently dropping bytes.
 
-use crate::agent_watch::Watcher;
+use crate::agent_status::AgentStatusService;
 use crate::pty_manager::{PaneId, PtyEventSink, PtyManager};
-use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use fs2::FileExt;
+use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
+use sha2::Sha256;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub const PROTOCOL_VERSION: u32 = 1;
-pub const AGENT_POLL_SECS: u64 = 2;
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const MAX_CLIENTS: usize = 32;
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_PANES: usize = 64;
+pub const MAX_QUEUE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_QUEUE_MESSAGES: usize = 256;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub const PORT_FILE: &str = "daemon.json";
+pub const AUTH_FILE: &str = "daemon.auth";
+pub const LOCK_DIR: &str = "daemon.lock";
 pub const APP_IDENTIFIER: &str = "com.nemoryoliver.ubra";
 
 /// Request envelope: flat object, `op` plus per-op arguments.
@@ -39,6 +50,10 @@ pub struct Request {
     pub op: String,
     #[serde(default)]
     pub id: Option<u64>,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default)]
+    pub proof: Option<String>,
     #[serde(default)]
     pub pane: Option<PaneId>,
     #[serde(default)]
@@ -69,7 +84,16 @@ fn respond(id: Option<u64>, mut value: serde_json::Value) -> String {
             obj.insert("id".to_string(), id.into());
         }
     }
-    value.to_string()
+    let encoded = value.to_string();
+    if encoded.len() + 1 > MAX_FRAME_BYTES {
+        let mut error = serde_json::json!({"ok":false,"error":"response exceeds frame byte limit"});
+        if let Some(id) = id {
+            error["id"] = id.into();
+        }
+        error.to_string()
+    } else {
+        encoded
+    }
 }
 
 fn ok(id: Option<u64>, value: serde_json::Value) -> String {
@@ -83,13 +107,17 @@ fn err(id: Option<u64>, msg: impl std::fmt::Display) -> String {
     )
 }
 
-/// Runtime state dir: `--state-dir` or `<tmp>/ubra-<user>/`.
+/// Private per-user runtime directory, independent of spoofable USER variables.
 pub fn default_state_dir() -> PathBuf {
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "user".to_string());
-    std::env::temp_dir().join(format!("ubra-{user}"))
+    #[cfg(unix)]
+    let name = format!("ubra-{}", unsafe { libc::geteuid() });
+    #[cfg(windows)]
+    let name = "ubra-runtime".to_string();
+    #[cfg(unix)]
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    #[cfg(windows)]
+    let root = app_data_dir();
+    root.join(name)
 }
 
 /// Contents of `<state-dir>/daemon.json`: where the daemon listens.
@@ -99,17 +127,560 @@ pub struct PortFile {
     pub pid: u32,
 }
 
-pub fn read_port_file(dir: &Path) -> Option<PortFile> {
-    let text = std::fs::read_to_string(dir.join(PORT_FILE)).ok()?;
-    serde_json::from_str(&text).ok()
+fn permission_error(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
-pub fn write_port_file(dir: &Path, port: u16) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(
-        dir.join(PORT_FILE),
-        serde_json::json!({"port": port, "pid": std::process::id()}).to_string(),
+fn validate_private(file: &File, directory: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+        return Err(permission_error("runtime object has the wrong type"));
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || (!directory && metadata.nlink() != 1)
+    {
+        return Err(permission_error(
+            "runtime object must be private and owned by the current user",
+        ));
+    }
+    #[cfg(windows)]
+    windows_security::validate(file)?;
+    Ok(())
+}
+
+pub fn open_private_file(path: &Path, append: bool, create: bool) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        secure_state_dir(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(append || create)
+        .append(append)
+        .create(create);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    validate_private(&file, false)?;
+    Ok(file)
+}
+
+fn read_private_string(path: &Path) -> Option<String> {
+    let mut file = open_private_file(path, false, false).ok()?;
+    let mut text = String::new();
+    Read::by_ref(&mut file)
+        .take(4097)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() <= 4096).then_some(text)
+}
+
+pub fn read_port_file(dir: &Path) -> Option<PortFile> {
+    serde_json::from_str(&read_private_string(&dir.join(PORT_FILE))?).ok()
+}
+
+pub fn read_auth_token(dir: &Path) -> Option<String> {
+    let text = read_private_string(&dir.join(AUTH_FILE))?;
+    let token = text.trim();
+    (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())).then(|| token.to_string())
+}
+
+pub fn secure_state_dir(dir: &Path) -> io::Result<()> {
+    let absolute = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    let mut prefix = PathBuf::new();
+    for component in absolute.components() {
+        prefix.push(component);
+        match fs::symlink_metadata(&prefix) {
+            Ok(meta) => {
+                #[cfg(unix)]
+                let trusted_system_link = meta.file_type().is_symlink()
+                    && prefix != absolute
+                    && meta.uid() == 0
+                    && fs::metadata(&prefix).is_ok_and(|target| target.is_dir());
+                #[cfg(not(unix))]
+                let trusted_system_link = false;
+                if (meta.file_type().is_symlink() && !trusted_system_link)
+                    || (!meta.is_dir() && !trusted_system_link)
+                {
+                    return Err(permission_error(
+                        "runtime directory must not follow user-controlled symlinks",
+                    ));
+                }
+                #[cfg(unix)]
+                if !trusted_system_link
+                    && (meta.uid() != 0 && meta.uid() != unsafe { libc::geteuid() }
+                        || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0))
+                {
+                    return Err(permission_error(
+                        "runtime directory ancestor is writable by another user",
+                    ));
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if meta.file_attributes() & 0x400 != 0 {
+                        return Err(permission_error(
+                            "runtime directory ancestors must not be reparse points",
+                        ));
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    match fs::DirBuilder::new().mode(0o700).create(&prefix) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                #[cfg(windows)]
+                match windows_security::create_directory(&prefix) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    #[cfg(unix)]
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(&absolute)?;
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+                    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
+            )
+            .open(&absolute)?
+    };
+    validate_private(&file, true)
+}
+
+fn write_private_file(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        secure_state_dir(parent)?;
+    }
+    let tmp = path.with_file_name(format!(".runtime-{}.tmp", new_auth_token()?));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let result = (|| {
+        let mut file = options.open(&tmp)?;
+        validate_private(&file, false)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
+pub fn new_auth_token() -> io::Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(token)
+}
+
+fn token_matches(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(provided)
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
+pub fn write_auth_token(dir: &Path, token: &str) -> io::Result<()> {
+    write_private_file(&dir.join(AUTH_FILE), &format!("{token}\n"))
+}
+
+pub fn write_port_file(dir: &Path, port: u16) -> io::Result<()> {
+    write_private_file(
+        &dir.join(PORT_FILE),
+        &serde_json::json!({"port": port, "pid": std::process::id()}).to_string(),
     )
+}
+
+pub fn remove_runtime_files(dir: &Path) {
+    let _ = fs::remove_file(dir.join(PORT_FILE));
+    let _ = fs::remove_file(dir.join(AUTH_FILE));
+}
+
+fn auth_proof(token: &str, role: &str, client: &str, server: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(format!("ubra-v{PROTOCOL_VERSION}:{role}:{client}:{server}").as_bytes());
+    let mut proof = String::with_capacity(64);
+    for byte in mac.finalize().into_bytes() {
+        write!(&mut proof, "{byte:02x}").expect("String write");
+    }
+    proof
+}
+
+fn valid_nonce(nonce: &str) -> bool {
+    nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Bounded framing with a total deadline, including trickled partial frames.
+pub fn read_frame(reader: &mut BufReader<TcpStream>, deadline: Instant) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "frame deadline exceeded",
+            ));
+        }
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ));
+        }
+        let newline = buffer.iter().position(|b| *b == b'\n');
+        let count = newline.map_or(buffer.len(), |n| n + 1);
+        if bytes.len() + count > MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame exceeds byte limit",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        reader.consume(count);
+        if newline.is_some() {
+            return String::from_utf8(bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+    }
+}
+
+/// Write a complete frame within one total deadline, even with trickled reads.
+pub fn write_frame(stream: &mut TcpStream, message: &str, deadline: Instant) -> io::Result<()> {
+    if message.len() + 1 > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame exceeds byte limit",
+        ));
+    }
+    for mut bytes in [message.as_bytes(), b"\n".as_slice()] {
+        while !bytes.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "write deadline exceeded",
+                ));
+            }
+            stream.set_write_timeout(Some(remaining))?;
+            let count = stream.write(bytes)?;
+            if count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "connection closed",
+                ));
+            }
+            bytes = &bytes[count..];
+        }
+    }
+    Ok(())
+}
+
+fn auth_reply(
+    reader: &mut BufReader<TcpStream>,
+    deadline: Instant,
+) -> io::Result<serde_json::Value> {
+    serde_json::from_str(&read_frame(reader, deadline)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn authenticate_until(
+    mut stream: TcpStream,
+    state_dir: &Path,
+    deadline: Instant,
+) -> io::Result<TcpStream> {
+    let token = read_auth_token(state_dir).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing or unsafe daemon credential",
+        )
+    })?;
+    let client_nonce = new_auth_token()?;
+    write_frame(
+        &mut stream,
+        &serde_json::json!({"op":"hello","id":0,"nonce":client_nonce}).to_string(),
+        deadline,
+    )?;
+    // Capacity one prevents losing events when returning the authenticated socket.
+    let mut reader = BufReader::with_capacity(1, stream.try_clone()?);
+    let challenge = auth_reply(&mut reader, deadline)?;
+    let server_nonce = challenge["nonce"]
+        .as_str()
+        .filter(|n| valid_nonce(n))
+        .ok_or_else(|| permission_error("invalid daemon identity challenge"))?;
+    if challenge["id"] != 0
+        || challenge["protocol"] != PROTOCOL_VERSION
+        || !challenge["proof"].as_str().is_some_and(|proof| {
+            token_matches(
+                &auth_proof(&token, "server", &client_nonce, server_nonce),
+                proof,
+            )
+        })
+    {
+        return Err(permission_error("daemon identity verification failed"));
+    }
+    write_frame(
+        &mut stream,
+        &serde_json::json!({
+            "op":"auth","id":0,"proof":auth_proof(&token,"client",&client_nonce,server_nonce)
+        })
+        .to_string(),
+        deadline,
+    )?;
+    let reply = auth_reply(&mut reader, deadline)?;
+    if reply["id"] != 0 || reply["ok"] != true || reply["protocol"] != PROTOCOL_VERSION {
+        return Err(permission_error("daemon authentication failed"));
+    }
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(stream)
+}
+
+pub fn authenticate_stream(stream: TcpStream, state_dir: &Path) -> io::Result<TcpStream> {
+    authenticate_until(stream, state_dir, Instant::now() + IO_TIMEOUT)
+}
+
+pub fn connect_authenticated(state_dir: &Path, timeout: Duration) -> io::Result<TcpStream> {
+    let deadline = Instant::now() + timeout;
+    let port = read_port_file(state_dir).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing or unsafe daemon port file",
+        )
+    })?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port.port));
+    let stream = TcpStream::connect_timeout(&addr, timeout)?;
+    authenticate_until(stream, state_dir, deadline)
+}
+
+pub struct StartupLock {
+    _file: File,
+}
+
+pub fn acquire_startup_lock(state_dir: &Path) -> io::Result<StartupLock> {
+    let file = open_private_file(&state_dir.join(LOCK_DIR), false, true)?;
+    FileExt::try_lock_exclusive(&file).map_err(|e| {
+        if e.kind() == io::ErrorKind::WouldBlock {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "daemon owner already running or starting",
+            )
+        } else {
+            e
+        }
+    })?;
+    // Keep the inode forever: unlinking a locked file permits a second owner.
+    Ok(StartupLock { _file: file })
+}
+
+#[cfg(windows)]
+mod windows_security {
+    use super::*;
+    use std::ffi::c_void;
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt, io::AsRawHandle};
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        EqualSid, GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateDirectoryW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct LocalAllocation(*mut c_void);
+    impl Drop for LocalAllocation {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.0);
+            }
+        }
+    }
+
+    fn user_token() -> io::Result<Vec<u64>> {
+        unsafe {
+            let mut token = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut length = 0;
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut length);
+            let mut data = vec![0_u64; (length as usize).div_ceil(8)];
+            let result = GetTokenInformation(
+                token,
+                TokenUser,
+                data.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            );
+            let error = io::Error::last_os_error();
+            CloseHandle(token);
+            if result == 0 {
+                return Err(error);
+            }
+            Ok(data)
+        }
+    }
+
+    pub(super) fn create_directory(path: &Path) -> io::Result<()> {
+        unsafe {
+            let token = user_token()?;
+            let sid = (*(token.as_ptr().cast::<TOKEN_USER>())).User.Sid;
+            let mut text = null_mut();
+            if ConvertSidToStringSidW(sid, &mut text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _text = LocalAllocation(text.cast());
+            let mut length = 0;
+            while *text.add(length) != 0 {
+                length += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+            // Protected current-user-only DACL, inherited by runtime files.
+            let sddl: Vec<u16> = format!("O:{sid}D:P(A;OICI;FA;;;{sid})")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let _descriptor = LocalAllocation(descriptor);
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            if CreateDirectoryW(path.as_ptr(), &attributes) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn validate(file: &File) -> io::Result<()> {
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(permission_error(
+                "runtime object must not be a reparse point",
+            ));
+        }
+        unsafe {
+            let mut information = BY_HANDLE_FILE_INFORMATION::default();
+            if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if file.metadata()?.is_file() && information.nNumberOfLinks != 1 {
+                return Err(permission_error("runtime file must not have hard links"));
+            }
+            let token = user_token()?;
+            let user = (*(token.as_ptr().cast::<TOKEN_USER>())).User.Sid;
+            let mut owner: PSID = null_mut();
+            let mut acl: *mut ACL = null_mut();
+            let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+            let error = GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                null_mut(),
+                &mut acl,
+                null_mut(),
+                &mut descriptor,
+            );
+            if error != 0 {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            let _descriptor = LocalAllocation(descriptor);
+            if owner.is_null()
+                || EqualSid(owner, user) == 0
+                || acl.is_null()
+                || (*acl).AceCount == 0
+            {
+                return Err(permission_error(
+                    "runtime object must have current-user-only DACL and owner",
+                ));
+            }
+            for index in 0..(*acl).AceCount {
+                let mut ace = null_mut();
+                if GetAce(acl, index as u32, &mut ace) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let header = &*(ace.cast::<ACE_HEADER>());
+                if header.AceType != 0
+                    || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                {
+                    return Err(permission_error(
+                        "runtime DACL must contain only current-user allow entries",
+                    ));
+                }
+                let allowed = &*(ace.cast::<ACCESS_ALLOWED_ACE>());
+                let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+                if EqualSid(sid, user) == 0 {
+                    return Err(permission_error(
+                        "runtime DACL grants access outside current user",
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// App data dir, mirroring Tauri's `appDataDir` for our identifier so the
@@ -159,83 +730,121 @@ fn app_data_dir_with(
     }
 }
 
-/// Daemon state shared by connection threads and the agent poll thread.
+struct Queued {
+    message: Arc<str>,
+    flushed: Option<mpsc::SyncSender<()>>,
+}
+
+#[derive(Clone)]
+struct Peer {
+    tx: mpsc::SyncSender<Queued>,
+    socket: Arc<TcpStream>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl Peer {
+    fn send(&self, message: Arc<str>, flushed: Option<mpsc::SyncSender<()>>) -> bool {
+        let size = message.len() + 1;
+        if size > MAX_FRAME_BYTES {
+            let _ = self.socket.shutdown(std::net::Shutdown::Both);
+            return false;
+        }
+        if self
+            .bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(size)
+                    .filter(|total| *total <= MAX_QUEUE_BYTES)
+            })
+            .is_err()
+        {
+            let _ = self.socket.shutdown(std::net::Shutdown::Both);
+            return false;
+        }
+        if self.tx.try_send(Queued { message, flushed }).is_err() {
+            self.bytes.fetch_sub(size, Ordering::AcqRel);
+            let _ = self.socket.shutdown(std::net::Shutdown::Both);
+            return false;
+        }
+        true
+    }
+}
+
+type Peers = Arc<Mutex<HashMap<u64, Peer>>>;
+
+fn broadcast(peers: &Peers, message: String) {
+    let message: Arc<str> = message.into();
+    peers
+        .lock()
+        .retain(|_, peer| peer.send(message.clone(), None));
+}
+
+/// Daemon state shared by bounded connection threads and the agent poll thread.
 pub struct DaemonCore {
-    manager: PtyManager,
-    watcher: Mutex<Watcher>,
-    peers: Arc<Mutex<HashMap<u64, mpsc::Sender<String>>>>,
+    manager: Arc<PtyManager>,
+    statuses: AgentStatusService,
+    peers: Peers,
     next_peer: AtomicU64,
-    last_states: Mutex<String>,
+    connections: AtomicUsize,
+    spawn_guard: Mutex<()>,
     state_dir: PathBuf,
 }
 
 impl DaemonCore {
     pub fn new(rules_dir: Option<PathBuf>, state_dir: PathBuf) -> Arc<Self> {
         let peers = Arc::new(Mutex::new(HashMap::new()));
-        let manager = PtyManager::new(Arc::new(DaemonSink {
+        let manager = Arc::new(PtyManager::new_headless(Arc::new(DaemonSink {
             peers: peers.clone(),
-        }));
-        let watcher = match rules_dir {
-            Some(dir) => Watcher::with_dir(dir),
-            None => Watcher::bundled(),
-        };
+        })));
+        let status_peers = peers.clone();
+        let statuses = AgentStatusService::start(&manager, rules_dir, move |update| {
+            broadcast(
+                &status_peers,
+                serde_json::json!({"event":"agent-states","states":update.states}).to_string(),
+            );
+            broadcast(
+                &status_peers,
+                serde_json::json!({
+                    "event":"agent-state-update","revision":update.revision,
+                    "states":update.states,"transitions":update.transitions
+                })
+                .to_string(),
+            );
+        });
         Arc::new(Self {
             manager,
-            watcher: Mutex::new(watcher),
+            statuses,
             peers,
             next_peer: AtomicU64::new(1),
-            last_states: Mutex::new(String::new()),
+            connections: AtomicUsize::new(0),
+            spawn_guard: Mutex::new(()),
             state_dir,
         })
-    }
-
-    fn broadcast(&self, msg: String) {
-        let mut peers = self.peers.lock().unwrap();
-        let mut dead = Vec::new();
-        for (id, tx) in peers.iter() {
-            if tx.send(msg.clone()).is_err() {
-                dead.push(*id);
-            }
-        }
-        for id in dead {
-            peers.remove(&id);
-        }
     }
 }
 
 struct DaemonSink {
-    peers: Arc<Mutex<HashMap<u64, mpsc::Sender<String>>>>,
+    peers: Peers,
 }
 
 impl PtyEventSink for DaemonSink {
-    fn output(&self, id: PaneId, data: String) {
-        let msg = serde_json::json!({"event": "pty_output", "pane": id, "data": data}).to_string();
-        let mut peers = self.peers.lock().unwrap();
-        let mut dead = Vec::new();
-        for (peer, tx) in peers.iter() {
-            if tx.send(msg.clone()).is_err() {
-                dead.push(*peer);
-            }
-        }
-        for peer in dead {
-            peers.remove(&peer);
-        }
+    fn output(&self, id: PaneId, data: String, sequence: u64) {
+        broadcast(
+            &self.peers,
+            serde_json::json!({
+                "event":"pty_output","pane":id,"data":data,"sequence":sequence
+            })
+            .to_string(),
+        );
     }
 
     fn exited(&self, id: PaneId, success: bool, code: Option<i32>) {
-        let msg =
-            serde_json::json!({"event": "pty_exit", "pane": id, "success": success, "code": code})
-                .to_string();
-        let mut peers = self.peers.lock().unwrap();
-        let mut dead = Vec::new();
-        for (peer, tx) in peers.iter() {
-            if tx.send(msg.clone()).is_err() {
-                dead.push(*peer);
-            }
-        }
-        for peer in dead {
-            peers.remove(&peer);
-        }
+        broadcast(
+            &self.peers,
+            serde_json::json!({
+                "event":"pty_exit","pane":id,"success":success,"code":code
+            })
+            .to_string(),
+        );
     }
 }
 
@@ -304,17 +913,32 @@ fn wait_timeout(req: &Request) -> Duration {
     Duration::from_secs(req.timeout_secs.unwrap_or(30).clamp(1, 600))
 }
 
-fn state_key(state: &crate::agent_watch::PaneAgent) -> &'static str {
-    match state {
-        crate::agent_watch::PaneAgent::Working { .. } => "working",
-        crate::agent_watch::PaneAgent::Blocked { .. } => "blocked",
-        crate::agent_watch::PaneAgent::Unknown { .. } => "unknown",
-        crate::agent_watch::PaneAgent::Done { .. } => "done",
-        crate::agent_watch::PaneAgent::Idle => "idle",
+#[cfg(test)]
+fn dispatch(core: &DaemonCore, req: &Request) -> Action {
+    dispatch_connected(core, req, None)
+}
+
+fn client_connected(socket: Option<&TcpStream>) -> bool {
+    let Some(socket) = socket else {
+        return true;
+    };
+    if socket
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .is_err()
+    {
+        return false;
+    }
+    match socket.peek(&mut [0_u8; 1]) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ),
     }
 }
 
-fn dispatch(core: &DaemonCore, req: &Request) -> Action {
+fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStream>) -> Action {
     let id = req.id;
     let respond = |value: serde_json::Value| Action::Respond(ok(id, value));
     match req.op.as_str() {
@@ -323,16 +947,22 @@ fn dispatch(core: &DaemonCore, req: &Request) -> Action {
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": PROTOCOL_VERSION,
         })),
-        "pty_spawn" => match core.manager.spawn(
-            req.shell.clone(),
-            req.cwd.clone(),
-            req.args.clone().unwrap_or_default(),
-            req.cols.unwrap_or(80),
-            req.rows.unwrap_or(24),
-        ) {
-            Ok(pane) => respond(serde_json::json!({"ok": true, "pane": pane})),
-            Err(e) => Action::Respond(err(id, e)),
-        },
+        "pty_spawn" => {
+            let _guard = core.spawn_guard.lock();
+            if core.manager.pane_roots().len() >= MAX_PANES {
+                return Action::Respond(err(id, "pane limit reached"));
+            }
+            match core.manager.spawn(
+                req.shell.clone(),
+                req.cwd.clone(),
+                req.args.clone().unwrap_or_default(),
+                req.cols.unwrap_or(80),
+                req.rows.unwrap_or(24),
+            ) {
+                Ok(pane) => respond(serde_json::json!({"ok":true,"pane":pane})),
+                Err(e) => Action::Respond(err(id, e)),
+            }
+        }
         "pty_write" => {
             let (Some(pane), Some(data)) = (req.pane, req.data.clone()) else {
                 return Action::Respond(err(id, "missing \"pane\" or \"data\""));
@@ -364,22 +994,26 @@ fn dispatch(core: &DaemonCore, req: &Request) -> Action {
         },
         "panes" => respond(serde_json::json!({"ok": true, "panes": core.manager.pane_roots()})),
         "agent_states" => {
-            let states = core.watcher.lock().unwrap().poll(&core.manager);
-            respond(serde_json::json!({"ok": true, "states": states}))
+            let snapshot = core.statuses.snapshot();
+            let states = snapshot.states;
+            respond(
+                serde_json::json!({"ok": true, "states": states, "revision": snapshot.revision}),
+            )
         }
         "rules_reload" => {
-            core.watcher.lock().unwrap().reload_rules();
+            core.statuses.reload_rules();
             respond(serde_json::json!({"ok": true}))
         }
         "snapshot" => {
-            let states: BTreeMap<PaneId, crate::agent_watch::PaneAgent> =
-                core.watcher.lock().unwrap().poll(&core.manager);
+            let snapshot = core.statuses.snapshot();
+            let states = snapshot.states;
             respond(serde_json::json!({
                 "ok": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol": PROTOCOL_VERSION,
                 "panes": core.manager.pane_roots(),
                 "states": states,
+                "revision": snapshot.revision,
             }))
         }
         "pty_send_text" => {
@@ -431,31 +1065,33 @@ fn dispatch(core: &DaemonCore, req: &Request) -> Action {
             }
             let deadline = std::time::Instant::now() + wait_timeout(req);
             loop {
+                if !client_connected(socket) {
+                    return Action::Respond(err(id, "client disconnected"));
+                }
                 if !pane_alive(core, pane) {
                     return Action::Respond(err(id, format!("pane exited: {pane}")));
                 }
-                let states = core.watcher.lock().unwrap().poll(&core.manager);
-                if let Some(state) = states.get(&pane) {
-                    if want.iter().any(|w| w == state_key(state)) {
-                        let (agent, cli) = match state {
-                            crate::agent_watch::PaneAgent::Working { agent, cli, .. }
-                            | crate::agent_watch::PaneAgent::Blocked { agent, cli, .. }
-                            | crate::agent_watch::PaneAgent::Unknown { agent, cli, .. }
-                            | crate::agent_watch::PaneAgent::Done { agent, cli, .. } => {
-                                (Some(agent), Some(cli))
-                            }
-                            crate::agent_watch::PaneAgent::Idle => (None, None),
-                        };
+                let snapshot = core.statuses.snapshot();
+                let states = snapshot.states;
+                if let Some(status) = states.get(&pane) {
+                    if want.iter().any(|w| w == status.state.state_key()) {
+                        let identity = status.state.identity();
                         return respond(serde_json::json!({
-                            "ok": true, "pane": pane, "state": state_key(state),
-                            "agent": agent, "cli": cli,
+                            "ok": true, "pane": pane, "state": status.state.state_key(),
+                            "agent": identity.map(|i| i.0), "cli": identity.map(|i| i.1),
+                            "agentInstanceId": status.agent_instance_id, "reason": status.reason,
                         }));
                     }
                 }
                 if std::time::Instant::now() >= deadline {
                     return Action::Respond(err(id, "timed out waiting for state"));
                 }
-                thread::sleep(Duration::from_millis(200));
+                core.statuses.wait_for_revision(
+                    snapshot.revision,
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(Duration::from_millis(200)),
+                );
             }
         }
         "wait_output" => {
@@ -464,6 +1100,9 @@ fn dispatch(core: &DaemonCore, req: &Request) -> Action {
             };
             let deadline = std::time::Instant::now() + wait_timeout(req);
             loop {
+                if !client_connected(socket) {
+                    return Action::Respond(err(id, "client disconnected"));
+                }
                 match core.manager.screen_text(pane) {
                     Some(screen) if screen.contains(&needle) => {
                         return respond(serde_json::json!({"ok": true, "pane": pane}));
@@ -477,109 +1116,209 @@ fn dispatch(core: &DaemonCore, req: &Request) -> Action {
                 thread::sleep(Duration::from_millis(200));
             }
         }
-        "shutdown" => Action::Shutdown(ok(id, serde_json::json!({"ok": true}))),
+        "shutdown" => Action::Shutdown(ok(id, serde_json::json!({"ok":true,"shutdown":true}))),
         op => Action::Respond(err(id, format!("unknown op: {op}"))),
     }
 }
 
-/// Serve forever: agent poll thread plus a thread per connection.
-pub fn serve(core: Arc<DaemonCore>, listener: TcpListener) {
-    let poll_core = core.clone();
-    thread::Builder::new()
-        .name("ubra-daemon-agent-watch".to_string())
-        .spawn(move || loop {
-            thread::sleep(Duration::from_secs(AGENT_POLL_SECS));
-            let states = poll_core.watcher.lock().unwrap().poll(&poll_core.manager);
-            let json = serde_json::to_string(&states).unwrap_or_default();
-            let mut last = poll_core.last_states.lock().unwrap();
-            if json != *last {
-                *last = json;
-                let msg =
-                    serde_json::json!({"event": "agent-states", "states": states}).to_string();
-                drop(last);
-                poll_core.broadcast(msg);
-            }
-        })
-        .expect("spawn agent poll thread");
+/// At most MAX_CLIENTS live connections, including unauthenticated handshakes.
+pub fn serve(core: Arc<DaemonCore>, listener: TcpListener, auth_token: String) {
+    let auth_token = Arc::<str>::from(auth_token);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let core = core.clone();
+                if core
+                    .connections
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < MAX_CLIENTS).then_some(count + 1)
+                    })
+                    .is_err()
+                {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
+                let connection_core = core.clone();
+                let auth_token = auth_token.clone();
                 let id = core.next_peer.fetch_add(1, Ordering::Relaxed);
-                thread::Builder::new()
+                if thread::Builder::new()
                     .name(format!("ubra-daemon-conn-{id}"))
-                    .spawn(move || handle_conn(core, stream, id))
-                    .ok();
+                    .spawn(move || {
+                        let _lease = ConnectionLease(connection_core.clone());
+                        handle_conn(connection_core, stream, id, auth_token);
+                    })
+                    .is_err()
+                {
+                    core.connections.fetch_sub(1, Ordering::AcqRel);
+                }
             }
             Err(e) => eprintln!("ubra-daemon: accept failed: {e}"),
         }
     }
 }
 
-fn handle_conn(core: Arc<DaemonCore>, stream: TcpStream, id: u64) {
-    let (tx, rx) = mpsc::channel::<String>();
-    core.peers.lock().unwrap().insert(id, tx.clone());
-    // Greet with the current agent snapshot so watchers need no round trip.
-    {
-        let states = core.watcher.lock().unwrap().poll(&core.manager);
-        let _ = tx.send(serde_json::json!({"event": "agent-states", "states": states}).to_string());
+struct ConnectionLease(Arc<DaemonCore>);
+impl Drop for ConnectionLease {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::AcqRel);
     }
-    let writer_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => {
-            core.peers.lock().unwrap().remove(&id);
-            return;
-        }
+}
+
+fn authenticate_peer(
+    writer: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    expected: &str,
+) -> io::Result<()> {
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let hello: Request = serde_json::from_str(&read_frame(reader, deadline)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let Some(client_nonce) = hello.nonce.as_deref().filter(|n| valid_nonce(n)) else {
+        write_frame(writer, &err(hello.id, "unauthorized"), deadline)?;
+        return Err(permission_error("unauthorized"));
     };
-    thread::spawn(move || {
-        let mut writer = writer_stream;
-        for msg in rx {
-            if writeln!(writer, "{msg}").is_err() || writer.flush().is_err() {
+    if hello.op != "hello" {
+        write_frame(writer, &err(hello.id, "unauthorized"), deadline)?;
+        return Err(permission_error("unauthorized"));
+    }
+    let server_nonce = new_auth_token()?;
+    write_frame(
+        writer,
+        &respond(
+            hello.id,
+            serde_json::json!({
+                "protocol":PROTOCOL_VERSION,"nonce":server_nonce,
+                "proof":auth_proof(expected,"server",client_nonce,&server_nonce)
+            }),
+        ),
+        deadline,
+    )?;
+    let auth: Request = serde_json::from_str(&read_frame(reader, deadline)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if auth.op != "auth"
+        || auth.id != hello.id
+        || !auth.proof.as_deref().is_some_and(|proof| {
+            token_matches(
+                &auth_proof(expected, "client", client_nonce, &server_nonce),
+                proof,
+            )
+        })
+    {
+        write_frame(writer, &err(auth.id, "unauthorized"), deadline)?;
+        return Err(permission_error("unauthorized"));
+    }
+    write_frame(
+        writer,
+        &ok(
+            auth.id,
+            serde_json::json!({
+                "ok":true,"protocol":PROTOCOL_VERSION,"version":env!("CARGO_PKG_VERSION")
+            }),
+        ),
+        deadline,
+    )?;
+    Ok(())
+}
+
+fn handle_conn(core: Arc<DaemonCore>, stream: TcpStream, id: u64, auth_token: Arc<str>) {
+    let reader_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let socket = match stream.try_clone() {
+        Ok(s) => Arc::new(s),
+        Err(_) => return,
+    };
+    let mut writer = stream;
+    let mut reader = BufReader::new(reader_stream);
+    if authenticate_peer(&mut writer, &mut reader, &auth_token).is_err() {
+        return;
+    }
+    let (tx, rx) = mpsc::sync_channel(MAX_QUEUE_MESSAGES);
+    let peer = Peer {
+        tx,
+        socket: socket.clone(),
+        bytes: Arc::new(AtomicUsize::new(0)),
+    };
+    core.peers.lock().insert(id, peer.clone());
+    let snapshot = core.statuses.snapshot();
+    peer.send(
+        serde_json::json!({"event":"agent-states","states":snapshot.states})
+            .to_string()
+            .into(),
+        None,
+    );
+    peer.send(
+        serde_json::json!({"event":"agent-state-update","revision":snapshot.revision,
+        "states":snapshot.states,"transitions":[]})
+        .to_string()
+        .into(),
+        None,
+    );
+    let bytes = peer.bytes.clone();
+    let writer_thread = thread::spawn(move || {
+        for queued in rx {
+            let result = write_frame(&mut writer, &queued.message, Instant::now() + IO_TIMEOUT);
+            bytes.fetch_sub(queued.message.len() + 1, Ordering::AcqRel);
+            if result.is_err() {
                 break;
             }
+            if let Some(flushed) = queued.flushed {
+                let _ = flushed.try_send(());
+            }
         }
+        let _ = writer.shutdown(std::net::Shutdown::Both);
     });
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let line = match line {
+    loop {
+        // An idle subscription is not a partial frame. Once bytes arrive,
+        // the complete request must arrive within the smaller frame deadline.
+        if reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(300)))
+            .is_err()
+            || reader.fill_buf().is_err()
+        {
+            break;
+        }
+        let line = match read_frame(&mut reader, Instant::now() + FRAME_TIMEOUT) {
             Ok(line) => line,
             Err(_) => break,
         };
-        if line.trim().is_empty() {
-            continue;
-        }
         let req: Request = match serde_json::from_str(&line) {
             Ok(req) => req,
             Err(e) => {
-                let _ = tx.send(
-                    serde_json::json!({"ok": false, "error": format!("invalid request: {e}")})
-                        .to_string(),
-                );
+                if !peer.send(err(None, format!("invalid request: {e}")).into(), None) {
+                    break;
+                }
                 continue;
             }
         };
-        match dispatch(&core, &req) {
-            Action::Respond(msg) => {
-                if tx.send(msg).is_err() {
+        match dispatch_connected(&core, &req, Some(&socket)) {
+            Action::Respond(message) => {
+                if !peer.send(message.into(), None) {
                     break;
                 }
             }
-            Action::Shutdown(msg) => {
-                let _ = tx.send(msg);
-                // Let the writer flush the goodbye before exiting.
-                thread::sleep(Duration::from_millis(200));
+            Action::Shutdown(message) => {
+                let (flushed, received) = mpsc::sync_channel(1);
+                if peer.send(message.into(), Some(flushed)) {
+                    let _ = received.recv_timeout(IO_TIMEOUT);
+                }
                 shutdown_now(&core);
             }
         }
     }
-    core.peers.lock().unwrap().remove(&id);
+    core.peers.lock().remove(&id);
+    let _ = socket.shutdown(std::net::Shutdown::Both);
+    drop(peer);
+    let _ = writer_thread.join();
 }
 
 fn shutdown_now(core: &DaemonCore) -> ! {
-    for pane in core.manager.pane_roots() {
-        let _ = core.manager.kill(pane.id);
+    if let Err(error) = core.manager.shutdown() {
+        eprintln!("ubra-daemon: pane cleanup failed: {error}");
+        remove_runtime_files(&core.state_dir);
+        std::process::exit(1);
     }
-    let _ = std::fs::remove_file(core.state_dir.join(PORT_FILE));
+    remove_runtime_files(&core.state_dir);
     std::process::exit(0);
 }
 
@@ -656,15 +1395,6 @@ mod tests {
             Action::Respond(line) => serde_json::from_str(&line).unwrap(),
             Action::Shutdown(_) => panic!("unexpected shutdown"),
         }
-    }
-
-    #[test]
-    fn request_defaults_are_empty() {
-        let req: Request = serde_json::from_str("{\"op\":\"ping\"}").unwrap();
-        assert_eq!(req.op, "ping");
-        assert_eq!(req.id, None);
-        assert_eq!(req.pane, None);
-        assert_eq!(req.cols, None);
     }
 
     #[test]

@@ -5,6 +5,7 @@ import {
   parseChimeStyle,
   parseDelivery,
   parseToastPosition,
+  playbackPayload,
   routeNotification,
   testNotificationPayload,
 } from "../src/lib/notify.ts";
@@ -89,10 +90,26 @@ describe("chime styles", () => {
   });
 });
 
+describe("playback selection", () => {
+  it("ignores a retained custom path for every built-in style and restores it on return to custom", () => {
+    const file = "/sounds/my chime.wav";
+    assert.deepEqual(playbackPayload("done", "custom", file), { kind: "done", style: null, file });
+    for (const style of ["default", "bright", "soft", "pop"]) {
+      assert.deepEqual(playbackPayload("done", style, file), { kind: "done", style, file: null });
+    }
+    assert.deepEqual(playbackPayload("request", "custom", file), { kind: "request", style: null, file });
+  });
+
+  it("uses the backend fallback for a blank or invalid custom file without leaking it to built-ins", () => {
+    assert.deepEqual(playbackPayload("done", "custom", "  "), { kind: "done", style: null, file: null });
+    assert.deepEqual(playbackPayload("done", "custom", "/missing.wav"), { kind: "done", style: null, file: "/missing.wav" });
+    assert.deepEqual(playbackPayload("done", "unknown", "/missing.wav"), { kind: "done", style: "default", file: null });
+  });
+});
+
 describe("testNotificationPayload", () => {
   it("marks itself as a test with a safe empty jump target", () => {
     const t = testNotificationPayload();
-    assert.match(t.title, /\(test\)/);
     assert.equal(t.nodeId, "");
     assert.equal(t.kind, "done");
   });

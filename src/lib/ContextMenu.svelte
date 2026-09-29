@@ -20,6 +20,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Icon from "./Icon.svelte";
+  import { overlayFocus } from "./overlayFocus";
 
   interface Props {
     x: number;
@@ -27,8 +28,31 @@
     items: MenuItem[];
     onPick: (id: string) => void;
     onDismiss: () => void;
+    opener?: HTMLElement | null;
   }
-  let { x, y, items, onPick, onDismiss }: Props = $props();
+  let { x, y, items, onPick, onDismiss, opener = null }: Props = $props();
+  let menuEl: HTMLDivElement;
+
+  function onKeydown(e: KeyboardEvent): void {
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation();
+      onDismiss();
+      return;
+    }
+    const buttons = [...menuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    if (!buttons.length) return;
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    let next: number;
+    if (e.key === "ArrowDown") next = (index + 1) % buttons.length;
+    else if (e.key === "ArrowUp") next = index < 0 ? buttons.length - 1 : (index - 1 + buttons.length) % buttons.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = buttons.length - 1;
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+    buttons[next].focus();
+  }
 
   onMount(() => {
     const dismiss = () => onDismiss();
@@ -46,15 +70,15 @@
 <svelte:window
   onclick={onDismiss}
   oncontextmenu={onDismiss}
-  onkeydown={(e) => {
-    if (e.key === "Escape") onDismiss();
-  }}
 />
 
-<div class="menu" role="menu" style:left={cx + "px"} style:top={cy + "px"}>
+<div class="menu" role="menu" tabindex="-1" data-keyboard-overlay
+  bind:this={menuEl} use:overlayFocus={{ initial: '[role="menuitem"]', opener }}
+  onkeydown={onKeydown} style:left={cx + "px"} style:top={cy + "px"}>
   {#each items as item (item.id)}
     <button
       role="menuitem"
+      tabindex="-1"
       class:danger={item.danger}
       onclick={() => onPick(item.id)}
     >
@@ -93,11 +117,13 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  .menu button:hover {
+  .menu button:hover,
+  .menu button:focus-visible {
     background: var(--accent);
     color: var(--text-strong);
   }
-  .menu button.danger:hover {
+  .menu button.danger:hover,
+  .menu button.danger:focus-visible {
     background: var(--error-hover-bg);
   }
 </style>

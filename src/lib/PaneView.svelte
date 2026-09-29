@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { agent } from "./agent.svelte";
+  import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import type { PaneNode } from "./layout";
+  import { toasts } from "./toasts.svelte.ts";
 
   let {
     node,
@@ -24,8 +27,9 @@
   let exited = $state(false);
   let editing = $state(false);
   let draft = $state("");
-  let menu = $state<{ x: number; y: number } | null>(null);
-  const agentState = $derived(agent.paneState(node.id));
+  let menu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+  const agentLabel = $derived(agent.paneAgentLabel(node.id));
+  const agentStatus = $derived(agent.paneStatus(node.id));
 
   // F2 rename: the matching pane takes the request and clears it.
   $effect(() => {
@@ -78,12 +82,27 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
+  function onTerminalSpawn(id: number): void {
+    agent.register(id, node.id);
+    const command = store.takePendingTerminalCommand(node.id);
+    if (!command) return;
+    invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
+      console.error("ubra: failed to start onboarding command", error);
+      toasts.push(
+        "Couldn't send the agent command",
+        "Enter it in the terminal to try again.",
+        node.id,
+      );
+    });
+  }
+
   function openMenu(e: MouseEvent): void {
     e.preventDefault();
     e.stopPropagation();
     if (editing) commitRename();
     announceMenuOpen();
-    menu = { x: e.clientX, y: e.clientY };
+    menu = { x: e.clientX, y: e.clientY,
+      opener: (e.currentTarget as HTMLElement).querySelector<HTMLElement>(".xterm-helper-textarea") };
   }
 
   function onPick(action: string): void {
@@ -108,8 +127,12 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="pane-view"
+  data-pane-id={node.id}
   oncontextmenu={openMenu}
-  onfocusin={() => store.focusPane(node.id)}
+  onfocusin={() => {
+    store.focusPane(node.id);
+    agent.acknowledge(node.id);
+  }}
   onpointerdown={() => store.focusPane(node.id)}
 >
   <div class="pane-header" onpointerdown={headerPointerDown}>
@@ -136,12 +159,9 @@
         {title}
       </span>
     {/if}
-    {#if
-      agentState?.state === "working" ||
-      agentState?.state === "blocked" ||
-      agentState?.state === "unknown"}
-      <span class={"agent " + agentState.state} title={agentState.state}>
-        {agentState.agent}
+    {#if agentLabel}
+      <span class={"agent " + agentStatus} title={agent.paneStatusTitle(node.id)}>
+        {agentLabel} · {agentStatusLabel(agentStatus)}
       </span>
     {/if}
     {#if zoomed}
@@ -188,7 +208,7 @@
         findToken={findToken}
         scrollback={store.termScrollback}
         onExit={() => (exited = true)}
-        onSpawn={(id) => agent.register(id, node.id)}
+        onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}
       />
     {/key}
@@ -209,6 +229,7 @@
     <ContextMenu
       x={menu.x}
       y={menu.y}
+      opener={menu.opener}
       items={[
         { id: "rename", label: "Rename", icon: "edit" },
         {
@@ -282,6 +303,14 @@
     color: var(--error-text);
     background: var(--error-bg);
   }
+  .agent.attention {
+    color: var(--attention);
+    background: var(--attention-bg);
+  }
+  .agent.done {
+    color: var(--success);
+  }
+  .agent.idle,
   .agent.unknown {
     color: var(--text-muted);
   }
@@ -302,7 +331,8 @@
     gap: 2px;
     opacity: 0;
   }
-  .pane-view:hover .actions {
+  .pane-view:hover .actions,
+  .pane-view:focus-within .actions {
     opacity: 1;
   }
   .actions button {

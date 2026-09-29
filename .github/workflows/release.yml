@@ -6,10 +6,14 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +38,7 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
+            libasound2-dev \
             librsvg2-dev
 
       - name: Setup Node
@@ -67,8 +72,32 @@ jobs:
 
   publish:
     needs: build
+    environment: release
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
+      # A successful build is not proof that a packaged webview/PTY works.
+      # Missing evidence is deliberately a publication blocker.
+      - name: Require native smoke evidence for this commit
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          MACOS_SHA: ${{ vars.NATIVE_SMOKE_SHA_MACOS }}
+          LINUX_SHA: ${{ vars.NATIVE_SMOKE_SHA_LINUX }}
+          WINDOWS_SHA: ${{ vars.NATIVE_SMOKE_SHA_WINDOWS }}
+        run: |
+          for platform in MACOS LINUX WINDOWS; do
+            case "$platform" in
+              MACOS) verified_sha="$MACOS_SHA" ;;
+              LINUX) verified_sha="$LINUX_SHA" ;;
+              WINDOWS) verified_sha="$WINDOWS_SHA" ;;
+            esac
+            if [ "$verified_sha" != "$RELEASE_SHA" ]; then
+              echo "::error::$platform native smoke is unverified for $RELEASE_SHA; publication is blocked."
+              exit 1
+            fi
+          done
+
       - uses: actions/download-artifact@v4
         with:
           path: bundles

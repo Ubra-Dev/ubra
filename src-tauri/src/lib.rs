@@ -1,27 +1,31 @@
+pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
 pub mod daemon;
 pub mod layout_store;
+mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
 pub mod sound;
+mod terminal_state;
 
-use agent_watch::Watcher;
+use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
-use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput};
+use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySnapshot};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 
 struct TauriSink(AppHandle);
 
 impl PtyEventSink for TauriSink {
-    fn output(&self, id: PaneId, data: String) {
-        let _ = self.0.emit("pty-output", PtyOutput { id, data });
+    fn output(&self, id: PaneId, data: String, sequence: u64) {
+        let _ = self.0.emit("pty-output", PtyOutput { id, data, sequence });
     }
 
     fn exited(&self, id: PaneId, success: bool, code: Option<i32>) {
@@ -31,7 +35,7 @@ impl PtyEventSink for TauriSink {
 
 #[tauri::command]
 fn pty_spawn(
-    manager: State<'_, PtyManager>,
+    manager: State<'_, Arc<PtyManager>>,
     shell: Option<String>,
     cwd: Option<String>,
     args: Option<Vec<String>>,
@@ -44,13 +48,13 @@ fn pty_spawn(
 }
 
 #[tauri::command]
-fn pty_write(manager: State<'_, PtyManager>, id: PaneId, data: String) -> Result<(), String> {
+fn pty_write(manager: State<'_, Arc<PtyManager>>, id: PaneId, data: String) -> Result<(), String> {
     manager.write(id, &data).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn pty_resize(
-    manager: State<'_, PtyManager>,
+    manager: State<'_, Arc<PtyManager>>,
     id: PaneId,
     cols: u16,
     rows: u16,
@@ -59,13 +63,18 @@ fn pty_resize(
 }
 
 #[tauri::command]
-fn pty_kill(manager: State<'_, PtyManager>, id: PaneId) -> Result<(), String> {
+fn pty_kill(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<(), String> {
     manager.kill(id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn pty_snapshot(manager: State<'_, PtyManager>, id: PaneId) -> Result<String, String> {
+fn pty_snapshot(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<PtySnapshot, String> {
     manager.snapshot(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn agent_snapshot(service: State<'_, AgentStatusService>) -> AgentUpdate {
+    service.snapshot()
 }
 
 #[tauri::command]
@@ -78,6 +87,28 @@ fn load_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
 fn save_layout(app: AppHandle, layout: serde_json::Value) -> Result<(), String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     save_layout_to(&dir, &layout).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_layout(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::backup_layout_from(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_layout(app: AppHandle, layout: serde_json::Value) -> Result<Option<String>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::reset_layout_to(&dir, &layout).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle, manager: State<'_, Arc<PtyManager>>) -> Result<(), String> {
+    manager.shutdown().map_err(|e| e.to_string())?;
+    app.state::<ShellState>()
+        .quitting
+        .store(true, Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -144,6 +175,8 @@ fn check_sound_file(path: String) -> bool {
 #[derive(Default)]
 struct ShellState {
     quitting: AtomicBool,
+    tray_available: AtomicBool,
+    close_warning_pending: AtomicBool,
 }
 
 fn show_main(app: &AppHandle) {
@@ -154,6 +187,10 @@ fn show_main(app: &AppHandle) {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("UBRA_DISABLE_TRAY").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return Err(std::io::Error::other("tray disabled for development smoke").into());
+    }
     let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
     let menu = Menu::new(app)?;
@@ -217,12 +254,25 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
-            app.manage(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
+            let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
+            app.manage(manager.clone());
             app.manage(ShellState::default());
-            if let Err(e) = build_tray(app.handle()) {
-                eprintln!("ubra: failed to build tray icon: {e}");
+            match build_tray(app.handle()) {
+                Ok(()) => app
+                    .state::<ShellState>()
+                    .tray_available
+                    .store(true, Ordering::SeqCst),
+                Err(e) => {
+                    eprintln!("ubra: tray unavailable; closing quits: {e}");
+                    app.dialog()
+                        .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
+                        .title("Tray unavailable")
+                        .kind(MessageDialogKind::Warning)
+                        .show(|_| {});
+                }
             }
             let poll_app = app.handle().clone();
             let rules_dir = match data_dir(app.handle()) {
@@ -232,47 +282,78 @@ pub fn run() {
                     None
                 }
             };
-            std::thread::Builder::new()
-                .name("ubra-agent-watch".to_string())
-                .spawn(move || {
-                    let mut watcher = match rules_dir {
-                        Some(dir) => Watcher::with_dir(dir),
-                        None => Watcher::bundled(),
-                    };
-                    let mut last = String::new();
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        let states = {
-                            let manager = poll_app.state::<PtyManager>();
-                            watcher.poll(&manager)
-                        };
-                        let json = serde_json::to_string(&states).unwrap_or_default();
-                        if json != last {
-                            eprintln!("ubra: agent states changed: {json}");
-                            last = json;
-                            let _ = poll_app.emit("agent-states", &states);
-                        }
-                    }
-                })
-                .expect("failed to spawn agent watcher");
+            let service = AgentStatusService::start(&manager, rules_dir, move |update| {
+                let _ = poll_app.emit("agent-states", &update.states);
+                let _ = poll_app.emit("agent-state-update", &update);
+            });
+            app.manage(service);
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let quitting = window.state::<ShellState>().quitting.load(Ordering::SeqCst);
-                if quitting {
+                let shell = window.state::<ShellState>();
+                if shell.quitting.load(Ordering::SeqCst) {
                     return;
                 }
-                api.prevent_close();
-                let _ = window.hide();
-                // Hiding instead of quitting surprises Cmd+W/Cmd+Q muscle
-                // memory; say where the app went.
-                let _ = window
-                    .notification()
-                    .builder()
-                    .title("Ubra keeps running")
-                    .body("Agents continue in the tray. Quit from the tray menu.")
-                    .show();
+                if shell.close_warning_pending.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    return;
+                }
+                if shell.tray_available.load(Ordering::SeqCst) {
+                    match window.hide() {
+                        Ok(()) => {
+                            api.prevent_close();
+                            let _ = window
+                                .notification()
+                                .builder()
+                                .title("Ubra keeps running")
+                                .body(
+                                    "Agents continue in the tray. Quit from the tray or Settings.",
+                                )
+                                .show();
+                            return;
+                        }
+                        Err(error) => {
+                            eprintln!("ubra: hide failed; closing quits: {error}");
+                            api.prevent_close();
+                            shell.close_warning_pending.store(true, Ordering::SeqCst);
+                            let app = window.app_handle().clone();
+                            app.dialog()
+                                .message("Ubra could not hide its window. Closing will quit the app and stop its terminals.")
+                                .title("Unable to hide Ubra")
+                                .kind(MessageDialogKind::Warning)
+                                .show(move |_| {
+                                    app.state::<ShellState>()
+                                        .close_warning_pending
+                                        .store(false, Ordering::SeqCst);
+                                    if let Err(error) =
+                                        quit_app(app.clone(), app.state::<Arc<PtyManager>>())
+                                    {
+                                        eprintln!("ubra: close failed: {error}");
+                                        app.dialog()
+                                            .message(error)
+                                            .title("Unable to close Ubra")
+                                            .kind(MessageDialogKind::Error)
+                                            .show(|_| {});
+                                    }
+                                });
+                            return;
+                        }
+                    }
+                }
+                if let Err(error) = window.state::<Arc<PtyManager>>().shutdown() {
+                    api.prevent_close();
+                    eprintln!("ubra: close failed: {error}");
+                    let _ = window
+                        .notification()
+                        .builder()
+                        .title("Unable to close Ubra")
+                        .body(error.to_string())
+                        .show();
+                    return;
+                }
+                shell.quitting.store(true, Ordering::SeqCst);
+                window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -281,8 +362,12 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_snapshot,
+            agent_snapshot,
             load_layout,
             save_layout,
+            export_layout,
+            reset_layout,
+            quit_app,
             autostart_enabled,
             autostart_set,
             notify_agent,
@@ -290,6 +375,16 @@ pub fn run() {
             check_sound_file,
             app_info
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Err(error) = app.state::<Arc<PtyManager>>().shutdown() {
+                    eprintln!("ubra: shutdown failed: {error}");
+                }
+            }
+        });
 }

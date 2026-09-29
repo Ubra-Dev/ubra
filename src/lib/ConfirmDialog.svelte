@@ -1,9 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { store } from "./store.svelte";
+  import { overlayFocus } from "./overlayFocus";
 
-  let dialogEl = $state<HTMLDivElement | null>(null);
-  let confirmBtn = $state<HTMLButtonElement | null>(null);
 
   function detail(): string {
     const p = store.pendingClose;
@@ -22,7 +20,16 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
+      e.preventDefault();
       store.cancelPendingClose();
+      return;
+    }
+    if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // A focused button activates natively (Enter on Cancel cancels);
+      // confirm explicitly only when focus is elsewhere in the dialog.
+      if (e.target instanceof HTMLButtonElement) return;
+      e.preventDefault();
+      store.confirmPendingClose();
       return;
     }
     // Single-key shortcuts: no modifiers, dialog has no text inputs.
@@ -36,23 +43,8 @@
         return;
       }
     }
-    if (e.key !== "Tab" || !dialogEl) return;
-    // Focus trap: Tab wraps between Cancel and Close.
-    const items = [...dialogEl.querySelectorAll<HTMLElement>("button")];
-    if (items.length === 0) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
   }
 
-  // Confirm is the default: Enter confirms and dismisses, Esc closes.
-  onMount(() => confirmBtn?.focus());
 </script>
 
 {#if store.pendingClose}
@@ -71,7 +63,8 @@
       aria-labelledby="confirm-close-title"
       aria-describedby="confirm-close-desc"
       tabindex="-1"
-      bind:this={dialogEl}
+      data-keyboard-overlay
+      use:overlayFocus={{ initial: ".danger" }}
       onkeydown={onKeydown}
     >
       <div class="title" id="confirm-close-title">
@@ -86,16 +79,12 @@
           Cancel
         </button>
         <button
-          bind:this={confirmBtn}
           class="danger"
           title="Confirm (Enter or Y)"
           onclick={() => store.confirmPendingClose()}
         >
           Close {p.kind}
         </button>
-      </div>
-      <div class="keys-hint">
-        <kbd>Enter</kbd> confirm · <kbd>N</kbd> cancel
       </div>
     </div>
   </div>
@@ -160,24 +149,12 @@
     border-color: var(--error-text);
     color: var(--error-text);
   }
-  .actions .danger:hover {
+  .actions .danger:focus-visible {
+    outline: none;
+  }
+  .actions .danger:hover,
+  .actions .danger:focus-visible {
     background: var(--error-bg);
     color: var(--error-text);
-  }
-  .keys-hint {
-    margin-top: 10px;
-    text-align: right;
-    color: var(--text-subtle);
-    font-size: 11px;
-  }
-  kbd {
-    display: inline-block;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 10px;
-    color: var(--text-muted);
-    background: var(--surface-bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
   }
 </style>

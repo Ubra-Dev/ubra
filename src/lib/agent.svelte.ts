@@ -1,316 +1,220 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  chimeStyleParam,
-  routeNotification,
-  type SoundKind,
-} from "./notify";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { playbackPayload, routeNotification } from "./notify";
 import { store } from "./store.svelte";
 import { toasts } from "./toasts.svelte.ts";
+import { baseName, collectPaneIds, findPane, findTabByPane, type Tab, type Workspace } from "./layout";
 import {
-  baseName,
-  collectPaneIds,
-  detectFinished,
-  detectVanished,
-  findPane,
-  findTabByPane,
-  type AgentSnapshot,
-  type Layout,
-  type Tab,
-  type Workspace,
-} from "./layout";
-
-export type Rollup =
-  | "working"
-  | "blocked"
-  | "unknown"
-  | "attention"
-  | "done"
-  | "idle";
+  acknowledgeAgent, agentStatusLabel, applyAgentUpdate, effectiveAgentStatus,
+  emptyAgentModel, paneIsVisible, registerAgentPane, rollupStatuses,
+  type AgentStatus, type AgentTransition, type AgentUpdate, type Rollup,
+} from "./agentStatus";
+export type { Rollup } from "./agentStatus";
 
 export interface ActiveAgent {
   nodeId: string;
   agent: string;
   cli?: string;
-  /** Display name: the agent's working directory (basename). */
   dir: string;
-  /** Full working directory for tooltips, when known. */
   dirPath?: string;
-  status: "working" | "blocked" | "unknown" | "attention" | "done" | "idle";
+  status: Rollup;
+  statusTitle: string;
   tabName: string;
   paneTitle?: string;
 }
-
 export interface WorkspaceAgents {
   wsId: string;
   wsName: string;
   agents: ActiveAgent[];
 }
-
 class AgentStore {
-  states = $state<AgentSnapshot>({});
-  /** Panes whose agent stopped unexpectedly (vanished) and is unseen. */
-  attention = $state<string[]>([]);
-  /** Panes whose agent cleanly finished a task and is unseen. */
-  done = $state<string[]>([]);
-  private liveToNode = new Map<number, string>();
-  /** Last-known agent name + CLI + cwd per pane node, for ended rows. */
-  private lastAgent = new Map<
-    string,
-    { agent: string; cli?: string; cwd?: string }
-  >();
+  private model = $state(emptyAgentModel());
+  private liveToNode = $state<Record<string, string>>({});
+  private lastAgent = $state<Record<string, { agent: string; cli?: string; cwd?: string }>>({});
+  private pending = new Map<number, AgentTransition>();
+  private disposed = new Set<number>();
+  private foreground = false;
   private started = false;
-
+  get states(): Record<string, AgentStatus> { return this.model.states; }
+  get attention(): string[] { return this.unreadNodes("attention"); }
+  get done(): string[] { return this.unreadNodes("done"); }
+  private unreadNodes(kind: "attention" | "done"): string[] {
+    return Object.entries(this.model.unread)
+      .filter(([, unread]) => unread.kind === kind)
+      .map(([live]) => this.liveToNode[live]).filter((node): node is string => !!node);
+  }
   register(liveId: number, nodeId: string): void {
-    this.liveToNode.set(liveId, nodeId);
+    const registered = registerAgentPane(this.liveToNode, liveId, nodeId);
+    for (const oldLive of registered.replacedLiveIds) this.unregister(oldLive);
+    this.disposed.delete(liveId);
+    this.liveToNode = registered.mapping;
+    this.rememberAgents();
+    const pending = this.pending.get(liveId);
+    this.pending.delete(liveId);
+    if (pending && this.model.unread[liveId]?.eventId === pending.eventId) this.notify(pending);
+    this.acknowledge(nodeId);
   }
-
   unregister(liveId: number): void {
-    this.liveToNode.delete(liveId);
+    const node = this.liveToNode[liveId];
+    this.disposed.add(liveId);
+    delete this.liveToNode[liveId];
+    this.pending.delete(liveId);
+    this.model = acknowledgeAgent(this.model, liveId, true);
+    if (node) delete this.lastAgent[node];
   }
-
   start(): void {
     if (this.started) return;
     this.started = true;
-    listen<AgentSnapshot>("agent-states", (event) =>
-      this.onStates(event.payload),
-    ).catch(console.error);
+    void this.startSubscriptions().catch(console.error);
   }
-
-  paneState(
-    nodeId: string,
-  ): { state: string; agent?: string; cli?: string; cwd?: string } | null {
-    for (const [live, node] of this.liveToNode) {
-      if (node === nodeId) return this.states[live] ?? null;
-    }
-    return null;
+  private async startSubscriptions(): Promise<void> {
+    const win = getCurrentWindow();
+    await win.onFocusChanged(({ payload }) => {
+      this.foreground = payload;
+      if (payload) this.acknowledgeFocused();
+    });
+    this.foreground = await win.isFocused();
+    // Subscribe before fetching: startup snapshots cannot overwrite newer events.
+    await listen<AgentUpdate>("agent-state-update", (event) => this.onUpdate(event.payload));
+    document.addEventListener("visibilitychange", () => this.acknowledgeFocused());
+    const snapshot = await invoke<AgentUpdate>("agent_snapshot");
+    this.onUpdate({ ...snapshot, transitions: [] });
+    this.acknowledgeFocused();
   }
-
-  tabRollup(tab: Tab): Rollup {
-    return this.rollupFor(collectPaneIds(tab.root));
+  paneState(nodeId: string): AgentStatus | null {
+    const live = this.liveForNode(nodeId);
+    return live === undefined ? null : this.states[live] ?? null;
   }
-
-  workspaceRollup(ws: Workspace): Rollup {
-    return this.rollupFor(ws.tabs.flatMap((t) => collectPaneIds(t.root)));
+  paneAgentLabel(nodeId: string): string | undefined {
+    return this.paneState(nodeId)?.agent ?? this.lastAgent[nodeId]?.agent;
   }
-
-  /** Precedence: blocked > working > attention > done > unknown > idle. */
-  private rollupFor(nodeIds: string[]): Rollup {
-    let seenAttention = false;
-    let seenDone = false;
-    let seenUnknown = false;
-    for (const id of nodeIds) {
-      const state = this.paneState(id)?.state;
-      if (state === "blocked") return "blocked";
-      if (state === "working") return "working";
-      if (this.attention.includes(id)) seenAttention = true;
-      else if (this.done.includes(id)) seenDone = true;
-      else if (state === "done") seenDone = true;
-      else if (state === "unknown") seenUnknown = true;
-    }
-    if (seenAttention) return "attention";
-    if (seenDone) return "done";
-    return seenUnknown ? "unknown" : "idle";
+  private liveForNode(nodeId: string): number | undefined {
+    const live = Object.entries(this.liveToNode).find(([, node]) => node === nodeId)?.[0];
+    return live === undefined ? undefined : Number(live);
   }
-
-  /** Jump to the first pane needing review (unexpected stops first). */
+  paneStatus(nodeId: string): Rollup {
+    const live = this.liveForNode(nodeId);
+    return effectiveAgentStatus(this.paneState(nodeId), live === undefined ? undefined : this.model.unread[live]);
+  }
+  paneStatusTitle(nodeId: string): string {
+    const state = this.paneState(nodeId);
+    const label = agentStatusLabel(this.paneStatus(nodeId));
+    return state?.reason ? `${label} — ${state.reason}` : label;
+  }
+  tabRollup(tab: Tab): Rollup { return this.rollupFor(collectPaneIds(tab.root)); }
+  workspaceRollup(ws: Workspace): Rollup { return this.rollupFor(ws.tabs.flatMap((t) => collectPaneIds(t.root))); }
+  private rollupFor(nodes: string[]): Rollup { return rollupStatuses(nodes.map((node) => this.paneStatus(node))); }
   jumpToReview(): void {
     const target = this.attention[0] ?? this.done[0];
     if (target) this.jumpToPane(target);
   }
-
-  /** Reveal a pane and mark it seen. */
   jumpToPane(nodeId: string): void {
     store.revealPane(nodeId);
-    this.attention = this.attention.filter((id) => id !== nodeId);
-    this.done = this.done.filter((id) => id !== nodeId);
+    const found = store.layout && findTabByPane(store.layout, nodeId);
+    if (found?.tab.zoomedPaneId && found.tab.zoomedPaneId !== nodeId) store.toggleZoomPane(found.tab.zoomedPaneId);
+    store.paneFocusTarget = nodeId;
   }
-
-  /**
-   * Every agent cli seen this session plus every muted cli (so muted agents
-   * show in Settings even before they run), with display labels.
-   */
+  private focusedNode(): string | null {
+    return document.activeElement?.closest<HTMLElement>(".pane-view[data-pane-id]")?.dataset.paneId ?? null;
+  }
+  private isSeen(nodeId: string): boolean {
+    const layout = store.layout;
+    const found = layout && findTabByPane(layout, nodeId);
+    if (!layout || !found || store.settingsOpen || store.pendingClose) return false;
+    return paneIsVisible({
+      activeWorkspaceId: layout.activeWorkspaceId, workspaceId: found.ws.id,
+      activeTabId: found.ws.activeTabId, tabId: found.tab.id,
+      zoomedPaneId: found.tab.zoomedPaneId, nodeId,
+      foreground: this.foreground && document.visibilityState !== "hidden",
+      focusedNodeId: this.focusedNode(),
+    });
+  }
+  acknowledge(nodeId: string): void {
+    const live = this.liveForNode(nodeId);
+    if (live !== undefined) this.model = acknowledgeAgent(this.model, live, this.isSeen(nodeId));
+  }
+  private acknowledgeFocused(): void {
+    const node = this.focusedNode();
+    if (node) this.acknowledge(node);
+  }
   knownClis(): { cli: string; label: string }[] {
     const labels = new Map<string, string>();
-    for (const live of this.liveToNode.keys()) {
-      const st = this.states[live];
-      if (st?.cli) labels.set(st.cli.toLowerCase(), st.agent ?? st.cli);
-    }
-    for (const last of this.lastAgent.values()) {
-      if (last.cli) labels.set(last.cli.toLowerCase(), last.agent);
+    for (const st of [...Object.values(this.states), ...Object.values(this.lastAgent)]) {
+      if (st.cli) labels.set(st.cli.toLowerCase(), st.agent ?? st.cli);
     }
     for (const muted of store.mutedAgents) {
       const lower = muted.toLowerCase();
       if (!labels.has(lower)) labels.set(lower, muted);
     }
-    return [...labels.entries()]
-      .map(([cli, label]) => ({ cli, label }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    return [...labels].map(([cli, label]) => ({ cli, label })).sort((a, b) => a.label.localeCompare(b.label));
   }
-
-  /**
-   * Working panes, blocked/starting panes, live-done panes (agent at prompt),
-   * unseen stops, and idle known agents, grouped per workspace in workspace
-   * order (working first, idle last). Clean finishes show done; unexpected
-   * stops show attention; exit-based rows become idle once seen while
-   * live-done rows keep their check until the agent works again. Workspaces
-   * without agents are omitted; an empty list means none anywhere.
-   */
   activeAgents(): WorkspaceAgents[] {
     const layout = store.layout;
     if (!layout) return [];
-    const seen = new Set<string>();
     const rows: { wsId: string; row: ActiveAgent }[] = [];
-    const push = (
-      node: string,
-      label: string,
-      cli: string | undefined,
-      cwd: string | undefined,
-      status: ActiveAgent["status"],
-    ) => {
-      if (seen.has(node)) return;
+    for (const node of Object.values(this.liveToNode)) {
+      const st = this.paneState(node);
+      const last = this.lastAgent[node];
+      const label = st?.agent ?? last?.agent;
+      if (!label) continue;
       const found = findTabByPane(layout, node);
-      if (!found) return;
-      seen.add(node);
+      if (!found) continue;
       const pane = findPane(found.tab.root, node);
-      const full = cwd ?? pane?.cwd ?? null;
-      rows.push({
-        wsId: found.ws.id,
-        row: {
-          nodeId: node,
-          agent: label,
-          cli,
-          dir: full ? baseName(full) : label,
-          dirPath: full ?? undefined,
-          status,
-          tabName: found.tab.name,
-          paneTitle: pane?.title,
-        },
-      });
-    };
-    for (const status of ["working", "blocked", "unknown", "done"] as const) {
-      for (const [live, node] of this.liveToNode) {
-        const st = this.states[live];
-        if (st?.state === status) {
-          push(node, st.agent ?? "Agent", st.cli, st.cwd, status);
-        }
-      }
+      const cwd = st?.cwd ?? last?.cwd ?? pane?.cwd;
+      rows.push({ wsId: found.ws.id, row: {
+        nodeId: node, agent: label, cli: st?.cli ?? last?.cli,
+        dir: cwd ? baseName(cwd) : label, dirPath: cwd ?? undefined,
+        status: this.paneStatus(node), statusTitle: this.paneStatusTitle(node),
+        tabName: found.tab.name, paneTitle: pane?.title,
+      } });
     }
-    for (const node of this.attention) {
-      const last = this.lastAgent.get(node);
-      push(node, last?.agent ?? "Agent", last?.cli, last?.cwd, "attention");
-    }
-    for (const node of this.done) {
-      const last = this.lastAgent.get(node);
-      push(node, last?.agent ?? "Agent", last?.cli, last?.cwd, "done");
-    }
-    for (const [node, last] of this.lastAgent) {
-      push(node, last.agent, last.cli, last.cwd, "idle");
-    }
-    const groups: WorkspaceAgents[] = [];
-    for (const ws of layout.workspaces) {
-      const mine = rows.filter((r) => r.wsId === ws.id).map((r) => r.row);
-      if (mine.length > 0) {
-        groups.push({ wsId: ws.id, wsName: ws.name, agents: mine });
-      }
-    }
-    return groups;
+    const order: Rollup[] = ["blocked", "working", "attention", "done", "unknown", "idle"];
+    return layout.workspaces.map((ws) => ({
+      wsId: ws.id, wsName: ws.name,
+      agents: rows.filter((row) => row.wsId === ws.id).map((row) => row.row)
+        .sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status)),
+    })).filter((group) => group.agents.length > 0);
   }
-
-  private isNodeVisible(layout: Layout, nodeId: string): boolean {
-    const found = findTabByPane(layout, nodeId);
-    return (
-      found !== null &&
-      layout.activeWorkspaceId === found.ws.id &&
-      found.ws.activeTabId === found.tab.id
-    );
-  }
-
-  private windowVisible(): boolean {
-    return (
-      typeof document === "undefined" || document.visibilityState !== "hidden"
-    );
-  }
-
-  private onStates(next: AgentSnapshot): void {
-    const layout = store.layout;
-    if (layout) {
-      const winVisible = this.windowVisible();
-      const unseen = (nodeId: string): boolean =>
-        !(this.isNodeVisible(layout, nodeId) && winVisible);
-      const flag = (
-        liveStr: string,
-        list: string[],
-        title: (label: string) => string,
-        kind: SoundKind,
-      ): void => {
-        const nodeId = this.liveToNode.get(Number(liveStr));
-        if (!nodeId || !unseen(nodeId) || list.includes(nodeId)) return;
-        list.push(nodeId);
-        const label = this.states[liveStr]?.agent ?? "Agent";
-        const cli = this.states[liveStr]?.cli;
-        const route = routeNotification({
-          delivery: store.notifyDelivery,
-          soundEnabled: store.soundEnabled,
-          mutedClis: store.mutedAgents,
-          cli,
-        });
-        if (route.toast) {
-          toasts.push(title(label), "Click to review", nodeId);
-        }
-        if (route.system) {
-          invoke("notify_agent", {
-            title: title(label),
-            body: "Open Ubra to review",
-            kind,
-          }).catch((e) => console.error("ubra: agent notification failed", e));
-        }
-        if (route.sound) {
-          invoke("play_sound", {
-            kind,
-            style: chimeStyleParam(store.soundStyle),
-            file: store.soundFile.trim() === "" ? null : store.soundFile,
-          }).catch((e) => console.error("ubra: agent sound failed", e));
-        }
+  private rememberAgents(): void {
+    for (const [live, node] of Object.entries(this.liveToNode)) {
+      const state = this.states[live];
+      if (state?.agent) this.lastAgent[node] = {
+        agent: state.agent, cli: state.cli, cwd: state.cwd ?? this.lastAgent[node]?.cwd,
       };
-      // Clean exits are done; vanished ids with a live mapping died
-      // unexpectedly (deliberate closes unregister first).
-      for (const liveStr of detectFinished(this.states, next)) {
-        flag(liveStr, this.done, (label) => `${label} finished`, "done");
-      }
-      for (const liveStr of detectVanished(this.states, next)) {
-        flag(
-          liveStr,
-          this.attention,
-          (label) => `${label} needs attention`,
-          "request",
-        );
-      }
-      const stillUnseen = (id: string): boolean =>
-        findTabByPane(layout, id) !== null && unseen(id);
-      this.attention = this.attention.filter(stillUnseen);
-      this.done = this.done.filter(stillUnseen);
-      for (const [live, node] of this.liveToNode) {
-        const st = next[live];
-        if (st?.agent) {
-          this.lastAgent.set(node, {
-            agent: st.agent,
-            cli: st.cli,
-            cwd: st.cwd ?? this.lastAgent.get(node)?.cwd,
-          });
-        }
-      }
-      const live = new Set(
-        layout.workspaces.flatMap((ws) =>
-          ws.tabs.flatMap((t) => collectPaneIds(t.root)),
-        ),
-      );
-      for (const node of this.lastAgent.keys()) {
-        if (!live.has(node)) this.lastAgent.delete(node);
+    }
+  }
+  private onUpdate(update: AgentUpdate): void {
+    const result = applyAgentUpdate(this.model, update);
+    this.model = result.model;
+    for (const live of this.disposed) this.model = acknowledgeAgent(this.model, live, true);
+    this.rememberAgents();
+    for (const transition of result.transitions) {
+      const node = this.liveToNode[transition.paneId];
+      if (node) this.notify(transition);
+      else if (!this.disposed.has(transition.paneId)) {
+        this.pending.set(transition.paneId, transition);
       }
     }
-    this.states = next;
+    this.acknowledgeFocused();
+  }
+  private notify(transition: AgentTransition): void {
+    const nodeId = this.liveToNode[transition.paneId];
+    if (!nodeId) return;
+    const last = this.lastAgent[nodeId];
+    if (transition.agent) this.lastAgent[nodeId] = {
+      agent: transition.agent, cli: transition.cli, cwd: transition.cwd ?? last?.cwd,
+    };
+    if (this.isSeen(nodeId)) return;
+    const label = transition.agent ?? last?.agent ?? "Agent";
+    const kind = transition.kind === "task-completed" ? "done" : "request";
+    const title = kind === "done" ? `${label} finished` : `${label} needs attention`;
+    const route = routeNotification({ delivery: store.notifyDelivery,
+      soundEnabled: store.soundEnabled, mutedClis: store.mutedAgents,
+      cli: transition.cli ?? last?.cli });
+    if (route.toast) toasts.push(title, "Click to review", nodeId);
+    if (route.system) invoke("notify_agent", { title, body: "Open Ubra to review", kind }).catch(console.error);
+    if (route.sound) invoke("play_sound", playbackPayload(kind, store.soundStyle, store.soundFile)).catch(console.error);
   }
 }
-
 export const agent = new AgentStore();

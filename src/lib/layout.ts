@@ -1,7 +1,11 @@
 // Layout model: workspaces -> tabs -> binary split tree of panes.
 // Pure module (no Svelte/Tauri imports) so it can be unit-tested with node:test.
 
-export const LAYOUT_VERSION = 1;
+export const LAYOUT_VERSION = 2;
+export const MAX_LAYOUT_BYTES = 4 * 1024 * 1024;
+export const MAX_LAYOUT_DEPTH = 32;
+export const MAX_LAYOUT_ENTITIES = 4096;
+export const MIN_SPLIT_FRACTION = 0.05;
 
 export interface PaneNode {
   kind: "pane";
@@ -10,6 +14,8 @@ export interface PaneNode {
   title?: string;
   /** Startup command: [program, ...args]. Defaults to the user's shell. */
   cmd?: string[];
+  /** false requires explicit launch authorization; absence keeps legacy auto-run. */
+  cmdOnRestore?: boolean;
 }
 
 export interface SplitNode {
@@ -45,10 +51,7 @@ export interface Layout {
 }
 
 export function newId(prefix: string): string {
-  const uuid =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID().slice(0, 8)
-      : Math.floor(Math.random() * 0xffffffff).toString(16);
+  const uuid = crypto.randomUUID();
   return `${prefix}-${uuid}`;
 }
 
@@ -58,6 +61,29 @@ export function defaultPane(): PaneNode {
 
 export function defaultTab(name = "Tab 1"): Tab {
   return { id: newId("tab"), name, root: defaultPane() };
+}
+
+export function gridTab(name = "Tab 1"): Tab {
+  const row = (): SplitNode => ({
+    kind: "split",
+    id: newId("split"),
+    dir: "row",
+    sizes: [0.5, 0.5],
+    first: defaultPane(),
+    second: defaultPane(),
+  });
+  return {
+    id: newId("tab"),
+    name,
+    root: {
+      kind: "split",
+      id: newId("split"),
+      dir: "col",
+      sizes: [0.5, 0.5],
+      first: row(),
+      second: row(),
+    },
+  };
 }
 
 export function defaultWorkspace(name = "Workspace 1"): Workspace {
@@ -330,97 +356,144 @@ export function extractPaneToNewWorkspace(
 
 // --- loading ---------------------------------------------------------------
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
+function record(v: unknown, label: string): Record<string, unknown> {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    throw new Error(`Invalid saved layout: ${label} must be an object.`);
+  }
+  return v as Record<string, unknown>;
 }
 
-function asString(v: unknown, fallback: string): string {
-  return typeof v === "string" && v.length > 0 ? v : fallback;
+function text(v: unknown, label: string): string {
+  if (typeof v !== "string" || v.trim().length === 0) {
+    throw new Error(`Invalid saved layout: ${label} must be a nonempty string.`);
+  }
+  return v;
 }
 
-function sanitizeNode(v: unknown): LayoutNode {
-  if (!isRecord(v)) return defaultPane();
-  if (v["kind"] === "pane" && typeof v["id"] === "string") {
-    const node: PaneNode = { kind: "pane", id: v["id"] };
-    if (typeof v["cwd"] === "string") node.cwd = v["cwd"];
-    if (typeof v["title"] === "string") node.title = v["title"];
-    if (Array.isArray(v["cmd"])) {
-      node.cmd = (v["cmd"] as unknown[]).filter(
-        (c): c is string => typeof c === "string",
-      );
+interface LoadContext {
+  ids: Set<string>;
+  entities: number;
+}
+
+function identity(v: unknown, context: LoadContext): string {
+  const id = text(v, "identity");
+  if (context.ids.has(id)) throw new Error(`Invalid saved layout: duplicate identity "${id}".`);
+  if (++context.entities > MAX_LAYOUT_ENTITIES) {
+    throw new Error(`Saved layout exceeds the ${MAX_LAYOUT_ENTITIES} entity limit.`);
+  }
+  context.ids.add(id);
+  return id;
+}
+
+function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNode {
+  if (depth > MAX_LAYOUT_DEPTH) {
+    throw new Error(`Saved layout exceeds the ${MAX_LAYOUT_DEPTH} level tree depth limit.`);
+  }
+  const value = record(v, "node");
+  const id = identity(value["id"], context);
+  if (value["kind"] === "pane") {
+    const node: PaneNode = { kind: "pane", id };
+    for (const key of ["cwd", "title"] as const) {
+      if (value[key] !== undefined) {
+        if (typeof value[key] !== "string") throw new Error(`Invalid saved pane ${key}.`);
+        node[key] = value[key];
+      }
     }
-    return node;
+    if (value["cmd"] !== undefined) {
+      if (!Array.isArray(value["cmd"]) || !value["cmd"].every((part) => typeof part === "string")) {
+        throw new Error("Invalid saved pane startup command.");
+      }
+      node.cmd = [...value["cmd"]];
+    }
+    if (value["cmdOnRestore"] !== undefined) {
+      if (typeof value["cmdOnRestore"] !== "boolean") {
+        throw new Error("Invalid saved pane command restore policy.");
+      }
+      node.cmdOnRestore = value["cmdOnRestore"];
+    }
   }
-  if (v["kind"] === "split" && typeof v["id"] === "string") {
-    const dir = v["dir"] === "col" ? "col" : "row";
-    const sizes = Array.isArray(v["sizes"]) ? v["sizes"] : [];
-    const a = typeof sizes[0] === "number" && sizes[0] > 0 ? sizes[0] : 0.5;
-    const b = typeof sizes[1] === "number" && sizes[1] > 0 ? sizes[1] : 0.5;
-    return {
-      kind: "split",
-      id: v["id"],
-      dir,
-      sizes: [a / (a + b), b / (a + b)],
-      first: sanitizeNode(v["first"]),
-      second: sanitizeNode(v["second"]),
-    };
+  if (value["kind"] !== "split" || (value["dir"] !== "row" && value["dir"] !== "col")) {
+    throw new Error("Invalid saved split kind or direction.");
   }
-  return defaultPane();
+  const sizes = value["sizes"];
+  if (!Array.isArray(sizes) || sizes.length !== 2 ||
+      !sizes.every((size) => typeof size === "number" && Number.isFinite(size) && size > 0)) {
+    throw new Error("Invalid saved split sizes: two finite positive values are required.");
+  }
+  const [a, b] = sizes as [number, number];
+  // Scaling first avoids overflowing a+b or underflowing both weights.
+  const scale = Math.max(a, b);
+  const fraction = a + b === 1 ? a : (a / scale) / (a / scale + b / scale);
+  if (fraction < MIN_SPLIT_FRACTION || fraction > 1 - MIN_SPLIT_FRACTION) {
+    throw new Error("Invalid saved split sizes: a pane would have degenerate geometry.");
+  }
+  // Preserve already-normalized values exactly for stable round trips.
+  const normalized: [number, number] = a + b === 1 ? [a, b] : [fraction, 1 - fraction];
+  return {
+    kind: "split",
+    id,
+    dir: value["dir"],
+    sizes: normalized,
+    first: sanitizeNode(value["first"], context, depth + 1),
+    second: sanitizeNode(value["second"], context, depth + 1),
+  };
 }
 
-function sanitizeTab(v: unknown, index: number): Tab {
-  if (!isRecord(v)) return defaultTab(`Tab ${index + 1}`);
-  const root = sanitizeNode(v["root"]);
+function sanitizeTab(v: unknown, context: LoadContext): Tab {
+  const value = record(v, "tab");
   const tab: Tab = {
-    id: asString(v["id"], newId("tab")),
-    name: asString(v["name"], `Tab ${index + 1}`),
-    root,
+    id: identity(value["id"], context),
+    name: text(value["name"], "tab name"),
+    root: sanitizeNode(value["root"], context, 1),
   };
-  if (
-    typeof v["zoomedPaneId"] === "string" &&
-    findPane(root, v["zoomedPaneId"]) !== null
-  ) {
-    tab.zoomedPaneId = v["zoomedPaneId"];
+  if (value["zoomedPaneId"] !== undefined) {
+    const zoom = text(value["zoomedPaneId"], "zoomed pane identity");
+    if (!findPane(tab.root, zoom)) throw new Error("Invalid saved layout: zoomed pane is missing.");
+    tab.zoomedPaneId = zoom;
   }
   return tab;
 }
 
-function sanitizeWorkspace(v: unknown, index: number): Workspace {
-  if (!isRecord(v)) return defaultWorkspace(`Workspace ${index + 1}`);
-  const tabs = Array.isArray(v["tabs"])
-    ? (v["tabs"] as unknown[]).map((t, i) => sanitizeTab(t, i))
-    : [];
-  if (tabs.length === 0) tabs.push(defaultTab());
-  const ws: Workspace = {
-    id: asString(v["id"], newId("ws")),
-    name: asString(v["name"], `Workspace ${index + 1}`),
-    tabs,
-    activeTabId: typeof v["activeTabId"] === "string" ? v["activeTabId"] : "",
-  };
-  if (!ws.tabs.some((t) => t.id === ws.activeTabId)) ws.activeTabId = ws.tabs[0].id;
-  return ws;
+function sanitizeWorkspace(v: unknown, context: LoadContext): Workspace {
+  const value = record(v, "workspace");
+  const id = identity(value["id"], context);
+  const rawTabs = value["tabs"];
+  if (!Array.isArray(rawTabs) || rawTabs.length === 0 || rawTabs.length > MAX_LAYOUT_ENTITIES) {
+    throw new Error("Invalid saved layout: workspace must have a bounded, nonempty tab list.");
+  }
+  const tabs = rawTabs.map((tab) => sanitizeTab(tab, context));
+  const activeTabId = text(value["activeTabId"], "active tab identity");
+  if (!tabs.some((tab) => tab.id === activeTabId)) {
+    throw new Error("Invalid saved layout: active tab is missing.");
+  }
+  return { id, name: text(value["name"], "workspace name"), tabs, activeTabId };
 }
 
-/// Coerce loaded JSON into a valid Layout, filling defaults for anything
-/// broken. Unknown versions start fresh rather than misrender.
+/** Validate before rendering; unsafe repairs require explicit recovery, never a fresh fallback. */
 export function sanitizeLayout(v: unknown): Layout {
-  if (!isRecord(v) || v["version"] !== LAYOUT_VERSION || !Array.isArray(v["workspaces"])) {
-    return defaultLayout();
+  const value = record(v, "document");
+  if (value["version"] !== 1 && value["version"] !== LAYOUT_VERSION) {
+    throw new Error(`Unsupported saved layout version: ${String(value["version"])}.`);
   }
-  const workspaces = (v["workspaces"] as unknown[]).map((w, i) =>
-    sanitizeWorkspace(w, i),
-  );
-  if (workspaces.length === 0) workspaces.push(defaultWorkspace());
-  const layout: Layout = {
-    version: LAYOUT_VERSION,
-    workspaces,
-    activeWorkspaceId:
-      typeof v["activeWorkspaceId"] === "string" ? v["activeWorkspaceId"] : "",
-  };
-  if (!workspaces.some((w) => w.id === layout.activeWorkspaceId)) {
-    layout.activeWorkspaceId = workspaces[0].id;
+  const rawWorkspaces = value["workspaces"];
+  if (!Array.isArray(rawWorkspaces) || rawWorkspaces.length === 0 ||
+      rawWorkspaces.length > MAX_LAYOUT_ENTITIES) {
+    throw new Error("Invalid saved layout: a bounded, nonempty workspace list is required.");
   }
-  return layout;
+  const context: LoadContext = { ids: new Set(), entities: 0 };
+  const workspaces = rawWorkspaces.map((workspace) => sanitizeWorkspace(workspace, context));
+  const activeWorkspaceId = text(value["activeWorkspaceId"], "active workspace identity");
+  if (!workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
+    throw new Error("Invalid saved layout: active workspace is missing.");
+  }
+  let bytes: number;
+  try {
+    bytes = new TextEncoder().encode(JSON.stringify(v)).byteLength;
+  } catch {
+    throw new Error("Invalid saved layout: document cannot be serialized safely.");
+  }
+  if (bytes > MAX_LAYOUT_BYTES) throw new Error(`Saved layout exceeds the ${MAX_LAYOUT_BYTES} byte limit.`);
+  return { version: LAYOUT_VERSION, workspaces, activeWorkspaceId };
 }
 
 /** All pane node ids in a tree. */
@@ -446,35 +519,36 @@ export function baseName(path: string): string {
   return parts[parts.length - 1];
 }
 
+/**
+ * Move a workspace to before/after another workspace, in place.
+ * Returns false for unknown ids, self-drops, or no-op adjacent moves.
+ */
+export function moveWorkspace(
+  layout: Layout,
+  sourceId: string,
+  targetId: string,
+  position: "before" | "after" = "before",
+): boolean {
+  if (sourceId === targetId) return false;
+  const from = layout.workspaces.findIndex((w) => w.id === sourceId);
+  const to = layout.workspaces.findIndex((w) => w.id === targetId);
+  if (from < 0 || to < 0) return false;
+  if (position === "before" && from + 1 === to) return false;
+  if (position === "after" && from === to + 1) return false;
+  const [ws] = layout.workspaces.splice(from, 1);
+  let insert = layout.workspaces.findIndex((w) => w.id === targetId);
+  if (insert < 0) {
+    layout.workspaces.splice(from, 0, ws);
+    return false;
+  }
+  if (position === "after") insert += 1;
+  layout.workspaces.splice(insert, 0, ws);
+  return true;
+}
+
 /** Live-agent states: the pane hosts a running, suspended, or starting agent. */
 export function isActiveAgentState(state: string | undefined): boolean {
   return state === "working" || state === "blocked" || state === "unknown";
-}
-
-/** Live ids that transitioned from an active agent state to inactive. */
-export function detectFinished(
-  prev: AgentSnapshot,
-  next: AgentSnapshot,
-): string[] {
-  const out: string[] = [];
-  for (const [id, state] of Object.entries(next)) {
-    if (
-      isActiveAgentState(prev[id]?.state) &&
-      !isActiveAgentState(state.state)
-    )
-      out.push(id);
-  }
-  return out;
-}
-
-/** Live ids that held an active agent in prev but are absent from next. */
-export function detectVanished(
-  prev: AgentSnapshot,
-  next: AgentSnapshot,
-): string[] {
-  return Object.keys(prev).filter(
-    (id) => isActiveAgentState(prev[id].state) && !(id in next),
-  );
 }
 
 /** A pane's placement as canvas fractions: [x, y, w, h]. */

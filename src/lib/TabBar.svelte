@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
@@ -7,8 +8,25 @@
 
   let editing = $state<string | null>(null);
   let draft = $state("");
-  let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  let menu = $state<{ id: string; x: number; y: number; opener: HTMLElement | null } | null>(null);
   const mod = modLabel(isMacPlatform(navigator.platform));
+  let tabList = $state<HTMLDivElement | null>(null);
+
+  function revealActive(): void {
+    tabList?.querySelector<HTMLElement>(".tab.active")
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  $effect(() => {
+    const active = store.workspace()?.activeTabId;
+    if (active && tabList) void tick().then(revealActive);
+  });
+
+  function trackViewport(node: HTMLDivElement) {
+    const observer = new ResizeObserver(revealActive);
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
 
   function focus(el: HTMLInputElement): void {
     el.focus();
@@ -27,7 +45,8 @@
     e.stopPropagation();
     if (editing) commitRename(editing);
     announceMenuOpen();
-    menu = { id, x: e.clientX, y: e.clientY };
+    menu = { id, x: e.clientX, y: e.clientY,
+      opener: (e.currentTarget as HTMLElement).querySelector<HTMLElement>(".name") };
   }
 
   function onPick(action: string): void {
@@ -50,6 +69,7 @@
   {@const ws = store.workspace()}
   {#if ws}
     <div class="tabbar">
+      <div class="tab-list" bind:this={tabList} use:trackViewport>
       {#each ws.tabs as tab (tab.id)}
         {@const rollup = agent.tabRollup(tab)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -96,6 +116,7 @@
           </button>
         </div>
       {/each}
+      </div>
       <button
         class="add"
         title={`New tab (${mod}T)`}
@@ -108,6 +129,7 @@
       <ContextMenu
         x={menu.x}
         y={menu.y}
+        opener={menu.opener}
         items={[
           { id: "rename", label: "Rename", icon: "edit" },
           { id: "close", label: "Close", danger: true, icon: "x" },
@@ -124,10 +146,22 @@
     display: flex;
     align-items: center;
     gap: 4px;
+    min-width: 0;
     padding: 6px 8px;
     background: var(--tabbar-bg);
     font: 12px system-ui, sans-serif;
     user-select: none;
+  }
+  .tab-list {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    overscroll-behavior-x: contain;
   }
   .tab {
     display: flex;
@@ -136,6 +170,8 @@
     border-radius: 6px;
     color: var(--text);
     max-width: 180px;
+    flex: 0 0 auto;
+    min-width: 96px;
   }
   .tab.active {
     background: var(--surface-active);
@@ -181,6 +217,7 @@
   .add {
     display: inline-flex;
     align-items: center;
+    flex: 0 0 auto;
     background: transparent;
     border: none;
     color: var(--text-muted);
