@@ -8,7 +8,7 @@ import {
   themeStyle,
 } from "../src/lib/themes.ts";
 
-const herdrThemeIds = [
+const builtInThemeIds = [
   "catppuccin",
   "catppuccin-latte",
   "tokyo-night",
@@ -29,8 +29,8 @@ const herdrThemeIds = [
 ] as const;
 
 describe("theme catalog", () => {
-  it("includes every built-in Herdr theme and keeps VS Code Dark+ as default", () => {
-    for (const id of herdrThemeIds) assert.ok(isThemeId(id), `${id} is missing`);
+  it("includes every built-in theme and keeps VS Code Dark+ as default", () => {
+    for (const id of builtInThemeIds) assert.ok(isThemeId(id), `${id} is missing`);
     assert.equal(DEFAULT_THEME_ID, "vscode-dark");
     assert.equal(THEMES[DEFAULT_THEME_ID].name, "VS Code Dark+");
   });

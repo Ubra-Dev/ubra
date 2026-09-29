@@ -61,7 +61,7 @@ export interface ThemeDefinition {
   terminal: TerminalColors;
 }
 
-interface HerdrPalette {
+interface UbraPalette {
   scheme: "dark" | "light";
   background: string;
   sidebar: string;
@@ -105,7 +105,7 @@ function mixHexColors(first: string, second: string, amount: number): string {
     .join("")}`;
 }
 
-function makeHerdrTheme(name: string, palette: HerdrPalette): ThemeDefinition {
+function makeUbraTheme(name: string, palette: UbraPalette): ThemeDefinition {
   const { scheme, background, sidebar, active, selection, surface, surfaceHover,
     separator, text, subtext, muted, subtle, accent, red, green, yellow, blue,
     magenta, cyan, peach } = palette;
@@ -349,7 +349,7 @@ export const THEMES = {
       brightWhite: "#eceff4",
     },
   },
-  solarized: makeHerdrTheme("Solarized", {
+  solarized: makeUbraTheme("Solarized", {
     scheme: "dark", background: "#002b36", sidebar: "#073642",
     active: "#164b57", selection: "#083e55", surface: "#073642",
     surfaceHover: "#586e75", separator: "#002b36", text: "#93a1a1",
@@ -416,7 +416,7 @@ export const THEMES = {
       brightWhite: "#ffffff",
     },
   },
-  catppuccin: makeHerdrTheme("Catppuccin", {
+  catppuccin: makeUbraTheme("Catppuccin", {
     scheme: "dark", background: "#181825", sidebar: "#181825",
     active: "#1e1e2e", selection: "#313244", surface: "#313244",
     surfaceHover: "#45475a", separator: "#1e1e2e", text: "#cdd6f4",
@@ -425,7 +425,7 @@ export const THEMES = {
     yellow: "#f9e2af", blue: "#89b4fa", magenta: "#cba6f7",
     cyan: "#94e2d5", peach: "#fab387",
   }),
-  "catppuccin-latte": makeHerdrTheme("Catppuccin Latte", {
+  "catppuccin-latte": makeUbraTheme("Catppuccin Latte", {
     scheme: "light", background: "#eff1f5", sidebar: "#eff1f5",
     active: "#e6e9ef", selection: "#bdd0f5", surface: "#ccd0da",
     surfaceHover: "#bcc0cc", separator: "#e6e9ef", text: "#4c4f69",
@@ -434,7 +434,7 @@ export const THEMES = {
     yellow: "#df8e1d", blue: "#1e66f5", magenta: "#8839ef",
     cyan: "#179299", peach: "#fe640b",
   }),
-  "tokyo-night": makeHerdrTheme("Tokyo Night", {
+  "tokyo-night": makeUbraTheme("Tokyo Night", {
     scheme: "dark", background: "#1a1b26", sidebar: "#1a1b26",
     active: "#232636", selection: "#2d3650", surface: "#24283b",
     surfaceHover: "#414868", separator: "#1a1b26", text: "#c0caf5",
@@ -443,7 +443,7 @@ export const THEMES = {
     yellow: "#e0af68", blue: "#7aa2f7", magenta: "#bb9af7",
     cyan: "#7dcfff", peach: "#ff9e64",
   }),
-  "tokyo-night-day": makeHerdrTheme("Tokyo Night Day", {
+  "tokyo-night-day": makeUbraTheme("Tokyo Night Day", {
     scheme: "light", background: "#e1e2e7", sidebar: "#e1e2e7",
     active: "#d2d3da", selection: "#b6cae7", surface: "#c4c8da",
     surfaceHover: "#a8aecb", separator: "#d2d3da", text: "#3760bf",
@@ -452,7 +452,7 @@ export const THEMES = {
     yellow: "#8c6c3e", blue: "#2e7de9", magenta: "#7847bd",
     cyan: "#118c74", peach: "#b15c00",
   }),
-  gruvbox: makeHerdrTheme("Gruvbox", {
+  gruvbox: makeUbraTheme("Gruvbox", {
     scheme: "dark", background: "#282828", sidebar: "#282828",
     active: "#323130", selection: "#4b3f27", surface: "#3c3836",
     surfaceHover: "#504945", separator: "#282828", text: "#ebdbb2",
@@ -461,7 +461,7 @@ export const THEMES = {
     yellow: "#fabd2f", blue: "#83a598", magenta: "#d3869b",
     cyan: "#8ec07c", peach: "#fe8019",
   }),
-  "gruvbox-light": makeHerdrTheme("Gruvbox Light", {
+  "gruvbox-light": makeUbraTheme("Gruvbox Light", {
     scheme: "light", background: "#fbf1c7", sidebar: "#fbf1c7",
     active: "#f2e5bc", selection: "#ebdbb2", surface: "#ebdbb2",
     surfaceHover: "#d5c4a1", separator: "#f2e5bc", text: "#3c3836",
@@ -470,7 +470,7 @@ export const THEMES = {
     yellow: "#b57614", blue: "#076678", magenta: "#8f3f71",
     cyan: "#427b58", peach: "#af3a03",
   }),
-  "one-dark": makeHerdrTheme("One Dark", {
+  "one-dark": makeUbraTheme("One Dark", {
     scheme: "dark", background: "#282c34", sidebar: "#282c34",
     active: "#313640", selection: "#334659", surface: "#2c313a",
     surfaceHover: "#3e4451", separator: "#282c34", text: "#abb2bf",
@@ -479,7 +479,7 @@ export const THEMES = {
     yellow: "#e5c07b", blue: "#61afef", magenta: "#c678dd",
     cyan: "#56b6c2", peach: "#d19a66",
   }),
-  "one-light": makeHerdrTheme("One Light", {
+  "one-light": makeUbraTheme("One Light", {
     scheme: "light", background: "#fafafa", sidebar: "#f5f5f6",
     active: "#d8dbe2", selection: "#cddbf8",
     surface: "#f0f0f1", surfaceHover: "#e5e5e6", separator: "#f5f5f6",
@@ -488,7 +488,7 @@ export const THEMES = {
     green: "#50a14f", yellow: "#c18401", blue: "#4078f2",
     magenta: "#a626a4", cyan: "#0184bc", peach: "#986801",
   }),
-  "solarized-light": makeHerdrTheme("Solarized Light", {
+  "solarized-light": makeUbraTheme("Solarized Light", {
     scheme: "light", background: "#fdf6e3", sidebar: "#fdf6e3",
     active: "#eee8d5", selection: "#c9dcdf", surface: "#eee8d5",
     surfaceHover: "#93a1a1", separator: "#eee8d5", text: "#657b83",
@@ -497,7 +497,7 @@ export const THEMES = {
     yellow: "#b58900", blue: "#268bd2", magenta: "#d33682",
     cyan: "#2aa198", peach: "#cb4b16",
   }),
-  kanagawa: makeHerdrTheme("Kanagawa", {
+  kanagawa: makeUbraTheme("Kanagawa", {
     scheme: "dark", background: "#1f1f28", sidebar: "#1f1f28",
     active: "#363646", selection: "#32384b", surface: "#2a2a37",
     surfaceHover: "#363646", separator: "#1f1f28", text: "#dcd7ba",
@@ -506,7 +506,7 @@ export const THEMES = {
     yellow: "#c0a36e", blue: "#7e9cd8", magenta: "#957fb8",
     cyan: "#7fb4ca", peach: "#ffa066",
   }),
-  "kanagawa-lotus": makeHerdrTheme("Kanagawa Lotus", {
+  "kanagawa-lotus": makeUbraTheme("Kanagawa Lotus", {
     scheme: "light", background: "#f2ecbc", sidebar: "#f2ecbc",
     active: "#d5cea3", selection: "#dcd5ac", surface: "#dcd5ac",
     surfaceHover: "#c9cbd1", separator: "#d5cea3", text: "#545464",
@@ -515,7 +515,7 @@ export const THEMES = {
     yellow: "#77713f", blue: "#4d699b", magenta: "#624c83",
     cyan: "#4e8ca2", peach: "#cc6d00",
   }),
-  "rose-pine": makeHerdrTheme("Rosé Pine", {
+  "rose-pine": makeUbraTheme("Rosé Pine", {
     scheme: "dark", background: "#191724", sidebar: "#191724",
     active: "#26233a", selection: "#3b344b", surface: "#1f1d2e",
     surfaceHover: "#26233a", separator: "#26233a", text: "#e0def4",
@@ -524,7 +524,7 @@ export const THEMES = {
     yellow: "#f6c177", blue: "#31748f", magenta: "#c4a7e7",
     cyan: "#9ccfd8", peach: "#ea9a97",
   }),
-  "rose-pine-dawn": makeHerdrTheme("Rosé Pine Dawn", {
+  "rose-pine-dawn": makeUbraTheme("Rosé Pine Dawn", {
     scheme: "light", background: "#faf4ed", sidebar: "#faf4ed",
     active: "#e3d9cf", selection: "#f2e9e1", surface: "#f2e9e1",
     surfaceHover: "#fffaf3", separator: "#f2e9e1", text: "#464261",
@@ -533,7 +533,7 @@ export const THEMES = {
     yellow: "#ea9d34", blue: "#286983", magenta: "#907aa9",
     cyan: "#56949f", peach: "#d7827e",
   }),
-  vesper: makeHerdrTheme("Vesper", {
+  vesper: makeUbraTheme("Vesper", {
     scheme: "dark", background: "#1a1a1a", sidebar: "#1a1a1a",
     active: "#101010", selection: "#232323", surface: "#232323",
     surfaceHover: "#282828", separator: "#101010", text: "#ffffff",

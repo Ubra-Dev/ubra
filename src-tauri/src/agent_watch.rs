@@ -14,11 +14,10 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, Updat
 
 /// Known agent binaries: (binary stem, display label).
 ///
-/// Covers every agent Herdr detects (https://herdr.dev/docs/agents/), plus a
-/// few extra CLIs (Aider, Goose, Crush). Display labels match Herdr's.
-/// Stems with two spellings (Qoder, Antigravity) cover both the bare binary
-/// name and Herdr's integration-slug spelling, since either may be the process
-/// name on a given machine.
+/// Covers the popular coding-agent CLIs, plus a few extras (Aider, Goose,
+/// Crush). Stems with two spellings (Qoder, Antigravity) cover both the bare
+/// binary name and the integration-slug spelling, since either may be the
+/// process name on a given machine.
 pub const AGENT_TABLE: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
     ("codex", "Codex"),
@@ -232,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn herdr_parity_agents_match() {
-        // Every agent Herdr detects that was missing from the table.
+    fn extended_agents_match() {
+        // Every agent beyond the original core table.
         assert_eq!(match_agent("kimi"), Some("Kimi Code CLI"));
         assert_eq!(match_agent("hermes"), Some("Hermes Agent"));
         assert_eq!(match_agent("qoder"), Some("Qoder CLI"));

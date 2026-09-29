@@ -5,7 +5,7 @@
 [![Tauri](https://img.shields.io/badge/desktop-Tauri%20v2-ffc131.svg)](https://v2.tauri.app/)
 [![Svelte](https://img.shields.io/badge/web-Svelte%205-ff3e00.svg)](https://svelte.dev/)
 
-A Herdr-style agent runtime as a cross-platform desktop app (macOS, Linux, Windows).
+An agent runtime as a cross-platform desktop app (macOS, Linux, Windows).
 Workspaces → tabs → terminal panes running real coding-agent CLIs, with agent
 state badges, layout persistence, and agents that keep running when the window closes.
 
