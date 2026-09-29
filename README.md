@@ -1,7 +1,6 @@
 # Ubra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/stackwares/ubra-tauri/actions/workflows/ci.yml/badge.svg)](https://github.com/stackwares/ubra-tauri/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/stackwares/ubra-tauri/releases)
 [![Tauri](https://img.shields.io/badge/desktop-Tauri%20v2-ffc131.svg)](https://v2.tauri.app/)
 [![Svelte](https://img.shields.io/badge/web-Svelte%205-ff3e00.svg)](https://svelte.dev/)
@@ -66,8 +65,8 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo fmt --check
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus a release
-`tauri build` on macOS, Linux, and Windows.
+Run the full set before pushing. (The `CI` workflow in
+`.github/workflows/` is currently disabled; re-enable it when ready.)
 
 ## Verifying manually
 
@@ -88,12 +87,19 @@ npm run tauri dev
   to another tab: the pane header, tab, and sidebar show a working badge. When
   the agent exits while you're elsewhere, you get an OS notification and a
   "needs attention" shortcut in the sidebar.
-- The sidebar Agents section lists working agents (green) and finished ones
-  needing review (amber), grouped per workspace; clicking a row jumps to
-  its pane.
+- The sidebar Agents section lists working agents (green), finished ones
+  needing review (amber), and idle known agents (hollow), grouped per
+  workspace; clicking a row jumps to its pane.
 - Right-click workspaces (Rename/Close), tabs (Rename/Close), and panes
   (Rename/Zoom/Close). Zoom fills the tab; hidden siblings keep running.
 - Resize/move the window, quit, and relaunch: size and position restore.
+- Keyboard shortcuts work with terminal focus: `Mod+T` new tab, `Mod+W` close
+  pane, `Mod+N` new workspace, `Mod+D` / `Mod+Shift+D` split, `Mod+Enter`
+  zoom, `Mod+[` / `Mod+]` switch tabs, `Mod+,` settings (`Mod` is Cmd on
+  macOS, Ctrl elsewhere; the full list lives in Settings).
+- `Mod+=` / `Mod+-` / `Mod+0` resize the terminal font; the size persists.
+- Settings (sidebar footer, or `Mod+,`) holds launch-at-login, theme, font
+  size, the shortcut reference, and version info.
 
 ## Roadmap
 
