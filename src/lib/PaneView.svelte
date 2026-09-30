@@ -8,6 +8,7 @@
   import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
+  import { forgetSession } from "./ptySessions";
   import { paneDisplayTitle, type PaneNode } from "./layout";
   import { toasts } from "./toasts.svelte.ts";
 
@@ -324,6 +325,7 @@
           invoke("pty_close", { key: node.id })
             .catch((error) => console.error(error))
             .finally(() => {
+              forgetSession(node.id);
               store.authorizePaneCommand(node.id);
               exited = false;
               runId += 1;
@@ -489,7 +491,7 @@
     align-items: center;
     gap: 6px;
     background: var(--accent);
-    color: var(--text-strong);
+    color: var(--on-accent);
     border: none;
     font-size: 12px;
     padding: 4px 12px;
