@@ -37,6 +37,13 @@ export interface AgentModel {
 export function emptyAgentModel(): AgentModel {
   return { revision: -1, states: {}, unread: {}, seenEvents: new Set() };
 }
+/** Upper bound for retained dedup/ack identities; oldest evicted first. */
+export const MAX_RETAINED_AGENT_IDS = 512;
+/** Keep at most `max` identities, preferring the most recently added. */
+export function retainRecent<T>(ids: Iterable<T>, max: number = MAX_RETAINED_AGENT_IDS): Set<T> {
+  const unique = [...new Set(ids)];
+  return new Set(unique.slice(Math.max(0, unique.length - max)));
+}
 export function applyAgentUpdate(model: AgentModel, update: AgentUpdate): {
   model: AgentModel;
   transitions: AgentTransition[];
@@ -69,7 +76,7 @@ export function applyAgentUpdate(model: AgentModel, update: AgentUpdate): {
     transitions.push(transition);
   }
   return {
-    model: { revision: update.revision, states, unread, seenEvents },
+    model: { revision: update.revision, states, unread, seenEvents: retainRecent(seenEvents) },
     transitions,
   };
 }

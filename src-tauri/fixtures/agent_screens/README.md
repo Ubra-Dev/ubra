@@ -11,7 +11,7 @@ Inspected on 2026-09-30:
 | CLI | Version | Marker provenance | Supported evidence |
 | --- | --- | --- | --- |
 | Codex | 0.158.0 | Installed executable literals; upstream Rust `status_indicator_widget.rs`, `bottom_pane/approval_overlay.rs`, and `bottom_pane/chat_composer.rs` | Busy interrupt hint, command/edit/permission approvals, ready composer with shortcut footer |
-| Claude | 2.1.284 | JavaScript embedded in installed executable: confirmation renderer `_q` (question, selected options, escape cancel), `zMt` (interrupt footer), composer shortcut footer | Standard proceed approval, busy interrupt footer, ready composer with shortcut footer |
+| Claude | 2.1.284 | JavaScript embedded in installed executable: confirmation renderer `_q` (question, selected options, escape cancel), `zMt` (interrupt footer), composer shortcut footer, transcript viewer header | Standard proceed approval, busy interrupt footer, ready composer with shortcut footer, transcript viewer hold |
 | Gemini | 0.57.0 | Installed npm bundle `interactiveCli-5O6FZS57.js`: `LoadingIndicator`, `ToolConfirmationMessage`, `InputPrompt`, `AskUserDialog`, `TextQuestionView`, `ReviewScreen`; `DialogFooter` in dependency chunk | Responding indicator, execution/edit/info approvals, empty composer, text question and answer review |
 | OpenCode | 1.18.30 | Primary tagged `packages/tui/src/component/prompt/index.tsx` renderer; upstream `packages/tui/src/routes/session/permission.tsx` renderer (approval source not version pinned) | Busy interrupt footer, empty composer with commands footer, permission option group with selection/confirmation footer |
 | MiMoCode | 0.1.15 | JavaScript embedded in installed executable (Bun bundle): permission renderer (titled dialog, once/always/reject options), session footer (spinner row with `esc interrupt` / `esc again to interrupt`), prompt hints (idle-only `@`/`$`/`/` labels) | Busy interrupt footer, empty composer with idle hints, permission option group with selection/confirmation footer, text question |
@@ -47,8 +47,10 @@ Busy indicators are also bound to composer ordering: Codex and Gemini place
 their indicator above their own composer, while Claude and OpenCode place the
 interrupt footer below it. A newer composer invalidates that historical busy
 evidence even when both screens still fit in the bottom matching window.
-Ambiguous historical markers may yield Unknown rather than Working.
-Unmatched or partial markers yield no evidence.
+Viewer screens (Claude's transcript viewer) hold the confirmed state instead:
+a hold rule wins over every state rule so stale history cannot reclassify a
+live session. Ambiguous historical markers may yield Unknown rather than
+Working. Unmatched or partial markers yield no evidence.
 
 ## Overrides
 
@@ -79,11 +81,22 @@ contains = ["ready", ">"]
 window_lines = 4
 ```
 
+A `[[hold]]` section uses the same fields and marks viewer screens whose
+stale markers must not move classification:
+
+```toml
+[[hold]]
+id = "transcript-viewer"
+contains = ["showing detailed transcript"]
+window_lines = 3
+```
+
 All `contains` markers must match. Any `not_contains` match rejects the rule.
 At least one `line_prefixes` prefix must match a normalized line when provided.
 All `tail_contains` markers must be in the last three used rows. `window_lines`
 must be 1–40. Invalid files are ignored with a warning; empty/incomplete rules
-are skipped. Blocked takes precedence over Working, then Idle.
+are skipped. Hold takes precedence over every state; otherwise Blocked takes
+precedence over Working, then Idle.
 
 Before changing profiles, add sanitized real captures with the CLI version and
 rendering mode recorded here. Include ready, responding, approval/question,

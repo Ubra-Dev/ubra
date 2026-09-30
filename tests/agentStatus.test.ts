@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   acknowledgeAgent, applyAgentUpdate, effectiveAgentStatus, emptyAgentModel,
-  paneIsVisible, registerAgentPane, rollupStatuses, type AgentTransition,
+  MAX_RETAINED_AGENT_IDS, paneIsVisible, registerAgentPane, retainRecent,
+  rollupStatuses, type AgentTransition,
 } from "../src/lib/agentStatus.ts";
 const completion: AgentTransition = {
   eventId: "task:1", paneId: 1, agentInstanceId: "instance:1", kind: "task-completed",
@@ -114,5 +115,22 @@ describe("pane session registration", () => {
     const next = registerAgentPane({ 1: "pane-a", 2: "pane-b" }, 1, "pane-a");
     assert.deepEqual(next.mapping, { 1: "pane-a", 2: "pane-b" });
     assert.deepEqual(next.replacedLiveIds, []);
+  });
+});
+
+describe("retention bounds", () => {
+  it("evicts oldest identities beyond the retention bound", () => {
+    assert.deepEqual([...retainRecent(new Set([1, 2, 3]), 2)], [2, 3]);
+    assert.deepEqual([...retainRecent(new Set([1, 2, 3]))], [1, 2, 3]);
+    assert.deepEqual([...retainRecent(new Set<string>(), 2)], []);
+  });
+  it("caps seen events so long sessions cannot grow dedup work", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < MAX_RETAINED_AGENT_IDS + 10; i++) seen.add(`event:${i}`);
+    const model = { ...emptyAgentModel(), revision: 1, seenEvents: seen };
+    const result = applyAgentUpdate(model, { revision: 2, states: {}, transitions: [] });
+    assert.equal(result.model.seenEvents.size, MAX_RETAINED_AGENT_IDS);
+    assert.equal(result.model.seenEvents.has("event:0"), false);
+    assert.equal(result.model.seenEvents.has(`event:${MAX_RETAINED_AGENT_IDS + 9}`), true);
   });
 });

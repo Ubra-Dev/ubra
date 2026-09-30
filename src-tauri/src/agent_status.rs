@@ -205,6 +205,14 @@ impl Tracker {
                     completed: false,
                 }
             });
+            if observation.hold {
+                // A viewer shows transcript history, not live state: refresh
+                // the stored observation but move neither candidate nor
+                // confirmed classification.
+                h.observation = observation;
+                states.insert(id, h.confirmed.clone());
+                continue;
+            }
             let raw = observation.state.state_key();
             let confirmed = h.confirmed.state.state_key();
             let target = if raw == "idle" && h.completed {
@@ -469,6 +477,7 @@ mod tests {
         Observation {
             reason: format!("screen:{}", state.state_key()),
             state,
+            hold: false,
             instance_id: Some(instance.into()),
             root_pid: 10,
             matched_pid: Some(11),
@@ -671,5 +680,34 @@ mod tests {
             .update(BTreeMap::new(), vec![], Duration::from_secs(2))
             .1
             .is_empty());
+    }
+
+    #[test]
+    fn held_observations_preserve_confirmed_state() {
+        let mut t = Tracker::default();
+        tick(&mut t, "working", 0);
+        tick(&mut t, "working", 200);
+        assert_eq!(
+            tick(&mut t, "working", 300).0[&1].state.state_key(),
+            "working"
+        );
+        // A viewer over the live screen holds the confirmed state: no Unknown
+        // drift and no transitions, no matter how long it stays open.
+        for ms in [400, 1000, 5000] {
+            let mut held = observation("unknown", "instance-a");
+            held.hold = true;
+            let (states, events) = t.update(
+                BTreeMap::from([(1, held)]),
+                vec![],
+                Duration::from_millis(ms),
+            );
+            assert_eq!(states[&1].state.state_key(), "working");
+            assert!(events.is_empty());
+        }
+        // Leaving the viewer resumes normal classification.
+        tick(&mut t, "idle", 5100);
+        let (states, events) = tick(&mut t, "idle", 5300);
+        assert_eq!(states[&1].state.state_key(), "done");
+        assert_eq!(events.len(), 1);
     }
 }

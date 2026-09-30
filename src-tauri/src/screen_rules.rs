@@ -4,9 +4,11 @@
 //!
 //! `<cli>.toml` replaces that CLI's entire bundled profile. Existing
 //! `[[blocked]]`/`id`/`contains` files retain their forty-line matching window.
-//! Optional `[[working]]` and `[[idle]]` sections use the same format. New
-//! `window_lines`, `not_contains`, `line_prefixes`, and `tail_contains` fields
-//! allow stricter active-footer rules. See fixtures/agent_screens/README.md.
+//! Optional `[[working]]` and `[[idle]]` sections use the same format, and an
+//! optional `[[hold]]` section marks viewer screens (transcript, picker) whose
+//! stale markers must not move classification. New `window_lines`,
+//! `not_contains`, `line_prefixes`, and `tail_contains` fields allow stricter
+//! active-footer rules. See fixtures/agent_screens/README.md.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,6 +20,10 @@ pub enum ScreenState {
     Blocked,
     Working,
     Idle,
+    /// A viewer (transcript, picker) showing history instead of live state.
+    /// Hold evidence never moves classification; the tracker keeps its
+    /// confirmed state while a hold rule matches.
+    Hold,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +156,8 @@ struct RuleFile {
     working: Vec<FileRule>,
     #[serde(default)]
     idle: Vec<FileRule>,
+    #[serde(default)]
+    hold: Vec<FileRule>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -194,9 +202,16 @@ impl DetectionRules {
         claude_ready.line_prefixes = vec!["❯".into()];
         claude_ready.tail_contains = vec!["? for shortcuts".into()];
         claude_ready.not_contains = vec!["interrupt".into(), "esc to cancel".into()];
+        // Transcript viewer over live history: hold, never reclassify.
+        let claude_viewer = ScreenRule::new(
+            Hold,
+            "claude-transcript-viewer",
+            &["showing detailed transcript"],
+            3,
+        );
         profiles.insert(
             "claude".into(),
-            vec![claude_approval, claude_busy, claude_ready],
+            vec![claude_viewer, claude_approval, claude_busy, claude_ready],
         );
 
         let mut codex = Vec::new();
@@ -427,7 +442,9 @@ impl DetectionRules {
         Self { per_cli: profiles }
     }
 
-    /// Blocked wins over busy and ready. No profile or no match is no evidence.
+    /// Hold wins over every state: a viewer over stale markers must not
+    /// move classification. Otherwise blocked wins over busy and ready.
+    /// No profile or no match is no evidence.
     pub fn evidence(&self, cli: &str, screen: &str) -> Option<ScreenEvidence> {
         let mut lines: Vec<String> = screen.lines().map(normalize).collect();
         // VT screens include unused trailing rows; ignore those, while retaining
@@ -437,6 +454,7 @@ impl DetectionRules {
         }
         let rules = self.per_cli.get(cli)?;
         for kind in [
+            ScreenState::Hold,
             ScreenState::Blocked,
             ScreenState::Working,
             ScreenState::Idle,
@@ -489,6 +507,7 @@ impl DetectionRules {
             (ScreenState::Blocked, file.blocked),
             (ScreenState::Working, file.working),
             (ScreenState::Idle, file.idle),
+            (ScreenState::Hold, file.hold),
         ] {
             for r in section {
                 if r.id.trim().is_empty() || r.contains.is_empty() {
@@ -622,6 +641,11 @@ mod tests {
                 "claude",
                 include_str!("../fixtures/agent_screens/claude_ready.txt"),
                 ScreenState::Idle,
+            ),
+            (
+                "claude",
+                include_str!("../fixtures/agent_screens/claude_viewer.txt"),
+                ScreenState::Hold,
             ),
             (
                 "codex",
@@ -935,6 +959,27 @@ mod tests {
                 .evidence("custom", "status: running\nready\nesc cancel")
                 .map(|e| e.kind),
             Some(ScreenState::Idle)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn hold_rules_win_over_stale_state_markers() {
+        let dir = scratch_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("custom.toml"), "[[hold]]\nid = \"viewer\"\ncontains = [\"showing detailed transcript\"]\nwindow_lines = 3\n\n[[blocked]]\nid = \"approval\"\ncontains = [\"do you want to proceed\"]\n").unwrap();
+        let rules = DetectionRules::load(&dir);
+        // A viewer over stale approval text holds state instead of blocking.
+        let screen = "Do you want to proceed?\nShowing detailed transcript\nup/down scroll";
+        assert_eq!(
+            rules.evidence("custom", screen).map(|e| e.kind),
+            Some(ScreenState::Hold)
+        );
+        // Without the viewer marker the stale text is still evidence.
+        assert_eq!(
+            rules
+                .evidence("custom", "Do you want to proceed?")
+                .map(|e| e.kind),
+            Some(ScreenState::Blocked)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

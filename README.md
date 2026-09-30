@@ -246,8 +246,10 @@ The development checklist below complements, but does not replace, these gates.
   documented in [the screen fixture guide](src-tauri/fixtures/agent_screens/README.md).
 - Per-agent rules live in `<data-dir>/agent-detection/<cli>.toml`. Existing
   `[[blocked]]` sections retain their forty-line matching behavior. Optional
-  `[[working]]` and `[[idle]]` sections support bounded footer matching; a file
-  replaces that CLI's complete bundled profile.
+  `[[working]]` and `[[idle]]` sections support bounded footer matching, and an
+  optional `[[hold]]` section marks viewer screens whose stale markers hold the
+  confirmed state instead of reclassifying it; a file replaces that CLI's
+  complete bundled profile.
 - In Settings, switch Agent-finished delivery to in-app toast and finish an
   agent in another tab: a toast appears with a chime, and clicking it jumps
   to the pane. Muting that agent's CLI silences the chime but keeps the

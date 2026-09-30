@@ -248,32 +248,38 @@ struct AgentMatch {
 }
 
 /// Classification requires explicit screen evidence; neither age nor CPU
-/// scheduling status means the agent has started a task.
+/// scheduling status means the agent has started a task. The returned flag
+/// marks viewer screens whose stale markers must hold, never move, state.
 fn classify(
     m: &AgentMatch,
     screen: Option<&str>,
     rules: &DetectionRules,
     _grace_secs: u64,
-) -> (PaneAgent, String) {
+) -> (PaneAgent, String, bool) {
     let (agent, cli, cwd) = (m.label.to_string(), m.cli.to_string(), m.cwd.clone());
     if m.status == ProcessStatus::Stop {
         return (
             PaneAgent::Blocked { agent, cli, cwd },
             "process:suspended".into(),
+            false,
         );
     }
     match screen.and_then(|s| rules.evidence(m.cli, s)) {
         Some(evidence) => {
+            let hold = evidence.kind == ScreenState::Hold;
             let state = match evidence.kind {
                 ScreenState::Blocked => PaneAgent::Blocked { agent, cli, cwd },
                 ScreenState::Working => PaneAgent::Working { agent, cli, cwd },
                 ScreenState::Idle => PaneAgent::Ready { agent, cli, cwd },
+                // Viewers report no live state; the tracker holds instead.
+                ScreenState::Hold => PaneAgent::Unknown { agent, cli, cwd },
             };
-            (state, format!("screen:{}", evidence.rule_id))
+            (state, format!("screen:{}", evidence.rule_id), hold)
         }
         None => (
             PaneAgent::Unknown { agent, cli, cwd },
             "no-recognized-evidence".into(),
+            false,
         ),
     }
 }
@@ -287,6 +293,8 @@ pub struct Observation {
     pub matched_pid: Option<u32>,
     pub root_pid: u32,
     pub reason: String,
+    /// Viewer screen (transcript, picker): keep confirmed state, move nothing.
+    pub hold: bool,
 }
 
 /// Scan all panes against a process snapshot, screen snapshots by pane id,
@@ -482,11 +490,12 @@ impl Watcher {
                 }
                 let observation = match self.matched.get(&root.id).and_then(Option::as_ref) {
                     Some(m) => {
-                        let (state, reason) =
+                        let (state, reason, hold) =
                             classify(m, manager.screen_text(root.id).as_deref(), &self.rules, 0);
                         Observation {
                             state,
                             reason,
+                            hold,
                             instance_id: Some(format!("{}:{}:{}", root.id, m.pid, m.start_time)),
                             matched_pid: Some(m.pid),
                             root_pid: root.root_pid,
@@ -495,6 +504,7 @@ impl Watcher {
                     None => Observation {
                         state: PaneAgent::Idle,
                         reason: "no-agent-process".into(),
+                        hold: false,
                         instance_id: None,
                         matched_pid: None,
                         root_pid: root.root_pid,
@@ -569,12 +579,13 @@ mod tests {
 
     #[test]
     fn suspension_is_blocked_without_screen() {
-        let (state, reason) = classify(
+        let (state, reason, hold) = classify(
             &matched(ProcessStatus::Stop),
             None,
             &DetectionRules::bundled(),
             0,
         );
+        assert!(!hold);
         assert!(matches!(state, PaneAgent::Blocked { cwd: Some(_), .. }));
         assert_eq!(reason, "process:suspended");
     }

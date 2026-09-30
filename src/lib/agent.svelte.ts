@@ -7,7 +7,7 @@ import { toasts } from "./toasts.svelte.ts";
 import { baseName, collectPaneIds, findPane, findTabByPane, type Tab, type Workspace } from "./layout";
 import {
   acknowledgeAgent, agentStatusLabel, applyAgentUpdate, effectiveAgentStatus,
-  emptyAgentModel, paneIsVisible, registerAgentPane, rollupStatuses,
+  emptyAgentModel, paneIsVisible, registerAgentPane, retainRecent, rollupStatuses,
   type AgentStatus, type AgentTransition, type AgentUpdate, type Rollup,
 } from "./agentStatus";
 export type { Rollup } from "./agentStatus";
@@ -61,7 +61,7 @@ class AgentStore {
   }
   unregister(liveId: number): void {
     const node = this.liveToNode[liveId];
-    this.disposed.add(liveId);
+    this.disposed = retainRecent([...this.disposed, liveId]);
     delete this.liveToNode[liveId];
     this.pending.delete(liveId);
     this.model = acknowledgeAgent(this.model, liveId, true);
