@@ -17,6 +17,7 @@ import {
   findTabByPane,
   gridTab,
   moveWorkspace,
+  preferredAgentCli as pickPreferredAgentCli,
   resizePaneInTab,
   sanitizeLayout,
   setZoomedPane,
@@ -101,6 +102,8 @@ class AppStore {
   uiFontId = $state<UiFontId>(DEFAULT_UI_FONT_ID);
   /** Font id currently being activated, or null when idle. */
   uiFontApplying = $state<UiFontId | null>(null);
+  /** Last agent CLI stored as a workspace default (onboarding prefill). */
+  lastUsedAgentCli = $state("");
   sidebarWidth = $state<number>(DEFAULT_SIDEBAR_WIDTH);
   /** Fraction of sidebar split height given to workspaces (rest to agents). */
   sidebarSplit = $state<number>(DEFAULT_SPLIT_RATIO);
@@ -198,6 +201,8 @@ class AppStore {
       if (savedFile !== null) this.soundFile = savedFile;
       const savedStyle = window.localStorage.getItem("ubra.soundStyle");
       if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
+      const savedAgentCli = window.localStorage.getItem("ubra.lastAgentCli");
+      if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -658,9 +663,24 @@ class AppStore {
     const ws = this.layout?.workspaces.find((w) => w.id === id);
     if (!ws) return;
     const trimmed = cli?.trim() ?? "";
-    if (trimmed) ws.defaultCli = trimmed;
-    else delete ws.defaultCli;
+    if (trimmed) {
+      ws.defaultCli = trimmed;
+      this.lastUsedAgentCli = trimmed;
+      this.savePref("ubra.lastAgentCli", trimmed);
+    } else delete ws.defaultCli;
     this.saveSoon();
+  }
+
+  /**
+   * Agent command to prefill for a new workspace: the active workspace
+   * default first, then the last used CLI, then the newest other default.
+   */
+  preferredAgentCli(): string {
+    return pickPreferredAgentCli(
+      this.layout?.workspaces ?? [],
+      this.layout?.activeWorkspaceId ?? "",
+      this.lastUsedAgentCli,
+    );
   }
 
   setWorkspaceDefaultCwd(id: string, cwd: string | null): void {
@@ -825,7 +845,11 @@ class AppStore {
       if (this.pendingOnboardingGrid) this.paneFocusTarget = pane.id;
     }
 
-    if (workspace && command?.trim()) workspace.defaultCli = command.trim();
+    if (workspace && command?.trim()) {
+      workspace.defaultCli = command.trim();
+      this.lastUsedAgentCli = command.trim();
+      this.savePref("ubra.lastAgentCli", command.trim());
+    }
     this.pendingOnboardingGrid = false;
     this.firstRun = false;
     this.onboardingOpen = false;

@@ -111,6 +111,29 @@ export function activeTab(ws: Workspace): Tab {
   return ws.tabs.find((t) => t.id === ws.activeTabId) ?? ws.tabs[0];
 }
 
+/**
+ * Best guess for a new workspace's agent command: the active workspace's
+ * default first ("current"), then the last CLI stored anywhere, then the
+ * most recently added workspace that has one. Empty when nothing is known.
+ */
+export function preferredAgentCli(
+  workspaces: Workspace[],
+  activeWorkspaceId: string,
+  lastUsedCli: string,
+): string {
+  const current = workspaces
+    .find((ws) => ws.id === activeWorkspaceId)
+    ?.defaultCli?.trim();
+  if (current) return current;
+  const last = lastUsedCli.trim();
+  if (last) return last;
+  for (let i = workspaces.length - 1; i >= 0; i--) {
+    const fallback = workspaces[i].defaultCli?.trim();
+    if (fallback) return fallback;
+  }
+  return "";
+}
+
 export function countPanes(node: LayoutNode): number {
   return node.kind === "pane" ? 1 : countPanes(node.first) + countPanes(node.second);
 }

@@ -28,6 +28,7 @@ import {
   MAX_LAYOUT_ENTITIES,
   newId,
   paneDisplayTitle,
+  preferredAgentCli,
   sanitizeLayout,
   swapPanesInTab,
   setZoomedPane,
@@ -48,6 +49,36 @@ describe("defaultLayout", () => {
     assert.equal(layout.activeWorkspaceId, layout.workspaces[0].id);
     assert.equal(layout.workspaces[0].tabs.length, 1);
     assert.equal(countPanes(layout.workspaces[0].tabs[0].root), 1);
+  });
+});
+
+describe("preferredAgentCli", () => {
+  it("prefers the active workspace default", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCli = "codex";
+    const b = defaultWorkspace("B");
+    b.defaultCli = "claude";
+    assert.equal(preferredAgentCli([a, b], b.id, "codex"), "claude");
+  });
+
+  it("falls back to the last used CLI without an active default", () => {
+    const a = defaultWorkspace("A");
+    assert.equal(preferredAgentCli([a], a.id, "opencode"), "opencode");
+  });
+
+  it("falls back to the most recently added workspace default", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCli = "codex";
+    const b = defaultWorkspace("B");
+    b.defaultCli = "claude";
+    const plain = defaultWorkspace("C");
+    assert.equal(preferredAgentCli([a, b, plain], plain.id, ""), "claude");
+  });
+
+  it("returns empty when nothing is known", () => {
+    const a = defaultWorkspace("A");
+    assert.equal(preferredAgentCli([a], a.id, ""), "");
+    assert.equal(preferredAgentCli([], "", "  "), "");
   });
 });
 

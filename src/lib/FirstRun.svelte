@@ -24,11 +24,22 @@
   });
 
   // Settle the initial selection once when detection resolves; never
-  // clobber a choice the user (or a later refresh) already made.
+  // clobber a choice the user (or a later refresh) already made. Prefill
+  // with the current/last used agent CLI when one is known.
   $effect(() => {
     const clis = agentClis.clis;
     if (clis === null || selectionSettled) return;
     selectionSettled = true;
+    const prefill = store.preferredAgentCli();
+    if (prefill) {
+      if (clis.some((entry) => entry.cli === prefill)) {
+        selection = prefill;
+      } else {
+        selection = CUSTOM_COMMAND;
+        customCommand = prefill;
+      }
+      return;
+    }
     if (clis.length === 1) selection = clis[0].cli;
     else if (clis.length === 0) selection = CUSTOM_COMMAND;
   });
