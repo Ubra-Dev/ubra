@@ -8,8 +8,10 @@
     label?: string;
     /** Tile edge length in pixels. */
     size?: number;
+    /** Render artwork without a background tile or border. */
+    bare?: boolean;
   }
-  let { cli, label, size = 16 }: Props = $props();
+  let { cli, label, size = 16, bare = false }: Props = $props();
 
   const logo = $derived.by(() => {
     const brand = cliBrand(cli, label);
@@ -20,11 +22,18 @@
     return brand.kind === "mono" ? brand : null;
   });
   const radius = $derived(Math.max(2, Math.round(size / 4)));
+  // Neutral marks follow the theme when displayed directly on the sidebar.
+  const logoFill = $derived(
+    logo && bare && ["000000", "191919", "18181B"].includes(logo.hex)
+      ? "var(--text-strong)"
+      : "#" + (logo?.hex ?? "000000"),
+  );
 </script>
 
 {#if logo}
   <span
     class="tile logo"
+    class:bare
     aria-hidden="true"
     style:width={size + "px"}
     style:height={size + "px"}
@@ -32,9 +41,9 @@
   >
     <svg
       viewBox="0 0 24 24"
-      width={Math.round(size * 0.66)}
-      height={Math.round(size * 0.66)}
-      fill={"#" + logo.hex}
+      width={bare ? size : Math.round(size * 0.66)}
+      height={bare ? size : Math.round(size * 0.66)}
+      fill={logoFill}
     >
       <path d={logo.path} />
     </svg>
@@ -42,12 +51,13 @@
 {:else if mono}
   <span
     class="tile mono"
+    class:bare
     aria-hidden="true"
     style:width={size + "px"}
     style:height={size + "px"}
     style:border-radius={radius + "px"}
-    style:background={mono.bg}
-    style:font-size={Math.round(size * 0.62) + "px"}
+    style:background={bare ? "transparent" : mono.bg}
+    style:font-size={Math.round(size * (bare ? 0.85 : 0.62)) + "px"}
   >
     {mono.letter}
   </span>
@@ -61,15 +71,22 @@
     justify-content: center;
     vertical-align: middle;
   }
-  .tile.logo {
+  .tile.logo:not(.bare) {
     box-sizing: border-box;
     background: #ffffff;
     border: 1px solid var(--border);
+  }
+  .tile.logo svg {
+    display: block;
+    flex: 0 0 auto;
   }
   .tile.mono {
     color: #ffffff;
     font-weight: 700;
     font-family: var(--font-ui);
     line-height: 1;
+  }
+  .tile.mono.bare {
+    color: var(--text-strong);
   }
 </style>

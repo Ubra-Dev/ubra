@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { toasts } from "./toasts.svelte.ts";
 import {
   activeTab,
   activeWorkspace,
@@ -90,7 +92,6 @@ class AppStore {
   layout = $state<Layout | null>(null);
   loaded = $state(false);
   firstRun = $state(false);
-  onboardingOpen = $state(false);
   loadError = $state<string | null>(null);
   saveError = $state<string | null>(null);
   rightPanelOpen = $state(true);
@@ -146,8 +147,6 @@ class AppStore {
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
-  /** Grid shape requested for the workspace the open onboarding will create. */
-  private pendingOnboardingGrid = false;
 
   get theme() {
     return THEMES[this.themeId];
@@ -577,9 +576,64 @@ class AppStore {
     }
   }
 
-  /** New workspaces always go through onboarding (folder + default CLI). */
+  /** New workspace via the native folder picker; default agent is the last used CLI. */
   addWorkspace(withGrid = false): void {
-    this.openOnboarding(withGrid);
+    void this.addWorkspaceFromPicker(withGrid);
+  }
+
+  async addWorkspaceFromPicker(withGrid = false): Promise<void> {
+    if (!this.layout || this.firstRun) return;
+    let projectDirectory: string;
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a project folder",
+      });
+      if (typeof picked !== "string") return;
+      projectDirectory = picked;
+    } catch (e) {
+      console.error("ubra: project folder picker failed", e);
+      toasts.push("Couldn't open the folder picker. Try again.", "", "");
+      return;
+    }
+    this.createWorkspace(projectDirectory, this.lastUsedAgentCli || null, withGrid);
+  }
+
+  /** Shared workspace construction for a chosen folder (grid-aware). */
+  createWorkspace(
+    projectDirectory: string,
+    command: string | null,
+    withGrid = false,
+  ): string | null {
+    if (!this.layout) return null;
+    const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
+    if (withGrid) {
+      const tab = gridTab();
+      workspace.tabs = [tab];
+      workspace.activeTabId = tab.id;
+    }
+    workspace.defaultCwd = projectDirectory;
+    this.layout.workspaces.push(workspace);
+    this.layout.activeWorkspaceId = workspace.id;
+    const tab = workspace.tabs[0];
+    for (const id of collectPaneIds(tab.root)) {
+      const node = findPane(tab.root, id);
+      if (node) node.cwd = projectDirectory;
+      this.pendingTerminalCommands.queue(id, command ?? "");
+    }
+    const first = collectPaneIds(tab.root)[0];
+    const pane = first ? findPane(tab.root, first) : null;
+    if (!pane) return null;
+    workspace.root = projectDirectory;
+    if (withGrid) this.paneFocusTarget = pane.id;
+    if (command?.trim()) {
+      workspace.defaultCli = command.trim();
+      this.lastUsedAgentCli = command.trim();
+      this.savePref("ubra.lastAgentCli", command.trim());
+    }
+    this.saveSoon(true);
+    return pane.id;
   }
 
   /** Blank workspace without onboarding; only the empty-state escape hatch. */
@@ -665,11 +719,8 @@ class AppStore {
       this.layout.activeWorkspaceId =
         this.layout.workspaces[this.layout.workspaces.length - 1]?.id ?? "";
     }
-    if (this.layout.workspaces.length === 0) {
-      // Closing the last workspace returns to onboarding instead of
-      // resurrecting a blank workspace.
-      this.openOnboarding();
-    }
+    // Closing the last workspace shows the empty-state overlay instead of
+    // resurrecting a blank workspace.
     this.saveSoon(true);
   }
 
@@ -890,81 +941,44 @@ class AppStore {
     return first ? { tab, paneId: first } : null;
   }
 
-  openOnboarding(withGrid = false): void {
-    if (!this.layout || this.firstRun) return;
-    this.settingsOpen = false;
-    this.pendingOnboardingGrid = withGrid;
-    this.onboardingOpen = true;
-  }
-
   completeOnboarding(
     projectDirectory: string | null,
     command: string | null,
   ): string | null {
-    if (!this.layout || (!this.firstRun && !this.onboardingOpen)) return null;
+    if (!this.layout || !this.firstRun) return null;
 
-    let pane: ReturnType<typeof findPane> = null;
-    let workspace: Workspace | null = null;
-    if (this.firstRun) {
-      const current = this.currentPane();
-      if (!current) return null;
-      pane = findPane(current.tab.root, current.paneId);
-      if (!pane) return null;
-      workspace = this.layout.workspaces.find((ws) =>
-        ws.tabs.some((tab) => tab.id === current.tab.id),
-      ) ?? null;
-      if (projectDirectory) {
-        pane.cwd = projectDirectory;
-        if (workspace) {
-          workspace.name = baseName(projectDirectory) || "Project";
-          workspace.defaultCwd = projectDirectory;
-          workspace.root = projectDirectory;
-        }
+    const current = this.currentPane();
+    if (!current) return null;
+    const pane = findPane(current.tab.root, current.paneId);
+    if (!pane) return null;
+    const workspace = this.layout.workspaces.find((ws) =>
+      ws.tabs.some((tab) => tab.id === current.tab.id),
+    ) ?? null;
+    if (projectDirectory) {
+      pane.cwd = projectDirectory;
+      if (workspace) {
+        workspace.name = baseName(projectDirectory) || "Project";
+        workspace.defaultCwd = projectDirectory;
+        workspace.root = projectDirectory;
       }
-      this.pendingTerminalCommands.queue(pane.id, command ?? "");
-    } else {
-      if (!projectDirectory) return null;
-      workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
-      if (this.pendingOnboardingGrid) {
-        const tab = gridTab();
-        workspace.tabs = [tab];
-        workspace.activeTabId = tab.id;
-      }
-      workspace.defaultCwd = projectDirectory;
-      this.layout.workspaces.push(workspace);
-      this.layout.activeWorkspaceId = workspace.id;
-      const tab = workspace.tabs[0];
-      for (const id of collectPaneIds(tab.root)) {
-        const node = findPane(tab.root, id);
-        if (node) node.cwd = projectDirectory;
-        this.pendingTerminalCommands.queue(id, command ?? "");
-      }
-      const first = collectPaneIds(tab.root)[0];
-      pane = first ? findPane(tab.root, first) : null;
-      if (!pane) return null;
-      workspace.root = projectDirectory;
-      if (this.pendingOnboardingGrid) this.paneFocusTarget = pane.id;
     }
+    this.pendingTerminalCommands.queue(pane.id, command ?? "");
 
     if (workspace && command?.trim()) {
       workspace.defaultCli = command.trim();
       this.lastUsedAgentCli = command.trim();
       this.savePref("ubra.lastAgentCli", command.trim());
     }
-    this.pendingOnboardingGrid = false;
     this.firstRun = false;
-    this.onboardingOpen = false;
     this.saveSoon(true);
     return pane.id;
   }
 
   skipOnboarding(): void {
-    this.pendingOnboardingGrid = false;
     if (this.firstRun) {
       this.firstRun = false;
       this.saveSoon(true);
     }
-    this.onboardingOpen = false;
   }
 
   takePendingTerminalCommand(paneId: string): string | null {
@@ -1073,7 +1087,7 @@ class AppStore {
 
   openSavedSetups(workspaceId?: string): void {
     if (!this.loaded || !this.layout || this.recoveryRequired || this.firstRun) return;
-    if (this.onboardingOpen || this.settingsOpen || this.pendingClose) return;
+    if (this.settingsOpen || this.pendingClose) return;
     this.savedSetupsRequest =
       workspaceId ? { mode: "capture", workspaceId } : { mode: "library" };
   }

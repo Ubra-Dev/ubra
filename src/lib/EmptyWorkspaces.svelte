@@ -10,7 +10,7 @@
     <h1 id="empty-title">No workspaces</h1>
     <p>Open a project folder to start working, or create an empty workspace.</p>
     <div class="actions">
-      <button class="primary" onclick={() => store.openOnboarding()}>
+      <button class="primary" onclick={() => store.addWorkspace()}>
         Open a project folder
       </button>
       <button onclick={() => store.addBlankWorkspace()}>New empty workspace</button>
@@ -22,7 +22,7 @@
   .empty {
     position: fixed;
     inset: 0;
-    /* Above app content and context menus, below settings/onboarding/dialogs. */
+    /* Above app content and context menus, below settings/dialogs. */
     z-index: 1500;
     box-sizing: border-box;
     display: grid;

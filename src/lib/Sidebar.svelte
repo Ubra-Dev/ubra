@@ -359,7 +359,7 @@
               {#if a.cli}
                 <span class="agent-cli">
                   {a.cli}
-                  <AgentCliIcon cli={a.cli} size={14} />
+                  <AgentCliIcon cli={a.cli} size={12} bare />
                 </span>
               {/if}
             </button>
