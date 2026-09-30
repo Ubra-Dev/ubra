@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
@@ -145,10 +146,10 @@
     });
   }
 
-  function onDefaultCliSelect(e: Event): void {
+  function onDefaultCliSelect(picked: string): void {
     const ws = store.workspace();
     if (!ws) return;
-    const value = (e.target as HTMLSelectElement).value;
+    const value = picked;
     cliSelection = value;
     if (value === CUSTOM_COMMAND) {
       store.setWorkspaceDefaultCli(ws.id, cliCustom || null);
@@ -788,23 +789,13 @@
                   {:else}
                     <label class="row">
                       <span class="label">Default agent CLI</span>
-                      <span class="select-wrap">
-                        <select
-                          value={cliSelection}
-                          onchange={onDefaultCliSelect}
-                          aria-label="Default agent CLI"
-                        >
-                          <option value="">None (plain shells)</option>
-                          {#each agentClis.clis as entry (entry.cli)}
-                            <option value={entry.cli} title={entry.path}>
-                              {entry.label} · {entry.cli}
-                            </option>
-                          {/each}
-                          <option value={CUSTOM_COMMAND}>
-                            Custom command…
-                          </option>
-                        </select>
-                      </span>
+                      <AgentCliSelect
+                        entries={agentClis.clis}
+                        bind:value={cliSelection}
+                        noneLabel="None (plain shells)"
+                        ariaLabel="Default agent CLI"
+                        onChange={onDefaultCliSelect}
+                      />
                     </label>
                     {#if cliSelection === CUSTOM_COMMAND}
                       <label class="row">

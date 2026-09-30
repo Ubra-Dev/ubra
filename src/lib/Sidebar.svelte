@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import {
@@ -356,7 +357,10 @@
               {/if}
               <span class="agent-name">{a.dir}</span>
               {#if a.cli}
-                <span class="agent-cli">{a.cli}</span>
+                <span class="agent-cli">
+                  <AgentCliIcon cli={a.cli} size={14} />
+                  {a.cli}
+                </span>
               {/if}
             </button>
             <button
@@ -744,13 +748,17 @@
     text-overflow: ellipsis;
   }
   .agent-cli {
+    display: inline-flex;
     flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
     margin-left: auto;
-    max-width: 96px;
+    max-width: 112px;
     color: var(--text-subtle);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .footer {
     margin-top: auto;
