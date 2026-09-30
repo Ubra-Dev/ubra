@@ -93,8 +93,10 @@ npm run tauri dev
 ## Checks
 
 ```sh
+npm run licenses                 # legal resources required by Rust builds/tests
 npm run check                    # svelte-check
 npm run test:unit                # frontend unit tests (node:test)
+node --test tests/release-tooling.test.mjs # notices and release downloads
 npm run build                    # static frontend
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -145,7 +147,8 @@ job. The `release` environment can additionally require maintainer approval; the
 SHA checks fail closed even if environment reviewers are not configured.
 
 Neither automated bundle creation nor this documentation establishes a successful
-native smoke run. Signing and notarization are outside this remediation's scope.
+native smoke run. Release signing and notarization require the credentials and
+verification described in [the release guide](docs/RELEASING.md).
 
 ### Desktop security and process ownership
 
@@ -406,16 +409,30 @@ and detached launching follows
 cross-user authentication and ConPTY execution must pass platform release gates
 rather than being inferred from Unix tests.
 
+## Support Ubra
+
+Personal GitHub Sponsors enrollment for [@oliverbytes](https://github.com/oliverbytes)
+is pending. See [sponsorship plans](SPONSORSHIP.md) for how funding will support
+maintenance, desktop compatibility, signing, and documentation. The MIT core
+remains freely available; sponsorship does not purchase roadmap control.
+
 ## Roadmap
 
-- [x] Phase 0: scaffold + verified dev/build loop
-- [x] Phase 1: PTY vertical slice (`portable-pty` + xterm.js pane)
-- [x] Phase 2: multiplexer model, layout persistence, tray behavior
-- [x] Phase 3: agent awareness v1 (process detection + badges)
-- [x] Explicit working/blocked/idle/done/unknown status and completion transitions
-- [x] Experimental local daemon + CLI (separate from the GUI backend)
-- [ ] GUI daemon migration and SSH remotes
-- [ ] Native smoke approval for each release on macOS, Linux, and Windows
+- Improve terminal persistence and recovery reliability across desktop platforms.
+- Complete native verification and signed/notarized releases on macOS and Windows.
+- Improve agent status detection and subscription usage visibility.
+- Explore SSH remote workspaces; headless automation remains experimental.
+- Document and improve privacy controls before distributing analytics-enabled builds.
+
+These are current priorities, not delivery commitments. Propose changes in issues.
+
+## Community and project policies
+
+- [Support and questions](SUPPORT.md)
+- [Maintainers and decisions](GOVERNANCE.md)
+- [Privacy and network behavior](PRIVACY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [Release procedure](docs/RELEASING.md)
 
 ## Contributing
 
