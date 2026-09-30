@@ -443,7 +443,7 @@
     overflow: hidden;
     background: var(--sidebar-bg);
     padding: 10px 8px;
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     color: var(--text);
     user-select: none;
   }
@@ -516,7 +516,7 @@
     flex: 0 0 auto;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-muted);
@@ -592,7 +592,7 @@
     align-items: center;
     gap: 4px;
     min-width: 0;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     color: var(--text-subtle);
   }
   .ws-branch-name {
@@ -703,7 +703,7 @@
   }
   .agent-ws {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     padding: 4px 6px 1px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -755,7 +755,7 @@
     margin-left: auto;
     max-width: 112px;
     color: var(--text-subtle);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

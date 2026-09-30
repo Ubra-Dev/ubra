@@ -37,6 +37,10 @@
   }
   let { x, y, items, onPick, onDismiss, opener = null, onHoverChange }: Props = $props();
   let menuEl: HTMLDivElement;
+  let viewportWidth = $state(window.innerWidth);
+  let viewportHeight = $state(window.innerHeight);
+  let menuWidth = $state(158);
+  let menuHeight = $state(0);
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" || e.key === "Tab") {
@@ -60,19 +64,32 @@
   }
 
   onMount(() => {
+    const measure = () => {
+      const bounds = menuEl.getBoundingClientRect();
+      menuWidth = bounds.width;
+      menuHeight = bounds.height;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(menuEl);
     const dismiss = () => onDismiss();
     window.addEventListener("ubra-menu-open", dismiss);
-    return () => window.removeEventListener("ubra-menu-open", dismiss);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("ubra-menu-open", dismiss);
+    };
   });
 
-  // Clamp to the viewport; the menu is created fresh per open, at the cursor.
-  const cx = $derived(Math.max(0, Math.min(x, window.innerWidth - 158)));
+  // Use rendered dimensions so enlarged text and long labels stay on screen.
+  const cx = $derived(Math.max(0, Math.min(x, viewportWidth - menuWidth)));
   const cy = $derived(
-    Math.max(0, Math.min(y, window.innerHeight - 24 - items.length * 30)),
+    Math.max(0, Math.min(y, viewportHeight - menuHeight)),
   );
 </script>
 
 <svelte:window
+  bind:innerWidth={viewportWidth}
+  bind:innerHeight={viewportHeight}
   onclick={onDismiss}
   oncontextmenu={onDismiss}
 />
@@ -105,16 +122,23 @@
     z-index: 1000;
     display: flex;
     flex-direction: column;
-    min-width: 140px;
+    box-sizing: border-box;
+    width: max-content;
+    min-width: min(140px, 100vw);
+    max-width: 100vw;
+    max-height: 100vh;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
     background: var(--surface-bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 4px;
     box-shadow: 0 4px 16px var(--shadow-color);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .menu button {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     gap: 8px;
     background: transparent;

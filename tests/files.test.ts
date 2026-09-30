@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { childRel, isHiddenName, joinFsPath } from "../src/lib/files.ts";
+import { childRel, formatBytes, isHiddenName, joinFsPath } from "../src/lib/files.ts";
 
 describe("childRel", () => {
   it("joins relative paths with forward slashes", () => {
@@ -29,5 +29,21 @@ describe("joinFsPath", () => {
   it("joins windows roots with backslashes", () => {
     assert.equal(joinFsPath("C:\\repo", "src/lib"), "C:\\repo\\src\\lib");
     assert.equal(joinFsPath("C:\\repo\\", "src"), "C:\\repo\\src");
+  });
+});
+
+describe("formatBytes", () => {
+  it("formats binary units with one decimal only when needed", () => {
+    assert.equal(formatBytes(0), "0 B");
+    assert.equal(formatBytes(512), "512 B");
+    assert.equal(formatBytes(1024), "1 KiB");
+    assert.equal(formatBytes(1536), "1.5 KiB");
+    assert.equal(formatBytes(524288), "512 KiB");
+    assert.equal(formatBytes(1048576), "1 MiB");
+  });
+
+  it("falls back to zero for invalid input", () => {
+    assert.equal(formatBytes(-1), "0 B");
+    assert.equal(formatBytes(NaN), "0 B");
   });
 });

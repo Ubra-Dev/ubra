@@ -393,11 +393,11 @@
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    height: 26px;
-    flex: 0 0 26px;
+    min-height: 26px;
+    flex: 0 0 auto;
     padding: 0 4px 0 10px;
     background: var(--pane-header-bg);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     color: var(--text);
     user-select: none;
     cursor: grab;
@@ -420,7 +420,7 @@
     padding: 1px 6px;
   }
   .agent {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     color: var(--agent-text);
     background: var(--agent-bg);
     border: none;
@@ -494,7 +494,7 @@
     background: var(--accent);
     color: var(--on-accent);
     border: none;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     padding: 4px 12px;
     border-radius: 4px;
     cursor: pointer;

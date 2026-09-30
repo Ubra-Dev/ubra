@@ -5,7 +5,9 @@ import {
   dirName,
   isClean,
   statusLabel,
+  worktreeLabel,
   type GitStatus,
+  type GitWorktree,
 } from "../src/lib/git.ts";
 
 function statusWith(overrides: Partial<GitStatus>): GitStatus {
@@ -69,5 +71,29 @@ describe("dirName", () => {
     assert.equal(dirName("src/lib/x.ts"), "src/lib");
     assert.equal(dirName("x.ts"), "");
     assert.equal(dirName("sub/"), "sub");
+  });
+});
+
+describe("worktreeLabel", () => {
+  function worktreeWith(overrides: Partial<GitWorktree>): GitWorktree {
+    return {
+      path: "/repo",
+      head: "abc123",
+      branch: null,
+      detached: false,
+      bare: false,
+      locked: null,
+      prunable: null,
+      ...overrides,
+    };
+  }
+
+  it("prefers the branch, then bare, then detached", () => {
+    assert.equal(worktreeLabel(worktreeWith({ branch: "main" })), "main");
+    assert.equal(worktreeLabel(worktreeWith({ bare: true, head: null })), "(bare)");
+    assert.equal(
+      worktreeLabel(worktreeWith({ detached: true })),
+      "(detached HEAD)",
+    );
   });
 });

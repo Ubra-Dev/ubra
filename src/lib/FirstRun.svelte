@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { PUBLIC_POSTHOG_HOST, PUBLIC_POSTHOG_PROJECT_TOKEN } from "$env/static/public";
+  import posthog from "posthog-js";
   import { onMount, tick } from "svelte";
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
   import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
+  import { posthogLogs } from "./posthogLogs";
   import { store } from "./store.svelte";
 
   let projectDirectory = $state<string | null>(null);
@@ -60,14 +63,14 @@
       const path = await open({
         directory: true,
         multiple: false,
-        title: "Choose a project folder",
+        title: "Choose a Workspace Folder",
       });
       if (typeof path === "string") {
         projectDirectory = path;
         (selectEl ?? customEl)?.focus();
       }
     } catch (error) {
-      console.error("ubra: project folder picker failed", error);
+      console.error("ubra: workspace folder picker failed", error);
       errorMessage = "Couldn't open the folder picker. Try again or skip setup.";
     } finally {
       pickingDirectory = false;
@@ -78,11 +81,20 @@
     if (!projectDirectory || !command.trim()) return;
     const paneId = store.completeOnboarding(projectDirectory, command);
     if (!paneId) {
-      errorMessage = "Couldn't prepare the project terminal. Try skipping setup.";
+      errorMessage = "Couldn't prepare the workspace terminal. Try skipping setup.";
+      return;
+    }
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_completed");
+      posthogLogs.onboardingCompleted();
     }
   }
 
   function skipSetup(): void {
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_skipped");
+      posthogLogs.onboardingSkipped();
+    }
     store.skipOnboarding();
   }
 </script>
@@ -93,7 +105,7 @@
     <aside class="intro">
       <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
       <div class="intro-copy">
-        <h1 id="welcome-title">Put your agent in its project.</h1>
+        <h1 id="welcome-title">Put Your Agent in Its Workspace</h1>
         <p>
           One terminal for your work, with agent activity visible while it runs.
         </p>
@@ -101,11 +113,11 @@
       <div class="terminal-preview" aria-label="Example agent session">
         <div class="preview-bar">
           <span></span><span></span><span></span>
-          <span class="preview-path">your-project</span>
+          <span class="preview-path">your-workspace</span>
         </div>
         <div class="preview-body">
           <div><span class="prompt">$</span> {command.trim() || "your-agent"}</div>
-          <div class="preview-muted">Reading project files…</div>
+          <div class="preview-muted">Reading workspace files…</div>
           <div class="preview-rule"></div>
           <div class="preview-state"><i></i> Agent activity appears here</div>
         </div>
@@ -115,20 +127,20 @@
 
     <form
       class="setup"
-      aria-label="First-run setup"
+      aria-label="First-Run Setup"
       onsubmit={(event) => {
         event.preventDefault();
         startAgent();
       }}
     >
-      <div class="step-label">Get started</div>
-      <h2>Choose where to work</h2>
+      <div class="step-label">Get Started</div>
+      <h2>Choose Where to Work</h2>
       <p class="description">
-        Pick a project folder, then tell Ubra which agent command to run there.
+        Pick a workspace folder, then tell Ubra which agent command to run there.
       </p>
 
       <div class="field-group">
-        <span class="field-label">Project folder</span>
+        <span class="field-label">Workspace Folder</span>
         {#if projectDirectory}
           <div class="selected-folder" title={projectDirectory}>
             <span class="folder-mark" aria-hidden="true">/</span>
@@ -150,14 +162,14 @@
                 <path d="M2.75 8h14.5" />
               </svg>
             </span>
-            <span>{pickingDirectory ? "Opening folders…" : "Choose a project folder"}</span>
+            <span>{pickingDirectory ? "Opening Folders…" : "Choose a Workspace Folder"}</span>
             <span class="button-chevron" aria-hidden="true">›</span>
           </button>
         {/if}
       </div>
 
       <div class="field-group command-group">
-        <span class="field-label" id="command-label">Agent command</span>
+        <span class="field-label" id="command-label">Agent Command</span>
         {#if detected === null}
           <span class="command-field">
             <span class="command-prompt" aria-hidden="true">$</span>
@@ -171,7 +183,8 @@
                 bind:this={selectEl}
                 entries={detected}
                 bind:value={selection}
-                placeholder="Choose an agent CLI"
+                placeholder="Choose an Agent CLI"
+                customLabel="Custom Command…"
                 variant="field"
                 ariaLabel="Agent command"
                 ariaDescribedBy="command-hint"
@@ -229,10 +242,10 @@
           onclick={startAgent}
           disabled={!projectDirectory || !command.trim()}
         >
-          Open project and start agent
+          Get Started
         </button>
         <button class="skip-button" type="button" onclick={skipSetup}>
-          {store.firstRun ? "Skip setup" : "Cancel"}
+          {store.firstRun ? "Skip Setup" : "Cancel"}
         </button>
       </div>
     </form>
@@ -250,6 +263,7 @@
     place-items: center;
     padding: 32px;
     background: var(--app-bg);
+    font: calc(14px * var(--ui-text-scale, 1))/1.6 var(--font-ui);
     overflow: auto;
   }
   .card {
@@ -286,7 +300,7 @@
     max-width: 300px;
     margin: 0;
     color: var(--text-strong);
-    font-size: 28px;
+    font-size: calc(28px * var(--ui-text-scale, 1));
     line-height: 1.17;
     letter-spacing: -0.6px;
     font-weight: 620;
@@ -295,7 +309,7 @@
     max-width: 290px;
     margin: 13px 0 0;
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
     line-height: 1.55;
   }
   .terminal-preview {
@@ -305,10 +319,10 @@
     border-radius: 8px;
     background: var(--input-bg);
     color: var(--text);
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: calc(11px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .preview-bar {
-    height: 27px;
+    min-height: 27px;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -348,7 +362,7 @@
     align-items: center;
     gap: 7px;
     color: var(--text-muted);
-    font: 11px var(--font-ui);
+    font: calc(11px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .preview-state i {
     width: 7px;
@@ -359,7 +373,7 @@
   .intro-foot {
     margin: 13px 0 0;
     color: var(--text-subtle);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
   }
   .setup {
     align-self: center;
@@ -368,13 +382,13 @@
   .step-label {
     margin-bottom: 11px;
     color: var(--accent);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     font-weight: 600;
   }
   .setup h2 {
     margin: 0;
     color: var(--text-strong);
-    font-size: 21px;
+    font-size: calc(21px * var(--ui-text-scale, 1));
     letter-spacing: -0.25px;
     font-weight: 620;
   }
@@ -390,7 +404,7 @@
   }
   .field-label {
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     font-weight: 600;
   }
   .folder-button,
@@ -437,7 +451,7 @@
   .button-chevron {
     margin-left: auto;
     color: var(--text-subtle);
-    font-size: 19px;
+    font-size: calc(19px * var(--ui-text-scale, 1));
   }
   .selected-folder {
     min-width: 0;
@@ -446,7 +460,7 @@
   .folder-mark {
     flex: 0 0 auto;
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .folder-path {
     min-width: 0;
@@ -454,7 +468,7 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: calc(11px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .change-folder {
     flex: 0 0 auto;
@@ -474,7 +488,7 @@
   }
   .command-prompt {
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .command-field input {
     width: 100%;
@@ -482,11 +496,11 @@
     outline: 0;
     background: transparent;
     color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .detecting {
     color: var(--text-subtle);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
   }
   .command-field:focus-within {
     border-color: var(--accent);
@@ -494,7 +508,7 @@
   }
   .hint {
     color: var(--text-subtle);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     line-height: 1.45;
   }
   .status-tip {
@@ -506,7 +520,7 @@
     border-left: 2px solid var(--accent);
     background: var(--sidebar-bg);
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     line-height: 1.45;
   }
   .status-dot {
@@ -520,7 +534,7 @@
   .error {
     margin-top: 12px;
     color: var(--danger, #f87171);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     line-height: 1.4;
   }
   .actions {
@@ -581,7 +595,7 @@
     }
     .intro h1 {
       max-width: 440px;
-      font-size: 23px;
+      font-size: calc(23px * var(--ui-text-scale, 1));
     }
     .intro-copy p {
       max-width: 440px;
