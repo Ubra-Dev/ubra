@@ -41,7 +41,7 @@ function rootPaneId(tab: Tab): string {
 describe("defaultLayout", () => {
   it("creates one workspace with one tab and one pane", () => {
     const layout = defaultLayout();
-    assert.equal(layout.version, 1);
+    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
     assert.equal(layout.workspaces.length, 1);
     assert.equal(layout.activeWorkspaceId, layout.workspaces[0].id);
     assert.equal(layout.workspaces[0].tabs.length, 1);
@@ -694,5 +694,70 @@ describe("moveWorkspace", () => {
     assert.equal(moveWorkspace(layout, ids[0], ids[1], "before"), false);
     assert.equal(moveWorkspace(layout, ids[1], ids[0], "after"), false);
     assert.deepEqual(order(layout), ids);
+  });
+});
+
+describe("explicit launch policy", () => {
+  it("migrates a valid version-1 layout to version 2 without losing commands or references", () => {
+    const tab = gridTab("Selected");
+    const ids = collectPaneIds(tab.root);
+    const workspace = defaultWorkspace("Second");
+    const legacyFirst = workspace.tabs[0].root;
+    if (legacyFirst.kind === "pane") legacyFirst.cmd = ["claude", "--resume"];
+    workspace.tabs.push(tab);
+    workspace.activeTabId = tab.id;
+    tab.zoomedPaneId = ids[2];
+    const legacy = {
+      version: 1,
+      activeWorkspaceId: workspace.id,
+      workspaces: [
+        {
+          id: workspace.id,
+          name: workspace.name,
+          activeTabId: workspace.activeTabId,
+          tabs: workspace.tabs.map((t) => {
+            const entry: Record<string, unknown> = {
+              id: t.id,
+              name: t.name,
+              root: JSON.parse(JSON.stringify(t.root)),
+            };
+            if (typeof t.zoomedPaneId === "string") entry["zoomedPaneId"] = t.zoomedPaneId;
+            return entry;
+          }),
+        },
+      ],
+    };
+    const migrated = sanitizeLayout(JSON.parse(JSON.stringify(legacy)));
+    assert.equal(migrated.version, 2);
+    assert.equal(migrated.activeWorkspaceId, workspace.id);
+    const firstRoot = migrated.workspaces[0].tabs[0].root;
+    assert.equal(firstRoot.kind, "pane");
+    if (firstRoot.kind === "pane") assert.deepEqual(firstRoot.cmd, ["claude", "--resume"]);
+    const selected = migrated.workspaces[0].tabs.find((t) => t.id === tab.id);
+    assert.ok(selected);
+    assert.equal(selected?.zoomedPaneId, ids[2]);
+  });
+
+  it("preserves a false restore policy across a save/load round trip", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    root.cmd = ["node", "-e", "console.log(1)"];
+    root.cmdOnRestore = false;
+    const loaded = sanitizeLayout(JSON.parse(JSON.stringify({ ...layout, version: 2 })));
+    const reloaded = loaded.workspaces[0].tabs[0].root;
+    assert.equal(reloaded.kind, "pane");
+    if (reloaded.kind === "pane") {
+      assert.deepEqual(reloaded.cmd, ["node", "-e", "console.log(1)"]);
+      assert.equal(reloaded.cmdOnRestore, false);
+    }
+  });
+
+  it("rejects a malformed restore policy and future versions", () => {
+    const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
+    raw.workspaces[0].tabs[0].root.cmdOnRestore = "never";
+    assert.throws(() => sanitizeLayout(raw), /restore policy/);
+    assert.throws(() => sanitizeLayout({ ...defaultLayout(), version: 3 }), /Unsupported/);
   });
 });

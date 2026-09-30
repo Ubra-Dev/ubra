@@ -3,6 +3,7 @@
   import { agent } from "$lib/agent.svelte";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
+  import SavedSetupsModal from "$lib/SavedSetupsModal.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
   import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import { overlayFocus } from "$lib/overlayFocus";
@@ -12,6 +13,7 @@
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import { themeStyle } from "$lib/themes";
+  import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
     void store.boot();
@@ -22,7 +24,8 @@
     if (e.defaultPrevented) return;
     const overlayOpen = store.settingsOpen || !!store.pendingClose ||
       store.firstRun || store.onboardingOpen || store.recoveryRequired ||
-      store.recoveryBusy || !!document.querySelector("[data-keyboard-overlay]");
+      store.recoveryBusy || !!store.savedSetupsRequest ||
+      !!document.querySelector("[data-keyboard-overlay]");
     const matched = matchShortcutEvent(e, isMacPlatform(navigator.platform), overlayOpen);
     if (!matched) return;
     // Typing wins in rename inputs and selects — except settings, which opens
@@ -84,12 +87,15 @@
         break;
       case "font-bigger":
         store.bumpTermFontSize(1);
+        store.bumpUiScale(1);
         break;
       case "font-smaller":
         store.bumpTermFontSize(-1);
+        store.bumpUiScale(-1);
         break;
       case "font-reset":
         store.resetTermFontSize();
+        store.resetUiScale();
         break;
       case "rename-pane":
         store.requestPaneRename();
@@ -125,7 +131,7 @@
 
 <svelte:window onkeydown={onGlobalKeyDown} />
 
-<div class="root" style={themeStyle(store.theme, store.termOpacity / 100)}>
+<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)}`}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
   {:else if store.recoveryRequired}
@@ -149,7 +155,7 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="app" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen}>
+    <div class="app" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
       <Sidebar />
       <div class="main">
         <TabBar />
@@ -178,6 +184,9 @@
   {/if}
   {#if store.settingsOpen}
     <SettingsModal />
+  {/if}
+  {#if store.savedSetupsRequest}
+    <SavedSetupsModal />
   {/if}
   <ConfirmDialog />
   <Toasts />

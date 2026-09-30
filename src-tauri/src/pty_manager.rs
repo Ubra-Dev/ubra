@@ -146,6 +146,17 @@ impl PtyManager {
         rows: u16,
     ) -> anyhow::Result<PaneId> {
         validate_dimensions(cols, rows)?;
+        if let Some(cwd) = &cwd {
+            match std::fs::metadata(cwd) {
+                Ok(metadata) => {
+                    anyhow::ensure!(
+                        metadata.is_dir(),
+                        "Working directory is not a directory: {cwd}"
+                    );
+                }
+                Err(_) => anyhow::bail!("Working directory is unavailable: {cwd}"),
+            }
+        }
         let _lifecycle = self.lifecycle.lock();
         anyhow::ensure!(
             !self.closing.load(Ordering::Acquire),

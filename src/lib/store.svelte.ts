@@ -27,6 +27,8 @@ import {
   type Tab,
   type Workspace,
 } from "./layout";
+import { validateSetupInsertion } from "./savedSetups";
+import { StartupCommands } from "./startupCommands";
 import {
   DEFAULT_CHIME_STYLE,
   DEFAULT_DELIVERY,
@@ -43,6 +45,7 @@ import {
   isThemeId,
   type ThemeId,
 } from "./themes";
+import { DEFAULT_UI_SCALE, UI_SCALE_STEP, clampUiScale } from "./uiScale";
 
 export type CloseKind = "workspace" | "tab" | "pane";
 
@@ -78,6 +81,7 @@ class AppStore {
   recoveryBackupPath = $state<string | null>(null);
   themeId = $state<ThemeId>(DEFAULT_THEME_ID);
   termFontSize = $state<number>(DEFAULT_TERM_FONT_SIZE);
+  uiScale = $state<number>(DEFAULT_UI_SCALE);
   termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
   termOpacity = $state<number>(DEFAULT_TERM_OPACITY);
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
@@ -100,6 +104,9 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
+  savedSetupsRequest: { mode: "library" } | { mode: "capture"; workspaceId: string } | null =
+    $state(null);
+  private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommand: { paneId: string; command: string } | null =
     null;
@@ -124,6 +131,8 @@ class AppStore {
       if (isThemeId(savedTheme)) this.themeId = savedTheme;
       const savedFont = window.localStorage.getItem("ubra.termFontSize");
       if (savedFont !== null) this.termFontSize = this.clampFontSize(Number(savedFont));
+      const savedUiScale = window.localStorage.getItem("ubra.uiScale");
+      if (savedUiScale !== null) this.uiScale = clampUiScale(Number(savedUiScale));
       const savedScrollback = window.localStorage.getItem("ubra.termScrollback");
       if (
         savedScrollback !== null &&
@@ -168,6 +177,7 @@ class AppStore {
   /** A failed load never installs a renderable/default layout or enables autosave. */
   async retryLayout(): Promise<void> {
     if (this.recoveryBusy) return;
+    this.startup.clear();
     this.recoveryBusy = true;
     this.recoveryRequired = true;
     this.layout = null;
@@ -207,6 +217,7 @@ class AppStore {
   /** Call only from the explicit recovery reset action, never automatically. */
   async resetRecoveryLayout(): Promise<void> {
     if (!this.recoveryRequired || this.recoveryBusy) return;
+    this.startup.clear();
     this.recoveryBusy = true;
     this.recoveryError = null;
     const fresh = defaultLayout();
@@ -259,6 +270,25 @@ class AppStore {
 
   resetTermFontSize(): void {
     this.setTermFontSize(DEFAULT_TERM_FONT_SIZE);
+  }
+
+  setUiScale(pct: number): void {
+    const clamped = clampUiScale(pct);
+    if (clamped === this.uiScale) return;
+    this.uiScale = clamped;
+    try {
+      window.localStorage.setItem("ubra.uiScale", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save interface scale", e);
+    }
+  }
+
+  bumpUiScale(delta: 1 | -1): void {
+    this.setUiScale(this.uiScale + delta * UI_SCALE_STEP);
+  }
+
+  resetUiScale(): void {
+    this.setUiScale(DEFAULT_UI_SCALE);
   }
 
   setTermScrollback(lines: number): void {
@@ -337,6 +367,15 @@ class AppStore {
   }
 
   saveSoon(immediate = false): void {
+    if (this.layout) {
+      const placed = new Set<string>();
+      for (const ws of this.layout.workspaces) {
+        for (const tab of ws.tabs) {
+          for (const id of collectPaneIds(tab.root)) placed.add(id);
+        }
+      }
+      this.startup.retain(placed);
+    }
     clearTimeout(this.saveTimer ?? undefined);
     this.saveTimer = null;
     if (!this.loaded || this.recoveryRequired || this.recoveryBusy || !this.layout) return;
@@ -746,6 +785,62 @@ class AppStore {
 
   paneSizesChanged(): void {
     this.saveSoon();
+  }
+
+  openSavedSetups(workspaceId?: string): void {
+    if (!this.loaded || !this.layout || this.recoveryRequired || this.firstRun) return;
+    if (this.onboardingOpen || this.settingsOpen || this.pendingClose) return;
+    this.savedSetupsRequest =
+      workspaceId ? { mode: "capture", workspaceId } : { mode: "library" };
+  }
+
+  closeSavedSetups(): void {
+    this.savedSetupsRequest = null;
+  }
+
+  /** Append an instantiated saved workspace and authorize its commands. */
+  launchSavedWorkspace(workspace: Workspace): void {
+    if (!this.layout) throw new Error("Workspace is no longer available.");
+    validateSetupInsertion($state.snapshot(this.layout), workspace);
+    const ids: string[] = [];
+    for (const tab of workspace.tabs) {
+      const visit = (node: typeof tab.root): void => {
+        if (node.kind === "pane") {
+          if (node.cmd !== undefined && node.cmd.length > 0) ids.push(node.id);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(tab.root);
+    }
+    this.startup.authorize(ids);
+    this.layout.workspaces.push(workspace);
+    this.layout.activeWorkspaceId = workspace.id;
+    const tab = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? workspace.tabs[0];
+    const focusId = tab?.zoomedPaneId ?? (tab ? collectPaneIds(tab.root)[0] : undefined);
+    if (focusId) {
+      this.focusedPaneId = focusId;
+      this.paneFocusTarget = focusId;
+    }
+    this.saveSoon();
+  }
+
+  /** Resolve the spawn argv for a pane; throws when the pane is gone. */
+  commandForSpawn(paneId: string): string[] | undefined {
+    if (!this.layout) return undefined;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    if (!node) throw new Error("Pane is no longer in the layout.");
+    return this.startup.resolve(node);
+  }
+
+  /** Authorize a single current configured-command pane (explicit rerun). */
+  authorizePaneCommand(paneId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    if (node?.cmd !== undefined && node.cmd.length > 0) this.startup.authorize([paneId]);
   }
 }
 

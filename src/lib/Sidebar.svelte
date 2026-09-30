@@ -43,6 +43,8 @@
         editing = ws.id;
         draft = ws.name;
       }
+    } else if (action === "save-template") {
+      store.openSavedSetups(m.id);
     } else if (action === "close") {
       store.requestCloseWorkspace(m.id);
     }
@@ -248,7 +250,14 @@
         <Icon name="settings" size={13} />
         <span>Settings</span>
       </button>
-    </div>
+      <button
+        class="settings-btn"
+        title="Saved setups"
+        onclick={() => store.openSavedSetups()}
+      >
+        <Icon name="layers" size={13} />
+        <span>Saved setups</span>
+      </button>
     {#if menu}
       <ContextMenu
         x={menu.x}
@@ -256,6 +265,7 @@
         opener={menu.opener}
         items={[
           { id: "rename", label: "Rename", icon: "edit" },
+          { id: "save-template", label: "Save as template", icon: "layers" },
           { id: "close", label: "Close", danger: true, icon: "x" },
         ]}
         onPick={onPick}

@@ -199,8 +199,6 @@
       <TerminalPane
         sessionKey={node.id}
         cwd={node.cwd}
-        shell={node.cmd?.[0]}
-        args={node.cmd?.slice(1)}
         theme={store.theme}
         fontSize={store.termFontSize}
         opacity={store.termOpacity / 100}
@@ -216,12 +214,13 @@
       <button
         class="respawn"
         onclick={() => {
+          store.authorizePaneCommand(node.id);
           exited = false;
           runId += 1;
         }}
       >
         <Icon name="refresh" size={12} />
-        <span>Respawn shell</span>
+        <span>{node.cmd?.length && node.cmdOnRestore === false ? "Run saved command" : "Restart terminal"}</span>
       </button>
     {/if}
   </div>

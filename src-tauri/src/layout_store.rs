@@ -1,8 +1,9 @@
-//! Layout persistence (Phase 2).
+//! Layout and saved-setups persistence.
 //!
-//! The frontend owns the workspace/tab/pane tree; Rust durably stores the
-//! versioned JSON document. `UBRA_DATA_DIR` overrides the data directory so
-//! tests and scripted E2E runs never touch the real app data dir.
+//! The frontend owns the workspace/tab/pane tree and the saved-setups library;
+//! Rust durably stores the versioned JSON documents. `UBRA_DATA_DIR` overrides
+//! the data directory so tests and scripted E2E runs never touch the real app
+//! data dir.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -10,9 +11,36 @@ use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 /// Current layout schema version. Bumped only with a migration path.
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 const LAYOUT_FILE: &str = "layout.json";
+const SAVED_SETUPS_FILE: &str = "saved-setups.json";
+/// Current saved-setups schema version.
+pub const SAVED_SETUPS_VERSION: u32 = 1;
 pub const MAX_LAYOUT_BYTES: u64 = 4 * 1024 * 1024;
+
+struct DocumentSpec {
+    file: &'static str,
+    backup_stem: &'static str,
+    label: &'static str,
+    current_version: u32,
+    readable_versions: &'static [u32],
+}
+
+const LAYOUT_SPEC: DocumentSpec = DocumentSpec {
+    file: LAYOUT_FILE,
+    backup_stem: "layout",
+    label: "layout",
+    current_version: LAYOUT_VERSION,
+    readable_versions: &[1, 2],
+};
+
+const SAVED_SETUPS_SPEC: DocumentSpec = DocumentSpec {
+    file: SAVED_SETUPS_FILE,
+    backup_stem: "saved-setups",
+    label: "saved setups",
+    current_version: SAVED_SETUPS_VERSION,
+    readable_versions: &[1],
+};
 
 /// Resolve the data directory, honoring `UBRA_DATA_DIR` for tests/E2E.
 pub fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
@@ -22,9 +50,35 @@ pub fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
     Ok(app.path().app_data_dir()?)
 }
 
+fn validate_doc_version(value: &serde_json::Value, spec: &DocumentSpec) -> anyhow::Result<()> {
+    let version = value.as_object().and_then(|obj| obj.get("version")).and_then(
+        |version| version.as_u64(),
+    );
+    anyhow::ensure!(
+        version.is_some_and(|version| spec
+            .readable_versions
+            .iter()
+            .any(|supported| u64::from(*supported) == version)),
+        "Unsupported or invalid saved {} version",
+        spec.label
+    );
+    Ok(())
+}
+
+fn validate_current_version(value: &serde_json::Value, spec: &DocumentSpec) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        value.is_object()
+            && value.get("version").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(spec.current_version)),
+        "Unsupported or invalid saved {} version",
+        spec.label
+    );
+    Ok(())
+}
+
 /// Load only supported documents. Missing is distinct from every read/parse error.
-pub fn load_layout_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>> {
-    let path = dir.join(LAYOUT_FILE);
+fn load_doc_from(dir: &Path, spec: &DocumentSpec) -> anyhow::Result<Option<serde_json::Value>> {
+    let path = dir.join(spec.file);
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -32,7 +86,7 @@ pub fn load_layout_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>>
                 Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
                     Ok(None)
                 }
-                // An existing dangling link is unreadable, not an absent saved layout.
+                // An existing dangling link is unreadable, not an absent document.
                 Ok(_) => Err(e.into()),
                 Err(metadata_error) => Err(metadata_error.into()),
             };
@@ -43,35 +97,27 @@ pub fn load_layout_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>>
     file.take(MAX_LAYOUT_BYTES + 1).read_to_end(&mut bytes)?;
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_LAYOUT_BYTES,
-        "Saved layout exceeds the {MAX_LAYOUT_BYTES} byte limit"
+        "Saved {} exceeds the {MAX_LAYOUT_BYTES} byte limit",
+        spec.label
     );
-    let layout: serde_json::Value = serde_json::from_slice(&bytes)?;
-    validate_version(&layout)?;
-    Ok(Some(layout))
+    let document: serde_json::Value = serde_json::from_slice(&bytes)?;
+    validate_doc_version(&document, spec)?;
+    Ok(Some(document))
 }
 
-fn validate_version(layout: &serde_json::Value) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        layout.is_object()
-            && layout.get("version").and_then(serde_json::Value::as_u64)
-                == Some(u64::from(LAYOUT_VERSION)),
-        "Unsupported or invalid saved layout version"
-    );
-    Ok(())
-}
-
-/// Export an exact-byte backup without parsing or imposing the layout size limit.
+/// Export an exact-byte backup without parsing or imposing the size limit.
 /// Failure never changes the original. Create-new avoids overwriting a prior export.
-pub fn backup_layout_from(dir: &Path) -> anyhow::Result<String> {
-    let mut source = fs::File::open(dir.join(LAYOUT_FILE))?;
+fn backup_doc_from(dir: &Path, spec: &DocumentSpec) -> anyhow::Result<String> {
+    let mut source = fs::File::open(dir.join(spec.file))?;
     anyhow::ensure!(
         source.metadata()?.is_file(),
-        "Saved layout is not a regular file"
+        "Saved {} is not a regular file",
+        spec.label
     );
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| anyhow::anyhow!("Backup name entropy failed: {e}"))?;
     let token = format!("{:032x}", u128::from_be_bytes(random));
-    let path = dir.join(format!("layout.backup-{token}.json"));
+    let path = dir.join(format!("{}.backup-{token}.json", spec.backup_stem));
     let mut target = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -84,14 +130,18 @@ pub fn backup_layout_from(dir: &Path) -> anyhow::Result<String> {
 }
 
 /// Explicit reset consent: preserve the original before replacing it, even if invalid.
-pub fn reset_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<Option<String>> {
-    validate_version(layout)?;
-    let backup = match fs::symlink_metadata(dir.join(LAYOUT_FILE)) {
-        Ok(_) => Some(backup_layout_from(dir)?),
+fn reset_doc_to(
+    dir: &Path,
+    spec: &DocumentSpec,
+    document: &serde_json::Value,
+) -> anyhow::Result<Option<String>> {
+    validate_current_version(document, spec)?;
+    let backup = match fs::symlink_metadata(dir.join(spec.file)) {
+        Ok(_) => Some(backup_doc_from(dir, spec)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    if let Err(error) = write_layout_to(dir, layout) {
+    if let Err(error) = write_doc_to(dir, spec, document) {
         return Err(match &backup {
             Some(path) => anyhow::anyhow!("Reset failed; original backup is at {path}: {error}"),
             None => error,
@@ -101,25 +151,78 @@ pub fn reset_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result
 }
 
 /// Ordinary autosave refuses to overwrite unreadable/corrupt/unsupported documents.
-pub fn save_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<()> {
-    load_layout_from(dir)?;
-    write_layout_to(dir, layout)
+fn save_doc_to(
+    dir: &Path,
+    spec: &DocumentSpec,
+    document: &serde_json::Value,
+) -> anyhow::Result<()> {
+    load_doc_from(dir, spec)?;
+    write_doc_to(dir, spec, document)
 }
 
-fn write_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<()> {
-    validate_version(layout)?;
-    let bytes = serde_json::to_vec_pretty(layout)?;
+fn write_doc_to(
+    dir: &Path,
+    spec: &DocumentSpec,
+    document: &serde_json::Value,
+) -> anyhow::Result<()> {
+    validate_current_version(document, spec)?;
+    let bytes = serde_json::to_vec_pretty(document)?;
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_LAYOUT_BYTES,
-        "Layout exceeds the {MAX_LAYOUT_BYTES} byte limit"
+        "Saved {} exceeds the {MAX_LAYOUT_BYTES} byte limit",
+        spec.label
     );
     fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{LAYOUT_FILE}.tmp"));
+    let tmp = dir.join(format!("{}.tmp", spec.file));
     let mut file = fs::File::create(&tmp)?;
     file.write_all(&bytes)?;
     drop(file);
-    fs::rename(&tmp, dir.join(LAYOUT_FILE))?;
+    fs::rename(&tmp, dir.join(spec.file))?;
     Ok(())
+}
+
+/// Load only supported documents. Missing is distinct from every read/parse error.
+pub fn load_layout_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    load_doc_from(dir, &LAYOUT_SPEC)
+}
+
+/// Export an exact-byte backup without parsing or imposing the layout size limit.
+/// Failure never changes the original. Create-new avoids overwriting a prior export.
+pub fn backup_layout_from(dir: &Path) -> anyhow::Result<String> {
+    backup_doc_from(dir, &LAYOUT_SPEC)
+}
+
+/// Explicit reset consent: preserve the original before replacing it, even if invalid.
+pub fn reset_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<Option<String>> {
+    reset_doc_to(dir, &LAYOUT_SPEC, layout)
+}
+
+/// Ordinary autosave refuses to overwrite unreadable/corrupt/unsupported documents.
+pub fn save_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<()> {
+    save_doc_to(dir, &LAYOUT_SPEC, layout)
+}
+
+/// Load only supported saved-setups documents. Missing means an empty library.
+pub fn load_saved_setups_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    load_doc_from(dir, &SAVED_SETUPS_SPEC)
+}
+
+/// Ordinary library save refuses to overwrite unreadable/corrupt/unsupported documents.
+pub fn save_saved_setups_to(dir: &Path, setups: &serde_json::Value) -> anyhow::Result<()> {
+    save_doc_to(dir, &SAVED_SETUPS_SPEC, setups)
+}
+
+/// Export an exact-byte backup of the saved-setups document.
+pub fn backup_saved_setups_from(dir: &Path) -> anyhow::Result<String> {
+    backup_doc_from(dir, &SAVED_SETUPS_SPEC)
+}
+
+/// Explicit reset consent: preserve the original before replacing it, even if invalid.
+pub fn reset_saved_setups_to(
+    dir: &Path,
+    setups: &serde_json::Value,
+) -> anyhow::Result<Option<String>> {
+    reset_doc_to(dir, &SAVED_SETUPS_SPEC, setups)
 }
 
 #[cfg(test)]
@@ -134,6 +237,28 @@ mod tests {
         std::env::temp_dir().join(format!("ubra-layout-test-{}-{id}", std::process::id()))
     }
 
+    fn current_layout(extra: serde_json::Value) -> serde_json::Value {
+        let mut layout = serde_json::json!({
+            "version": LAYOUT_VERSION,
+            "workspaces": [{ "id": "w1", "name": "demo", "tabs": [], "activeTabId": "" }],
+            "activeWorkspaceId": "w1",
+        });
+        if let (Some(map), Some(patch)) = (layout.as_object_mut(), extra.as_object()) {
+            for (key, value) in patch {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        layout
+    }
+
+    fn setups_doc() -> serde_json::Value {
+        serde_json::json!({
+            "version": SAVED_SETUPS_VERSION,
+            "profiles": [{ "id": "p1", "name": "agent", "cwd": "/tmp", "cmd": ["sh"] }],
+            "templates": [],
+        })
+    }
+
     #[test]
     fn missing_layout_loads_as_none() {
         let dir = scratch_dir();
@@ -143,13 +268,19 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let dir = scratch_dir();
-        let layout = serde_json::json!({
-            "version": LAYOUT_VERSION,
-            "workspaces": [{ "id": "w1", "name": "demo", "tabs": [], "activeTabId": "" }],
-            "activeWorkspaceId": "w1",
-        });
+        let layout = current_layout(serde_json::json!({}));
         save_layout_to(&dir, &layout).unwrap();
         assert_eq!(load_layout_from(&dir).unwrap(), Some(layout));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_layout_version_still_loads_without_rewriting() {
+        let dir = scratch_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = serde_json::json!({"version": 1, "workspaces": [], "activeWorkspaceId": "w"});
+        fs::write(dir.join(LAYOUT_FILE), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(load_layout_from(&dir).unwrap(), Some(legacy));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -169,7 +300,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink("missing-target", dir.join(LAYOUT_FILE)).unwrap();
         assert!(load_layout_from(&dir).is_err());
-        assert!(save_layout_to(&dir, &serde_json::json!({"version": 1})).is_err());
+        assert!(save_layout_to(&dir, &current_layout(serde_json::json!({}))).is_err());
         assert_eq!(
             fs::read_link(dir.join(LAYOUT_FILE)).unwrap(),
             PathBuf::from("missing-target")
@@ -184,7 +315,7 @@ mod tests {
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join(LAYOUT_FILE), original).unwrap();
             assert!(load_layout_from(&dir).is_err());
-            assert!(save_layout_to(&dir, &serde_json::json!({"version": 1})).is_err());
+            assert!(save_layout_to(&dir, &current_layout(serde_json::json!({}))).is_err());
             assert_eq!(fs::read(dir.join(LAYOUT_FILE)).unwrap(), original);
             let _ = fs::remove_dir_all(&dir);
         }
@@ -199,12 +330,12 @@ mod tests {
         let export = backup_layout_from(&dir).unwrap();
         assert_eq!(fs::read(&export).unwrap(), original);
         assert_eq!(fs::read(dir.join(LAYOUT_FILE)).unwrap(), original);
-        let fresh = serde_json::json!({"version": 1, "workspaces": []});
+        let fresh = current_layout(serde_json::json!({"workspaces": []}));
         let backup = reset_layout_to(&dir, &fresh).unwrap().unwrap();
         assert_ne!(backup, export);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(load_layout_from(&dir).unwrap(), Some(fresh));
-        let next = serde_json::json!({"version": 1, "workspaces": [{"id": "new"}]});
+        let next = current_layout(serde_json::json!({"workspaces": [{"id": "new"}]}));
         save_layout_to(&dir, &next).unwrap();
         assert_eq!(load_layout_from(&dir).unwrap(), Some(next));
         assert_eq!(fs::read(&backup).unwrap(), original);
@@ -217,7 +348,7 @@ mod tests {
         fs::create_dir_all(dir.join(LAYOUT_FILE)).unwrap();
         assert!(load_layout_from(&dir).is_err());
         assert!(backup_layout_from(&dir).is_err());
-        assert!(reset_layout_to(&dir, &serde_json::json!({"version": 1})).is_err());
+        assert!(reset_layout_to(&dir, &current_layout(serde_json::json!({}))).is_err());
         assert!(dir.join(LAYOUT_FILE).is_dir());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -229,7 +360,7 @@ mod tests {
         let original = vec![b' '; MAX_LAYOUT_BYTES as usize + 1];
         fs::write(dir.join(LAYOUT_FILE), &original).unwrap();
         assert!(load_layout_from(&dir).is_err());
-        assert!(save_layout_to(&dir, &serde_json::json!({"version": 1})).is_err());
+        assert!(save_layout_to(&dir, &current_layout(serde_json::json!({}))).is_err());
         let backup = backup_layout_from(&dir).unwrap();
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(fs::read(dir.join(LAYOUT_FILE)).unwrap(), original);
@@ -243,7 +374,7 @@ mod tests {
         let original = b"broken but valuable";
         fs::write(dir.join(LAYOUT_FILE), original).unwrap();
         fs::create_dir(dir.join(format!("{LAYOUT_FILE}.tmp"))).unwrap();
-        assert!(reset_layout_to(&dir, &serde_json::json!({"version": 1})).is_err());
+        assert!(reset_layout_to(&dir, &current_layout(serde_json::json!({}))).is_err());
         assert_eq!(fs::read(dir.join(LAYOUT_FILE)).unwrap(), original);
         let backups: Vec<_> = fs::read_dir(&dir)
             .unwrap()
@@ -257,6 +388,106 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_setups_round_trip_independently_from_layout() {
+        let dir = scratch_dir();
+        let layout = current_layout(serde_json::json!({}));
+        save_layout_to(&dir, &layout).unwrap();
+        let setups = setups_doc();
+        save_saved_setups_to(&dir, &setups).unwrap();
+        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(setups));
+        assert_eq!(load_layout_from(&dir).unwrap(), Some(layout));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_saved_setups_loads_as_none() {
+        let dir = scratch_dir();
+        assert!(load_saved_setups_from(&dir).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_saved_setups_block_overwrite() {
+        for original in [b"{not json".as_slice(), b"{\"version\":999}", b"null"] {
+            let dir = scratch_dir();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
+            assert!(load_saved_setups_from(&dir).is_err());
+            assert!(save_saved_setups_to(&dir, &setups_doc()).is_err());
+            assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn oversized_saved_setups_preserved_and_exportable() {
+        let dir = scratch_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let original = vec![b' '; MAX_LAYOUT_BYTES as usize + 1];
+        fs::write(dir.join(SAVED_SETUPS_FILE), &original).unwrap();
+        assert!(load_saved_setups_from(&dir).is_err());
+        assert!(save_saved_setups_to(&dir, &setups_doc()).is_err());
+        let backup = backup_saved_setups_from(&dir).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_setups_backup_and_reset_preserve_exact_bytes() {
+        let dir = scratch_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let original = b"{\"version\":999,\"unrecognized\":\"keep me\"}\n";
+        fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
+        let export = backup_saved_setups_from(&dir).unwrap();
+        assert!(export.contains("saved-setups.backup-"));
+        assert_eq!(fs::read(&export).unwrap(), original);
+        let fresh = serde_json::json!({"version": SAVED_SETUPS_VERSION, "profiles": [], "templates": []});
+        let backup = reset_saved_setups_to(&dir, &fresh).unwrap().unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(fresh));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_setups_failed_replacement_keeps_original_and_backup() {
+        let dir = scratch_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let original = b"broken but valuable";
+        fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
+        fs::create_dir(dir.join(format!("{SAVED_SETUPS_FILE}.tmp"))).unwrap();
+        let fresh = serde_json::json!({"version": SAVED_SETUPS_VERSION, "profiles": [], "templates": []});
+        assert!(reset_saved_setups_to(&dir, &fresh).is_err());
+        assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("saved-setups.backup-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_recovery_leaves_valid_library_untouched() {
+        let dir = scratch_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(LAYOUT_FILE), b"{not json").unwrap();
+        let setups = setups_doc();
+        fs::write(dir.join(SAVED_SETUPS_FILE), serde_json::to_vec(&setups).unwrap()).unwrap();
+        assert!(load_layout_from(&dir).is_err());
+        let fresh = current_layout(serde_json::json!({}));
+        reset_layout_to(&dir, &fresh).unwrap();
+        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(setups));
         let _ = fs::remove_dir_all(&dir);
     }
 }

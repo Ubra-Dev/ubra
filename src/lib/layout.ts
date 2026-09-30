@@ -411,6 +411,7 @@ function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNo
       }
       node.cmdOnRestore = value["cmdOnRestore"];
     }
+    return node;
   }
   if (value["kind"] !== "split" || (value["dir"] !== "row" && value["dir"] !== "col")) {
     throw new Error("Invalid saved split kind or direction.");

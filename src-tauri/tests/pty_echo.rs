@@ -417,3 +417,69 @@ fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles(
     );
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    let missing = std::env::temp_dir().join(format!(
+        "ubra-missing-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let error = manager
+        .spawn(
+            Some("sh".to_string()),
+            Some(missing.to_string_lossy().into_owned()),
+            Vec::new(),
+            80,
+            24,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("Working directory is unavailable:"),
+        "unexpected error: {error}"
+    );
+    let file_cwd = std::env::temp_dir().join(format!("ubra-file-cwd-{}", std::process::id()));
+    std::fs::write(&file_cwd, b"not a directory").unwrap();
+    let error = manager
+        .spawn(
+            Some("sh".to_string()),
+            Some(file_cwd.to_string_lossy().into_owned()),
+            Vec::new(),
+            80,
+            24,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("Working directory is not a directory:"),
+        "unexpected error: {error}"
+    );
+    let _ = std::fs::remove_file(&file_cwd);
+    assert!(manager.pane_roots().is_empty());
+    let (shell, args) = echo_command();
+    let id = manager.spawn(shell, None, args, 80, 24).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut transcript = String::new();
+    let mut handshake = Handshake::new();
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(got, data)) => {
+                assert_eq!(got, id);
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, success)) => {
+                assert_eq!(got, id);
+                assert!(success, "sibling pane should exit 0");
+                break;
+            }
+            Err(_) => panic!("timed out waiting for sibling pane; got: {transcript:?}"),
+        }
+    }
+    assert!(transcript.contains("hello-pty"), "sibling should run, got: {transcript:?}");
+}

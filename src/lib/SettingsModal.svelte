@@ -22,6 +22,11 @@
     SCROLLBACK_OPTIONS,
     store,
   } from "./store.svelte";
+  import {
+    DEFAULT_UI_SCALE,
+    MAX_UI_SCALE,
+    MIN_UI_SCALE,
+  } from "./uiScale";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
 
@@ -249,6 +254,33 @@
                   class="reset"
                   onclick={() => store.resetTermFontSize()}
                   disabled={store.termFontSize === DEFAULT_TERM_FONT_SIZE}
+                >
+                  Reset
+                </button>
+              </span>
+            </div>
+            <div class="row">
+              <span class="label">Interface scale</span>
+              <span class="stepper">
+                <button
+                  onclick={() => store.bumpUiScale(-1)}
+                  disabled={store.uiScale <= MIN_UI_SCALE}
+                  aria-label="Smaller interface text"
+                >
+                  &minus;
+                </button>
+                <span class="value">{store.uiScale}%</span>
+                <button
+                  onclick={() => store.bumpUiScale(1)}
+                  disabled={store.uiScale >= MAX_UI_SCALE}
+                  aria-label="Bigger interface text"
+                >
+                  +
+                </button>
+                <button
+                  class="reset"
+                  onclick={() => store.resetUiScale()}
+                  disabled={store.uiScale === DEFAULT_UI_SCALE}
                 >
                   Reset
                 </button>

@@ -27,8 +27,6 @@
     /** Stable pane node id: reattaches to the surviving PTY across remounts. */
     sessionKey: string;
     cwd?: string;
-    shell?: string;
-    args?: string[];
     theme: AppTheme;
     fontSize: number;
     /** Background opacity 0..1. */
@@ -46,8 +44,6 @@
   let {
     sessionKey,
     cwd,
-    shell,
-    args,
     theme,
     fontSize,
     opacity,
@@ -256,13 +252,16 @@
           invoke("pty_write", { id: paneId, data }).catch(console.error);
         }
       });
-      lease = acquireSession(sessionKey, () => invoke<number>("pty_spawn", {
-        shell: shell ?? null,
-        cwd: cwd ?? null,
-        args: args ?? null,
-        cols: Math.max(term.cols, 2),
-        rows: Math.max(term.rows, 1),
-      }), (id) => invoke("pty_kill", { id }));
+      lease = acquireSession(sessionKey, () => {
+        const argv = store.commandForSpawn(sessionKey);
+        return invoke<number>("pty_spawn", {
+          shell: argv?.[0] ?? null,
+          cwd: cwd ?? null,
+          args: argv?.slice(1) ?? null,
+          cols: Math.max(term.cols, 2),
+          rows: Math.max(term.rows, 1),
+        });
+      }, (id) => invoke("pty_kill", { id }));
       const id = await lease.ready;
       if (disposed || lease.cancelled) return;
       let snapshot: TerminalSnapshot | null = null;

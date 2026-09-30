@@ -102,6 +102,30 @@ fn reset_layout(app: AppHandle, layout: serde_json::Value) -> Result<Option<Stri
 }
 
 #[tauri::command]
+fn load_saved_setups(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::load_saved_setups_from(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<(), String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::save_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_saved_setups(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::backup_saved_setups_from(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<Option<String>, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    layout_store::reset_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn quit_app(app: AppHandle, manager: State<'_, Arc<PtyManager>>) -> Result<(), String> {
     manager.shutdown().map_err(|e| e.to_string())?;
     app.state::<ShellState>()
@@ -367,6 +391,10 @@ pub fn run() {
             save_layout,
             export_layout,
             reset_layout,
+            load_saved_setups,
+            save_saved_setups,
+            export_saved_setups,
+            reset_saved_setups,
             quit_app,
             autostart_enabled,
             autostart_set,
