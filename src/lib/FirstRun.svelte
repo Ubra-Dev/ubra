@@ -5,6 +5,8 @@
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
   import { agentClis } from "./agentClis.svelte";
   import { store } from "./store.svelte";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
 
   let projectDirectory = $state<string | null>(null);
   const detected = $derived(agentClis.clis);
@@ -15,12 +17,19 @@
   let errorMessage = $state<string | null>(null);
   let selectEl = $state<HTMLSelectElement | null>(null);
   let customEl = $state<HTMLInputElement | null>(null);
+  let telemetryOptIn = $state(false);
+  let telemetrySupported = $state(false);
 
   const command = $derived(resolveAgentCommand(selection, customCommand));
   const selectedCli = $derived(detected?.find((entry) => entry.cli === selection) ?? null);
 
   onMount(() => {
     void agentClis.ensure();
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
   });
 
   // Settle the initial selection once when detection resolves; never
@@ -73,15 +82,23 @@
     }
   }
 
-  function startAgent(): void {
+  async function startAgent(): Promise<void> {
     if (!projectDirectory || !command.trim()) return;
+    // Consent first so the onboarding-completed record is captured when
+    // the user opts in; a consent failure never blocks onboarding.
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
     const paneId = store.completeOnboarding(projectDirectory, command);
     if (!paneId) {
       errorMessage = "Couldn't prepare the project terminal. Try skipping setup.";
     }
   }
 
-  function skipSetup(): void {
+  async function skipSetup(): Promise<void> {
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
     store.skipOnboarding();
   }
 </script>
@@ -224,6 +241,18 @@
 
       {#if errorMessage}
         <div class="error" role="alert">{errorMessage}</div>
+      {/if}
+
+      {#if telemetrySupported}
+        <label class="consent-row">
+          <input type="checkbox" bind:checked={telemetryOptIn} />
+          <span>
+            Help improve Ubra by sharing anonymous usage and crash reports.
+            <span class="hint-inline">
+              Never code, file paths, or commands. Change anytime in Settings.
+            </span>
+          </span>
+        </label>
       {/if}
 
       <div class="actions">
@@ -509,6 +538,24 @@
     color: var(--text-subtle);
     font-size: 11px;
     line-height: 1.45;
+  }
+  .consent-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 18px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .consent-row input {
+    margin-top: 3px;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
+  }
+  .consent-row .hint-inline {
+    color: var(--text-subtle);
   }
   .status-tip {
     display: flex;

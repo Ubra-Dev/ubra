@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { playbackPayload, routeNotification } from "./notify";
 import { store } from "./store.svelte";
+import { captureAgentEnded, captureAgentStarted, type AgentEndOutcome } from "./telemetry";
 import { toasts } from "./toasts.svelte.ts";
 import { baseName, collectPaneIds, findPane, findTabByPane, type Tab, type Workspace } from "./layout";
 import {
@@ -34,6 +35,8 @@ class AgentStore {
   private lastAgent = $state<Record<string, { agent: string; cli?: string; cwd?: string }>>({});
   private pending = new Map<number, AgentTransition>();
   private disposed = new Set<number>();
+  /** Observed agent-session starts by node, for telemetry durations. */
+  private sessionStart = new Map<string, number>();
   private foreground = false;
   private started = false;
   // TEMP perf instrumentation (removed after the lag audit).
@@ -65,7 +68,11 @@ class AgentStore {
     delete this.liveToNode[liveId];
     this.pending.delete(liveId);
     this.model = acknowledgeAgent(this.model, liveId, true);
-    if (node) delete this.lastAgent[node];
+    if (node) {
+      const last = this.lastAgent[node];
+      if (last?.cli) this.captureEnded(node, last.cli, "closed");
+      delete this.lastAgent[node];
+    }
   }
   start(): void {
     if (this.started) return;
@@ -116,6 +123,7 @@ class AgentStore {
     this.liveToNode = {};
     this.pending.clear();
     this.disposed.clear();
+    this.sessionStart.clear();
     try {
       const snapshot = await invoke<AgentUpdate>("agent_snapshot");
       this.onUpdate({ ...snapshot, transitions: [] });
@@ -221,10 +229,30 @@ class AgentStore {
   private rememberAgents(): void {
     for (const [live, node] of Object.entries(this.liveToNode)) {
       const state = this.states[live];
-      if (state?.agent) this.lastAgent[node] = {
+      if (!state?.agent) continue;
+      const previous = this.lastAgent[node];
+      if (previous?.agent !== state.agent) {
+        if (previous?.agent && previous.cli) this.captureEnded(node, previous.cli, "closed");
+        this.sessionStart.set(node, Date.now());
+        if (state.cli) {
+          captureAgentStarted(state.cli).catch((error: unknown) => {
+            console.error("ubra: agent-started capture failed", error);
+          });
+        }
+      }
+      this.lastAgent[node] = {
         agent: state.agent, cli: state.cli, cwd: state.cwd ?? this.lastAgent[node]?.cwd,
       };
     }
+  }
+  /** Emit an agent-ended event when a session start was observed. */
+  private captureEnded(node: string, cli: string, outcome: AgentEndOutcome): void {
+    const started = this.sessionStart.get(node);
+    this.sessionStart.delete(node);
+    if (started === undefined || !cli) return;
+    captureAgentEnded(cli, Date.now() - started, outcome).catch((error: unknown) => {
+      console.error("ubra: agent-ended capture failed", error);
+    });
   }
   private onUpdate(update: AgentUpdate): void {
     this.perfNoteUpdate();
@@ -234,8 +262,14 @@ class AgentStore {
     this.rememberAgents();
     for (const transition of result.transitions) {
       const node = this.liveToNode[transition.paneId];
-      if (node) this.notify(transition);
-      else if (!this.disposed.has(transition.paneId)) {
+      if (node) {
+        this.notify(transition);
+        const cli = transition.cli ?? this.lastAgent[node]?.cli;
+        if (cli) {
+          const outcome = transition.kind === "task-completed" ? "completed" : "stopped";
+          this.captureEnded(node, cli, outcome);
+        }
+      } else if (!this.disposed.has(transition.paneId)) {
         this.pending.set(transition.paneId, transition);
       }
     }

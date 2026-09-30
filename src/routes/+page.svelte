@@ -18,6 +18,7 @@
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import { agentClis } from "$lib/agentClis.svelte";
+  import { syncTelemetryToConsent } from "$lib/telemetrySync";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
   import "$lib/uiFontFaces";
@@ -25,6 +26,8 @@
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
+    // Consent first: align the analytics client before anything captures.
+    void syncTelemetryToConsent();
     void store.boot();
     agent.start();
     workspaceGit.start();

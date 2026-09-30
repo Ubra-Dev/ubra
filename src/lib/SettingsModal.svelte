@@ -4,6 +4,8 @@
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
@@ -62,6 +64,10 @@
   let autostart = $state(false);
   let autostartLoaded = $state(false);
   let autostartError = $state<string | null>(null);
+  let telemetrySupported = $state(false);
+  let telemetryConsented = $state(false);
+  let telemetryLoaded = $state(false);
+  let telemetryError = $state<string | null>(null);
   let appName = $state("Ubra");
   let appVersion = $state("");
   let soundFile = $state(store.soundFile);
@@ -149,6 +155,13 @@
         autostartLoaded = true;
       })
       .catch((e) => console.error("ubra: autostart check failed", e));
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+        telemetryConsented = status.consented;
+        telemetryLoaded = true;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
     invoke<{ name: string; version: string }>("app_info")
       .then((info) => {
         appName = info.name;
@@ -186,6 +199,19 @@
     usage.refreshAll(detected.map((entry) => entry.cli));
   });
 
+
+  async function onTelemetryChange(e: Event): Promise<void> {
+    const checked = (e.target as HTMLInputElement).checked;
+    telemetryError = null;
+    try {
+      await applyTelemetryConsent(checked);
+      telemetryConsented = checked;
+    } catch (err) {
+      console.error("ubra: telemetry consent failed", err);
+      telemetryConsented = !checked;
+      telemetryError = "Couldn't update the telemetry preference; reverted.";
+    }
+  }
 
   function onAutostartChange(e: Event): void {
     const checked = (e.target as HTMLInputElement).checked;
@@ -743,6 +769,34 @@
                 {/if}
               </div>
             </div>
+            {#if telemetrySupported}
+              <div class="group">
+                <h3 class="group-label">Telemetry</h3>
+                <div class="card">
+                  <label class="row switch">
+                    <span class="label">Share anonymous usage and crash reports</span>
+                    <input
+                      type="checkbox"
+                      checked={telemetryConsented}
+                      disabled={!telemetryLoaded}
+                      onchange={onTelemetryChange}
+                    />
+                    <span class="track" aria-hidden="true">
+                      <span class="thumb"></span>
+                    </span>
+                  </label>
+                  {#if telemetryError}
+                    <div class="hint error-hint" role="alert">
+                      {telemetryError}
+                    </div>
+                  {/if}
+                </div>
+                <div class="hint">
+                  Helps improve Ubra. Anonymous events and crash reports only —
+                  never code, file paths, or commands. Takes effect immediately.
+                </div>
+              </div>
+            {/if}
             <div class="group">
               <h3 class="group-label">Onboarding</h3>
               <div class="card">

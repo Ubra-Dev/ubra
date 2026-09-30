@@ -15,6 +15,7 @@ pub mod pty_manager;
 pub mod recovery;
 pub mod screen_rules;
 pub mod sound;
+pub mod telemetry;
 mod terminal_state;
 pub mod usage;
 
@@ -659,6 +660,12 @@ pub fn run() {
                 }
             }
             app.manage(usage::UsageCache::new());
+            match layout_store::data_dir(app.handle()) {
+                Ok(dir) => {
+                    telemetry::init_from_disk(&dir);
+                }
+                Err(e) => eprintln!("ubra: telemetry init skipped: {e}"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -753,6 +760,11 @@ pub fn run() {
             stop_all_terminals_and_quit,
             autostart_enabled,
             autostart_set,
+            telemetry::telemetry_status,
+            telemetry::telemetry_set_consent,
+            telemetry::telemetry_set_distinct_id,
+            telemetry::telemetry_capture,
+            telemetry::telemetry_flag,
             notify_agent,
             play_sound,
             check_sound_file,
@@ -764,15 +776,21 @@ pub fn run() {
             // Quitting disconnects the UI; terminals keep running in the
             // daemon. Route through the frontend so pending layout changes
             // flush first. An in-progress quit is never intercepted.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !app
-                    .state::<ShellState>()
-                    .quitting
-                    .load(Ordering::SeqCst)
-                {
-                    api.prevent_exit();
-                    let _ = app.emit("request-quit", ());
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !app
+                        .state::<ShellState>()
+                        .quitting
+                        .load(Ordering::SeqCst)
+                    {
+                        api.prevent_exit();
+                        let _ = app.emit("request-quit", ());
+                    }
                 }
+                tauri::RunEvent::Exit => {
+                    telemetry::shutdown_flush();
+                }
+                _ => {}
             }
         });
 }
