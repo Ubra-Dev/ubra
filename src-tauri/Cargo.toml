@@ -41,6 +41,7 @@ hmac = "0.12"
 sha2 = "0.10"
 fs2 = "0.4"
 parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
