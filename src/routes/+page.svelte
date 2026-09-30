@@ -31,7 +31,7 @@
   function onGlobalKeyDown(e: KeyboardEvent): void {
     if (e.defaultPrevented) return;
     const overlayOpen = store.settingsOpen || !!store.pendingClose ||
-      store.firstRun || store.onboardingOpen || store.recoveryRequired ||
+      store.firstRun || store.recoveryRequired ||
       store.recoveryBusy || !!store.savedSetupsRequest ||
       !!document.querySelector("[data-keyboard-overlay]");
     const matched = matchShortcutEvent(e, isMacPlatform(navigator.platform), overlayOpen);
@@ -163,7 +163,7 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || !!store.savedSetupsRequest}>
       <div class="app">
         <Sidebar />
         <div class="main">
@@ -183,11 +183,8 @@
       </div>
       <StatusBar />
     </div>
-    {#if store.layout.workspaces.length === 0 && !store.onboardingOpen}
+    {#if store.layout.workspaces.length === 0}
       <EmptyWorkspaces />
-    {/if}
-    {#if store.onboardingOpen}
-      <FirstRun />
     {/if}
   {/if}
   {#if store.settingsOpen}

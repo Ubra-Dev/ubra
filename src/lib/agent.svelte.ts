@@ -144,7 +144,7 @@ class AgentStore {
     const layout = store.layout;
     const found = layout && findTabByPane(layout, nodeId);
     if (!layout || !found || store.settingsOpen || store.pendingClose) return false;
-    if (store.savedSetupsRequest || store.onboardingOpen || store.firstRun) return false;
+    if (store.savedSetupsRequest || store.firstRun) return false;
     return paneIsVisible({
       activeWorkspaceId: layout.activeWorkspaceId, workspaceId: found.ws.id,
       activeTabId: found.ws.activeTabId, tabId: found.tab.id,

@@ -573,6 +573,21 @@ export function baseName(path: string): string {
   return parts[parts.length - 1];
 }
 
+/** Find the workspace already pointing at a folder, if any. Trailing slashes
+ * are ignored so picker results match stored roots either way. Matches
+ * defaultCwd (the workspace's project folder). */
+export function findWorkspaceByRoot(
+  workspaces: Workspace[],
+  dir: string,
+): Workspace | null {
+  const want = dir.replace(/[\\/]+$/, "");
+  if (want === "") return null;
+  return (
+    workspaces.find((ws) => ws.defaultCwd?.replace(/[\\/]+$/, "") === want) ??
+    null
+  );
+}
+
 /** Pane header/context title: explicit title, else the cwd's last segment. */
 export function paneDisplayTitle(node: PaneNode): string {
   if (node.title) return node.title;

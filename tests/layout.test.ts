@@ -19,6 +19,7 @@ import {
   findPaneAtPoint,
   findSplit,
   findTabByPane,
+  findWorkspaceByRoot,
   gridTab,
   isActiveAgentState,
   moveWorkspace,
@@ -865,5 +866,16 @@ describe("paneDisplayTitle", () => {
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p" }), "Terminal");
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "/repo/web" }), "web");
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "" }), "Terminal");
+  });
+});
+
+describe("findWorkspaceByRoot", () => {
+  it("matches defaultCwd ignoring trailing slashes", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCwd = "/repo/web";
+    const b = defaultWorkspace("B");
+    assert.equal(findWorkspaceByRoot([a, b], "/repo/web/")?.id, a.id);
+    assert.equal(findWorkspaceByRoot([a, b], "/repo/other"), null);
+    assert.equal(findWorkspaceByRoot([a, b], ""), null);
   });
 });

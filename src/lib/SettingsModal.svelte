@@ -679,24 +679,6 @@
               </div>
             </div>
             <div class="group">
-              <h3 class="group-label">Onboarding</h3>
-              <div class="card">
-                <div class="row">
-                  <span class="label">
-                    Set up another project and agent session
-                  </span>
-                  <button class="btn" onclick={() => store.openOnboarding()}>
-                    <Icon name="layers" size={12} />
-                    <span>Run onboarding</span>
-                  </button>
-                </div>
-              </div>
-              <div class="hint">
-                Completing setup opens a new workspace and keeps your current
-                work.
-              </div>
-            </div>
-            <div class="group">
               <h3 class="group-label">Quit</h3>
               <div class="card">
                 <div class="row">
