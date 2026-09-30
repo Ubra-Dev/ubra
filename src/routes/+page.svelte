@@ -8,6 +8,7 @@
   import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
+  import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
@@ -177,6 +178,7 @@
           <div class="error backup">Original layout preserved at: {store.recoveryBackupPath}</div>
         {/if}
       </div>
+      <RightSidebar />
     </div>
     {#if store.onboardingOpen}
       <FirstRun />

@@ -18,6 +18,7 @@ import {
   gridTab,
   moveWorkspace,
   resizePaneInTab,
+  resolveWorkspaceRoot,
   sanitizeLayout,
   setZoomedPane,
   splitPaneInTab,
@@ -49,6 +50,8 @@ import { DEFAULT_UI_SCALE, UI_SCALE_STEP, clampUiScale } from "./uiScale";
 
 export type CloseKind = "workspace" | "tab" | "pane";
 
+export type RightPanelView = "explorer" | "source-control";
+
 export interface PendingClose {
   kind: CloseKind;
   /** Workspace id, tab id, or pane node id. */
@@ -75,6 +78,8 @@ class AppStore {
   onboardingOpen = $state(false);
   loadError = $state<string | null>(null);
   saveError = $state<string | null>(null);
+  rightPanelOpen = $state(true);
+  rightPanelView = $state<RightPanelView>("explorer");
   recoveryRequired = $state(false);
   recoveryBusy = $state(false);
   recoveryError = $state<string | null>(null);
@@ -167,6 +172,12 @@ class AppStore {
       if (savedFile !== null) this.soundFile = savedFile;
       const savedStyle = window.localStorage.getItem("ubra.soundStyle");
       if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
+      const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
+      if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
+      const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
+      if (savedPanelView === "explorer" || savedPanelView === "source-control") {
+        this.rightPanelView = savedPanelView;
+      }
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -354,6 +365,16 @@ class AppStore {
     this.savePref("ubra.soundStyle", this.soundStyle);
   }
 
+  setRightPanelOpen(open: boolean): void {
+    this.rightPanelOpen = open;
+    this.savePref("ubra.rightPanelOpen", String(open));
+  }
+
+  setRightPanelView(view: RightPanelView): void {
+    this.rightPanelView = view;
+    this.savePref("ubra.rightPanelView", view);
+  }
+
   setAgentMuted(cli: string, muted: boolean): void {
     const lower = cli.toLowerCase();
     this.mutedAgents = muted
@@ -428,6 +449,28 @@ class AppStore {
       ws.name = name.trim();
       this.saveSoon();
     }
+  }
+
+  setWorkspaceRoot(id: string, root: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && root.trim()) {
+      ws.root = root;
+      this.saveSoon();
+    }
+  }
+
+  clearWorkspaceRoot(id: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && ws.root !== undefined) {
+      delete ws.root;
+      this.saveSoon();
+    }
+  }
+
+  /** Folder the right sidebar shows for the active workspace, if any. */
+  activeWorkspaceRoot(): string | undefined {
+    const ws = this.workspace();
+    return ws ? resolveWorkspaceRoot(ws, this.focusedPaneId) : undefined;
   }
 
   moveWorkspace(
@@ -650,7 +693,10 @@ class AppStore {
         const workspace = this.layout.workspaces.find((ws) =>
           ws.tabs.some((tab) => tab.id === current.tab.id),
         );
-        if (workspace) workspace.name = baseName(projectDirectory) || "Project";
+        if (workspace) {
+          workspace.name = baseName(projectDirectory) || "Project";
+          workspace.root = projectDirectory;
+        }
       }
     } else {
       if (!projectDirectory) return null;
@@ -660,6 +706,7 @@ class AppStore {
       pane = findPane(workspace.tabs[0].root, workspace.tabs[0].root.id);
       if (!pane) return null;
       pane.cwd = projectDirectory;
+      workspace.root = projectDirectory;
     }
 
     const trimmedCommand = command?.trim() ?? "";

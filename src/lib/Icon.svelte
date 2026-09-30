@@ -11,6 +11,7 @@
     | "command"
     | "info"
     | "plus"
+    | "minus"
     | "x"
     | "check"
     | "edit"
@@ -24,8 +25,13 @@
     | "grid"
     | "rows"
     | "external"
+    | "eye"
     | "chevron-up"
-    | "chevron-down";
+    | "chevron-down"
+    | "chevron-right"
+    | "folder"
+    | "file"
+    | "git-branch";
 
   interface Props {
     name: IconName;
@@ -85,6 +91,7 @@
     plus:
       '<line x1="12" y1="5" x2="12" y2="19"/>' +
       '<line x1="5" y1="12" x2="19" y2="12"/>',
+    minus: '<line x1="5" y1="12" x2="19" y2="12"/>',
     x:
       '<line x1="18" y1="6" x2="6" y2="18"/>' +
       '<line x1="6" y1="6" x2="18" y2="18"/>',
@@ -126,8 +133,22 @@
       '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
       '<polyline points="15 3 21 3 21 9"/>' +
       '<line x1="10" y1="14" x2="21" y2="3"/>',
+    eye:
+      '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+      '<circle cx="12" cy="12" r="3"/>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"/>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
+    "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
+    folder:
+      '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    file:
+      '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>' +
+      '<polyline points="13 2 13 9 20 9"/>',
+    "git-branch":
+      '<line x1="6" y1="3" x2="6" y2="15"/>' +
+      '<circle cx="18" cy="6" r="3"/>' +
+      '<circle cx="6" cy="18" r="3"/>' +
+      '<path d="M18 9a9 9 0 0 1-9 9"/>',
   };
 </script>
 

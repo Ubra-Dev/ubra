@@ -42,6 +42,8 @@ export interface Workspace {
   name: string;
   tabs: Tab[];
   activeTabId: string;
+  /** Project folder shown in the Explorer / Source Control panels. */
+  root?: string;
 }
 
 export interface Layout {
@@ -467,7 +469,12 @@ function sanitizeWorkspace(v: unknown, context: LoadContext): Workspace {
   if (!tabs.some((tab) => tab.id === activeTabId)) {
     throw new Error("Invalid saved layout: active tab is missing.");
   }
-  return { id, name: text(value["name"], "workspace name"), tabs, activeTabId };
+  const ws: Workspace = { id, name: text(value["name"], "workspace name"), tabs, activeTabId };
+  if (value["root"] !== undefined) {
+    if (typeof value["root"] !== "string") throw new Error("Invalid saved workspace root.");
+    ws.root = value["root"];
+  }
+  return ws;
 }
 
 /** Validate before rendering; unsafe repairs require explicit recovery, never a fresh fallback. */
@@ -518,6 +525,28 @@ export function baseName(path: string): string {
   if (trimmed === "") return path === "" ? "" : "/";
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1];
+}
+
+/**
+ * Folder the Explorer / Source Control panels show for a workspace: the
+ * explicit root, else the active pane's cwd, else the first pane cwd in
+ * the active tab. Empty strings count as unset.
+ */
+export function resolveWorkspaceRoot(
+  ws: Workspace,
+  activePaneId?: string | null,
+): string | undefined {
+  if (ws.root !== undefined && ws.root !== "") return ws.root;
+  const tab = activeTab(ws);
+  if (activePaneId) {
+    const pane = findPane(tab.root, activePaneId);
+    if (pane?.cwd) return pane.cwd;
+  }
+  const firstCwd = (node: LayoutNode): string | undefined => {
+    if (node.kind === "pane") return node.cwd ? node.cwd : undefined;
+    return firstCwd(node.first) ?? firstCwd(node.second);
+  };
+  return firstCwd(tab.root);
 }
 
 /**
