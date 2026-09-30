@@ -37,6 +37,27 @@ export interface CliUsage {
   message?: string;
 }
 
+/** Subscription CLI with a usage provider (backend `SupportedCli`). */
+export interface SupportedUsageCli {
+  cli: string;
+  label: string;
+}
+
+/** Detected entries that have a subscription usage provider, in order. */
+export function selectUsageClis<T extends { cli: string }>(
+  detected: T[],
+  supported: SupportedUsageCli[],
+): T[] {
+  const stems = new Set(supported.map((entry) => entry.cli));
+  return detected.filter((entry) => stems.has(entry.cli));
+}
+
+/** "Codex and Claude Code" style list for empty states. */
+export function joinLabels(labels: string[]): string {
+  if (labels.length <= 2) return labels.join(" and ");
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
+}
+
 /** "in 2h 14m" style countdown for a reset epoch (seconds). */
 export function formatResetCountdown(
   resetsAt: number,

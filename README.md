@@ -42,11 +42,11 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   window is hidden to the tray.
 - **Headless automation (experimental)** — the same authenticated local daemon
   plus a JSON CLI expose terminal and agent-state operations without a window.
-- **Plan usage** — Settings → Usage lists every detected agent CLI with its
-  plan windows (session/weekly with reset countdowns) where the CLI exposes
-  them. Codex and Claude read the CLIs' own OAuth logins; other CLIs show an
-  honest "no usage source yet" until a provider exists. Tokens never leave the
-  Rust backend, are never logged, and credential files are never written.
+- **Plan usage** — Settings → Usage lists subscription-based agent CLIs with
+  plan windows (session/weekly with reset countdowns). Codex and Claude Code
+  read the CLIs' own OAuth logins; other CLIs stay out of the list until a
+  usage provider exists for them. Tokens never leave the Rust backend, are
+  never logged, and credential files are never written.
 
 ## Install
 
@@ -153,12 +153,12 @@ verification described in [the release guide](docs/RELEASING.md).
 
 ### Desktop security and process ownership
 
-Production CSP permits application assets and Tauri IPC, not remote scripts or
-arbitrary remote connections. `style-src 'unsafe-inline'` is required by
+Production CSP permits application assets, Tauri IPC, and the configured PostHog
+script and connection hosts. See [PRIVACY.md](PRIVACY.md) for network behavior. `style-src 'unsafe-inline'` is required by
 Svelte/xterm runtime styling; `asset:`/`http://asset.localhost` and `data:` image
 sources support local application assets, while `data:` fonts support embedded
-fonts. Scripts remain restricted to `'self'`; objects, document base overrides
-and framing are denied. These are narrow compatibility exceptions, not a claim
+fonts. Scripts allow `'self'` and `https://*.posthog.com`; objects, document base
+overrides and framing are denied. These are narrow compatibility exceptions, not a claim
 that packaged CSP behavior has been verified.
 
 On Unix, pane close targets the pane's terminal session with bounded TERM/KILL

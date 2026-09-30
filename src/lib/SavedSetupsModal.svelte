@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { PUBLIC_POSTHOG_HOST, PUBLIC_POSTHOG_PROJECT_TOKEN } from "$env/static/public";
+  import posthog from "posthog-js";
   import { tick } from "svelte";
   import SetupCommandFields from "./SetupCommandFields.svelte";
   import { overlayFocus } from "./overlayFocus";
@@ -192,6 +194,9 @@
       formError = { field: "profile-name", message: savedSetups.saveError ?? "Couldn't save setup." };
       return;
     }
+    if (draft.id === null && PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("saved_profile_created");
+    }
     editingProfile = null;
     selectedId = entry.id;
   }
@@ -244,6 +249,9 @@
       formError = { field: "template-name", message: savedSetups.saveError ?? "Couldn't save setup." };
       return;
     }
+    if (draft.id === null && PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("saved_template_created");
+    }
     editingTemplate = null;
     selectedId = entry.id;
   }
@@ -253,6 +261,9 @@
     launchError = null;
     try {
       store.launchSavedWorkspace(instantiateProfile(entry));
+      if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+        posthog.capture("saved_setup_launched", { setup_type: "profile" });
+      }
       close();
     } catch (e) {
       launchError = e instanceof Error ? e.message : String(e);
@@ -264,6 +275,9 @@
     launchError = null;
     try {
       store.launchSavedWorkspace(instantiateTemplate(entry));
+      if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+        posthog.capture("saved_setup_launched", { setup_type: "template" });
+      }
       close();
     } catch (e) {
       launchError = e instanceof Error ? e.message : String(e);
@@ -669,7 +683,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     color: var(--text);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     overflow: hidden;
   }
   .dialog :focus-visible {
@@ -683,7 +697,7 @@
     padding: 10px 8px 10px 16px;
     border-bottom: 1px solid var(--border);
     color: var(--text-strong);
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-text-scale, 1));
     font-weight: 600;
   }
   .header button {
@@ -805,19 +819,19 @@
     padding: 5px 8px;
   }
   .mono {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .muted {
     color: var(--text-muted);
     margin: 0;
   }
   h2 {
-    font-size: 14px;
+    font-size: calc(14px * var(--ui-text-scale, 1));
     color: var(--text-strong);
     margin: 0;
   }
   h3 {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text-strong);
     margin: 8px 0 4px;
   }
@@ -844,7 +858,7 @@
   }
   pre {
     white-space: pre-wrap;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     background: var(--surface-bg);
     border: 1px solid var(--border);
     border-radius: 6px;

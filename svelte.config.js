@@ -12,6 +12,10 @@ const config = {
     adapter: adapter({
       fallback: "index.html",
     }),
+    paths: {
+      // Required for PostHog session replay to work correctly with SSR.
+      relative: false,
+    },
   },
 };
 

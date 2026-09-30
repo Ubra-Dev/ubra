@@ -213,7 +213,7 @@
     min-width: 0;
     background: var(--sidebar-bg);
     border-top: 1px solid var(--border);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     color: var(--text);
     user-select: none;
   }
