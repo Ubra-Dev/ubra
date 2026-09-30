@@ -307,20 +307,22 @@
         {/if}
       </button>
       <button
-        class="mini"
+        class="icon-btn"
         title="Pull (fast-forward only)"
+        aria-label="Pull (fast-forward only)"
         disabled={busy !== null}
         onclick={() => void runAction("pull", () => gitPull(root))}
       >
-        {busy === "pull" ? "…" : "Pull"}
+        <Icon name="download" size={13} />
       </button>
       <button
-        class="mini"
+        class="icon-btn"
         title="Push"
+        aria-label="Push"
         disabled={busy !== null}
         onclick={() => void runAction("push", () => gitPush(root))}
       >
-        {busy === "push" ? "…" : "Push"}
+        <Icon name="upload" size={13} />
       </button>
       <button
         class="icon-btn"
@@ -361,7 +363,7 @@
     {#if actionError}
       <div class="action-error" role="alert">
         <span>{actionError}</span>
-        <button class="icon-btn" aria-label="Dismiss error" onclick={() => (actionError = null)}>
+        <button class="icon-btn" title="Dismiss error" aria-label="Dismiss error" onclick={() => (actionError = null)}>
           <Icon name="x" size={12} />
         </button>
       </div>

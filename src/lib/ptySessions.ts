@@ -67,3 +67,13 @@ export function dropSession(key: string, lease: SessionLease): void {
     clearAttachResult(key);
   }
 }
+
+/**
+ * Unconditionally release a key's lease and cached attach result without
+ * touching the daemon. Restart uses this after closing retained state so a
+ * remount can never adopt a stale lease from a previous daemon lifetime.
+ */
+export function forgetSession(key: string): void {
+  sessions.delete(key);
+  clearAttachResult(key);
+}

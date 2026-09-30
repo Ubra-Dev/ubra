@@ -109,7 +109,13 @@ pub fn probe_daemon(state_dir: &std::path::Path) -> DaemonStatus {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     use io::{BufRead, BufReader, Write};
-    let hello = serde_json::json!({"op":"hello","id":0,"nonce":"00"}).to_string();
+    // The nonce must be well-formed: daemons reject malformed hellos with a
+    // bare `unauthorized` reply carrying no protocol version, which would
+    // make a live-but-incompatible daemon look absent.
+    let Ok(nonce) = crate::daemon::new_auth_token() else {
+        return DaemonStatus::Absent;
+    };
+    let hello = serde_json::json!({"op":"hello","id":0,"nonce":nonce}).to_string();
     if writeln!(stream, "{hello}").is_err() {
         return DaemonStatus::Absent;
     }
@@ -129,12 +135,15 @@ pub fn probe_daemon(state_dir: &std::path::Path) -> DaemonStatus {
     }
 }
 
-/// Human guidance for an incompatible daemon. Never stop sessions implicitly.
-pub fn incompatible_message(running: u32) -> String {
+/// Human guidance for an incompatible daemon. Neither the app nor the
+/// current CLI can authenticate to it, so stopping it is necessarily manual.
+/// Never stop sessions implicitly.
+pub fn incompatible_message(running: u32, state_dir: &std::path::Path) -> String {
     format!(
         "A Ubra daemon speaking protocol {running} is already running, but this app needs protocol {PROTOCOL_VERSION}. \
-        Quit it explicitly (Stop all terminals and quit, or `ubra-cli shutdown`) and relaunch to migrate; \
-        your saved layouts are preserved."
+        Stop the old daemon explicitly: its PID is in {}, e.g. `kill <pid>`, then relaunch this app. \
+        Your saved layouts are preserved; terminals owned by the old daemon cannot be reattached by this version.",
+        state_dir.join(crate::daemon::PORT_FILE).display()
     )
 }
 
@@ -153,7 +162,7 @@ pub fn launch_or_connect(state_dir: &std::path::Path) -> Result<TcpStream, Strin
     }
     let probe = probe_daemon(state_dir);
     if let DaemonStatus::Incompatible { protocol } = probe {
-        return Err(incompatible_message(protocol));
+        return Err(incompatible_message(protocol, state_dir));
     }
     // A current daemon answers but the first authentication missed (e.g. it
     // was mid-startup): poll it instead of spawning a redundant sibling that
@@ -180,7 +189,7 @@ pub fn launch_or_connect(state_dir: &std::path::Path) -> Result<TcpStream, Strin
             return Ok(stream);
         }
         if let DaemonStatus::Incompatible { protocol } = probe_daemon(state_dir) {
-            return Err(incompatible_message(protocol));
+            return Err(incompatible_message(protocol, state_dir));
         }
     }
     Err(format!(
@@ -195,10 +204,15 @@ mod tests {
 
     #[test]
     fn incompatible_message_names_both_protocols() {
-        let message = incompatible_message(2);
+        let dir = std::path::Path::new("/tmp/ubra-test-state");
+        let message = incompatible_message(2, dir);
         assert!(message.contains('2'));
         assert!(message.contains(&PROTOCOL_VERSION.to_string()));
-        assert!(message.contains("shutdown"));
+        // The current CLI cannot authenticate across the skew either, so the
+        // only working recovery is terminating the old daemon by PID.
+        assert!(message.contains("daemon.json"));
+        assert!(message.contains("kill <pid>"));
+        assert!(!message.contains("ubra-cli shutdown"));
     }
 
     #[test]
@@ -221,6 +235,83 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(probe_daemon(&dir), DaemonStatus::Absent);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fake daemon: answers one hello with `reply`, captures the hello line.
+    fn serve_once(
+        reply: String,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut hello = String::new();
+            reader.read_line(&mut hello).unwrap();
+            let _ = tx.send(hello);
+            let mut stream = stream;
+            let _ = writeln!(stream, "{reply}");
+        });
+        (addr, rx, handle)
+    }
+
+    fn scratch_state_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ubra-launch-probe-{}-{tag}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::daemon::secure_state_dir(&dir).unwrap();
+        dir
+    }
+
+    fn valid_nonce(nonce: &str) -> bool {
+        nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn probe_classifies_live_daemon_versions() {
+        for (reply, expected) in [
+            (
+                serde_json::json!({"protocol": 99, "nonce": "a".repeat(64)}).to_string(),
+                DaemonStatus::Incompatible { protocol: 99 },
+            ),
+            (
+                serde_json::json!({"protocol": PROTOCOL_VERSION, "nonce": "b".repeat(64)})
+                    .to_string(),
+                DaemonStatus::Current,
+            ),
+            (
+                serde_json::json!({"ok": false, "error": "unauthorized"}).to_string(),
+                DaemonStatus::Absent,
+            ),
+        ] {
+            let (addr, hello_rx, handle) = serve_once(reply);
+            let dir = scratch_state_dir("version");
+            crate::daemon::write_port_file(&dir, addr.port()).unwrap();
+            assert_eq!(probe_daemon(&dir), expected);
+            // The probe hello must carry a well-formed nonce, or real daemons
+            // answer `unauthorized` with no protocol and skew goes undetected.
+            let hello: serde_json::Value =
+                serde_json::from_str(&hello_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+                    .unwrap();
+            assert_eq!(hello["op"], "hello");
+            assert!(
+                hello["nonce"].as_str().is_some_and(valid_nonce),
+                "probe nonce must be 64 hex chars: {hello}"
+            );
+            handle.join().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
