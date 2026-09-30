@@ -60,14 +60,6 @@
           <Icon name="git-branch" size={13} />
           <span>Source Control</span>
         </button>
-        <button
-          class="collapse"
-          title="Hide right sidebar"
-          aria-label="Hide right sidebar"
-          onclick={() => store.setRightPanelOpen(false)}
-        >
-          <Icon name="x" size={12} />
-        </button>
       </div>
       <div class="body">
         {#if root}
@@ -157,10 +149,6 @@
   .tabs button.active {
     color: var(--text-strong);
     background: var(--surface-active);
-  }
-  .tabs .collapse {
-    margin-left: auto;
-    padding: 5px;
   }
   .body {
     display: flex;

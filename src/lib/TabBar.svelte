@@ -124,6 +124,26 @@
           <Icon name="plus" size={13} />
         </button>
       </div>
+      <button
+        class="toggle"
+        class:on={store.leftPanelOpen}
+        title={store.leftPanelOpen ? "Hide left sidebar" : "Show left sidebar"}
+        aria-label={store.leftPanelOpen ? "Hide left sidebar" : "Show left sidebar"}
+        aria-pressed={store.leftPanelOpen}
+        onclick={() => store.setLeftPanelOpen(!store.leftPanelOpen)}
+      >
+        <Icon name="sidebar-left" size={13} />
+      </button>
+      <button
+        class="toggle"
+        class:on={store.rightPanelOpen}
+        title={store.rightPanelOpen ? "Hide right sidebar" : "Show right sidebar"}
+        aria-label={store.rightPanelOpen ? "Hide right sidebar" : "Show right sidebar"}
+        aria-pressed={store.rightPanelOpen}
+        onclick={() => store.setRightPanelOpen(!store.rightPanelOpen)}
+      >
+        <Icon name="sidebar-right" size={13} />
+      </button>
     </div>
     {#if menu}
       <ContextMenu
@@ -228,6 +248,24 @@
   .add:hover {
     color: var(--text-strong);
     background: var(--surface-bg);
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 4px 6px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .toggle:hover {
+    color: var(--text-strong);
+    background: var(--surface-bg);
+  }
+  .toggle.on {
+    color: var(--accent);
   }
   .dot {
     flex: 0 0 auto;

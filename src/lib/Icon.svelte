@@ -31,7 +31,11 @@
     | "chevron-right"
     | "folder"
     | "file"
-    | "git-branch";
+    | "git-branch"
+    | "download"
+    | "upload"
+    | "sidebar-left"
+    | "sidebar-right";
 
   interface Props {
     name: IconName;
@@ -149,6 +153,20 @@
       '<circle cx="18" cy="6" r="3"/>' +
       '<circle cx="6" cy="18" r="3"/>' +
       '<path d="M18 9a9 9 0 0 1-9 9"/>',
+    download:
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+      '<polyline points="7 10 12 15 17 10"/>' +
+      '<line x1="12" y1="15" x2="12" y2="3"/>',
+    upload:
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+      '<polyline points="17 8 12 3 7 8"/>' +
+      '<line x1="12" y1="3" x2="12" y2="15"/>',
+    "sidebar-left":
+      '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>' +
+      '<line x1="9" y1="3" x2="9" y2="21"/>',
+    "sidebar-right":
+      '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>' +
+      '<line x1="15" y1="3" x2="15" y2="21"/>',
   };
 </script>
 

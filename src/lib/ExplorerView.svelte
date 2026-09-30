@@ -238,7 +238,7 @@
       disabled={picking}
       onclick={changeRoot}
     >
-      <Icon name="edit" size={13} />
+      <Icon name="folder" size={13} />
     </button>
   </div>
   <div class="tree" role="tree" aria-label="Workspace files">
