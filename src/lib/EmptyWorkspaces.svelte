@@ -73,7 +73,7 @@
   .primary {
     border-color: var(--accent);
     background: var(--accent);
-    color: var(--app-bg);
+    color: var(--on-accent);
     font-weight: 650;
   }
   .primary:hover {

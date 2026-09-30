@@ -353,7 +353,7 @@
   >
     <div class="header">
       <span>Settings</span>
-      <button onclick={close} aria-label="Close settings">
+      <button onclick={close} title="Close settings" aria-label="Close settings">
         <Icon name="x" size={14} />
       </button>
     </div>
@@ -488,6 +488,7 @@
                       <button
                         onclick={() => store.bumpUiScale(-1)}
                         disabled={store.uiScale <= MIN_UI_SCALE}
+                        title="Smaller interface text"
                         aria-label="Smaller interface text"
                       >
                         &minus;
@@ -495,6 +496,7 @@
                       <button
                         onclick={() => store.bumpUiScale(1)}
                         disabled={store.uiScale >= MAX_UI_SCALE}
+                        title="Bigger interface text"
                         aria-label="Bigger interface text"
                       >
                         +
@@ -522,6 +524,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(-1)}
                         disabled={store.termFontSize <= MIN_TERM_FONT_SIZE}
+                        title="Smaller terminal font"
                         aria-label="Smaller terminal font"
                       >
                         &minus;
@@ -529,6 +532,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(1)}
                         disabled={store.termFontSize >= MAX_TERM_FONT_SIZE}
+                        title="Bigger terminal font"
                         aria-label="Bigger terminal font"
                       >
                         +

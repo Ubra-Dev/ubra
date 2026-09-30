@@ -353,7 +353,7 @@
   >
     <div class="header">
       <span>Saved Setups</span>
-      <button onclick={close} aria-label="Close Saved Setups">✕</button>
+      <button onclick={close} title="Close Saved Setups" aria-label="Close Saved Setups">✕</button>
     </div>
 
     {#if !library && savedSetups.loadError}

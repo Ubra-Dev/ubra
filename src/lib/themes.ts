@@ -16,6 +16,7 @@ export interface UiColors {
   textSubtle: string;
   accent: string;
   accentHover: string;
+  onAccent: string;
   inputBg: string;
   inputBorder: string;
   agentText: string;
@@ -105,6 +106,29 @@ function mixHexColors(first: string, second: string, amount: number): string {
     .join("")}`;
 }
 
+function relativeLuminance(color: string): number {
+  const value = Number.parseInt(color.slice(1), 16);
+  const channel = (shift: number) => {
+    const component = ((value >> shift) & 0xff) / 255;
+    return component <= 0.03928
+      ? component / 12.92
+      : Math.pow((component + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+}
+
+/**
+ * Readable foreground for accent-filled buttons: whichever of white or
+ * near-black contrasts more with the accent. Accents range from pale
+ * lavender to deep blue across themes, so no single static token works.
+ */
+export function onAccentFor(accent: string, dark = "#1e1e1e"): string {
+  const luminance = relativeLuminance(accent);
+  const whiteContrast = 1.05 / (luminance + 0.05);
+  const darkContrast = (luminance + 0.05) / (relativeLuminance(dark) + 0.05);
+  return darkContrast > whiteContrast ? dark : "#ffffff";
+}
+
 function makeUbraTheme(name: string, palette: UbraPalette): ThemeDefinition {
   const { scheme, background, sidebar, active, selection, surface, surfaceHover,
     separator, text, subtext, muted, subtle, accent, red, green, yellow, blue,
@@ -154,6 +178,7 @@ function makeUbraTheme(name: string, palette: UbraPalette): ThemeDefinition {
       textSubtle: subtle,
       accent,
       accentHover: brighten(accent),
+      onAccent: onAccentFor(accent),
       inputBg: scheme === "dark" ? sidebar : brighten(background),
       inputBorder: accent,
       agentText: cyan,
@@ -195,6 +220,7 @@ export const THEMES = {
       textSubtle: "#666",
       accent: "#0e639c",
       accentHover: "#1177bb",
+      onAccent: "#ffffff",
       inputBg: "#1e1e1e",
       inputBorder: "#0e639c",
       agentText: "#9cdcfe",
@@ -253,6 +279,7 @@ export const THEMES = {
       textSubtle: "#8b92ad",
       accent: "#bd93f9",
       accentHover: "#d6acff",
+      onAccent: "#1e1e1e",
       inputBg: "#21222c",
       inputBorder: "#bd93f9",
       agentText: "#8be9fd",
@@ -311,6 +338,7 @@ export const THEMES = {
       textSubtle: "#8792a3",
       accent: "#88c0d0",
       accentHover: "#8fbcbb",
+      onAccent: "#1e1e1e",
       inputBg: "#272d38",
       inputBorder: "#88c0d0",
       agentText: "#8fbcbb",
@@ -378,6 +406,7 @@ export const THEMES = {
       textSubtle: "#6e7781",
       accent: "#0969da",
       accentHover: "#0550ae",
+      onAccent: "#ffffff",
       inputBg: "#ffffff",
       inputBorder: "#0969da",
       agentText: "#0550ae",

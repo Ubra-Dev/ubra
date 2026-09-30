@@ -535,7 +535,7 @@
     border: 1px solid var(--accent);
     border-radius: 6px;
     background: var(--accent);
-    color: var(--app-bg);
+    color: var(--on-accent);
     font: inherit;
     font-weight: 650;
     cursor: pointer;

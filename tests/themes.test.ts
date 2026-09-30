@@ -5,9 +5,26 @@ import {
   THEMES,
   THEME_IDS,
   isThemeId,
+  onAccentFor,
   themeStyle,
   withAlpha,
 } from "../src/lib/themes.ts";
+
+function luminance(hex: string): number {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const channel = (shift: number) => {
+    const component = ((value >> shift) & 0xff) / 255;
+    return component <= 0.03928
+      ? component / 12.92
+      : Math.pow((component + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+}
+
+function contrastRatio(first: string, second: string): number {
+  const [lighter, darker] = [luminance(first), luminance(second)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
 const builtInThemeIds = [
   "catppuccin",
@@ -47,6 +64,28 @@ describe("theme catalog", () => {
       assert.ok(theme.ui.separator);
       assert.ok(theme.ui.accent);
       assert.ok(themeStyle(theme).includes(`--terminal-background:${theme.terminal.background}`));
+    }
+  });
+
+  it("picks the higher-contrast on-accent foreground", () => {
+    assert.equal(onAccentFor("#0e639c"), "#ffffff");
+    assert.equal(onAccentFor("#bd93f9"), "#1e1e1e");
+    assert.equal(onAccentFor("#88c0d0"), "#1e1e1e");
+    assert.equal(onAccentFor("#0969da"), "#ffffff");
+  });
+
+  it("keeps accent-filled button text readable on every theme", () => {
+    for (const id of THEME_IDS) {
+      const theme = THEMES[id];
+      const ratio = contrastRatio(theme.ui.accent, theme.ui.onAccent);
+      assert.ok(
+        ratio >= 4,
+        `${id} on-accent contrast too low: ${ratio.toFixed(2)}`,
+      );
+      assert.ok(
+        themeStyle(theme).includes(`--on-accent:${theme.ui.onAccent}`),
+        `${id} is missing --on-accent`,
+      );
     }
   });
 });

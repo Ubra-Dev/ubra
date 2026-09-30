@@ -95,6 +95,7 @@ class AppStore {
   saveError = $state<string | null>(null);
   rightPanelOpen = $state(true);
   rightPanelView = $state<RightPanelView>("explorer");
+  leftPanelOpen = $state(true);
   /** True while a layout save is scheduled or in flight. */
   saving = $state(false);
   recoveryRequired = $state(false);
@@ -218,6 +219,8 @@ class AppStore {
       if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
       const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
       if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
+      const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
+      if (savedLeftOpen !== null) this.leftPanelOpen = savedLeftOpen !== "false";
       const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
       if (savedPanelView === "explorer" || savedPanelView === "source-control") {
         this.rightPanelView = savedPanelView;
@@ -510,6 +513,11 @@ class AppStore {
   setRightPanelOpen(open: boolean): void {
     this.rightPanelOpen = open;
     this.savePref("ubra.rightPanelOpen", String(open));
+  }
+
+  setLeftPanelOpen(open: boolean): void {
+    this.leftPanelOpen = open;
+    this.savePref("ubra.leftPanelOpen", String(open));
   }
 
   setRightPanelView(view: RightPanelView): void {
