@@ -318,6 +318,11 @@ fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
 }
 
 #[tauri::command]
+fn supported_usage_clis() -> Vec<usage::SupportedCli> {
+    usage::supported_clis()
+}
+
+#[tauri::command]
 async fn cli_usage(
     cache: State<'_, usage::UsageCache>,
     cli: String,
@@ -728,6 +733,7 @@ pub fn run() {
             integrations_install,
             integrations_remove,
             detect_agent_clis,
+            supported_usage_clis,
             cli_usage,
             git_branch,
             load_layout,

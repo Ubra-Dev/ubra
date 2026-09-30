@@ -37,7 +37,12 @@
   } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
-  import { formatResetCountdown, formatUpdatedAgo } from "./usage";
+  import {
+    formatResetCountdown,
+    formatUpdatedAgo,
+    joinLabels,
+    selectUsageClis,
+  } from "./usage";
   import { usage } from "./usage.svelte";
 
   type SectionId =
@@ -183,7 +188,12 @@
     if (section !== "usage") return;
     const detected = agentClis.clis;
     if (!detected) return;
-    usage.refreshAll(detected.map((entry) => entry.cli));
+    void (async () => {
+      const supported = await usage.ensureSupported();
+      usage.refreshAll(
+        selectUsageClis(detected, supported).map((entry) => entry.cli),
+      );
+    })();
   });
 
 
@@ -889,7 +899,7 @@
                 height="724"
               />
               <div class="about">
-                {appName}{#if appVersion} v{appVersion}{/if}
+                {appVersion ? `${appName} v${appVersion}` : appName}
               </div>
               <div class="about-sub">Agent runtime desktop app</div>
               <div class="links">
@@ -1015,12 +1025,18 @@
         {:else if section === "usage"}
           <section aria-label="Usage">
             <h2>Usage</h2>
-            {#if agentClis.clis === null}
+            {#if agentClis.clis === null || usage.supported === null}
               <div class="hint">Detecting installed agents…</div>
-            {:else if agentClis.clis.length === 0}
-              <div class="hint">No agent CLIs detected.</div>
             {:else}
-              {#each agentClis.clis as entry (entry.cli)}
+              {@const showable = selectUsageClis(agentClis.clis, usage.supported)}
+              {#if showable.length === 0}
+                <div class="hint">
+                  No supported plan usage found. Usage is available for {joinLabels(
+                    usage.supported.map((entry) => entry.label),
+                  )}.
+                </div>
+              {:else}
+                {#each showable as entry (entry.cli)}
                 {@const snap = usage.entries[entry.cli]}
                 {@const busy = usage.loading[entry.cli] === true}
                 <div class="group">
@@ -1078,7 +1094,8 @@
                     {/if}
                   </div>
                 </div>
-              {/each}
+                {/each}
+              {/if}
             {/if}
           </section>
         {/if}
@@ -1111,7 +1128,7 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     color: var(--text);
     overflow: hidden;
     outline: none;
@@ -1127,7 +1144,7 @@
     padding: 10px 8px 10px 16px;
     border-bottom: 1px solid var(--border);
     color: var(--text-strong);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
     font-weight: 600;
   }
   .header button {
@@ -1188,7 +1205,7 @@
     overflow-y: auto;
   }
   h2 {
-    font-size: 20px;
+    font-size: calc(20px * var(--ui-text-scale, 1));
     font-weight: 700;
     letter-spacing: -0.011em;
     color: var(--text-strong);
@@ -1203,7 +1220,7 @@
     margin-bottom: 0;
   }
   .group-label {
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
     font-weight: 600;
     color: var(--text-strong);
     margin: 0 14px 6px;
@@ -1239,7 +1256,7 @@
   }
   .usage-value {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     white-space: nowrap;
   }
   .usage-bar {
@@ -1409,7 +1426,7 @@
   }
   .btn-sm {
     padding: 2px 10px;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
   }
   .btn.danger {
     border-color: var(--danger, #b3261e);
@@ -1448,15 +1465,15 @@
     text-overflow: ellipsis;
     text-align: right;
     color: var(--text-muted);
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: calc(11px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .hint {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     color: var(--text-muted);
     padding: 2px 0 4px;
   }
   .hint.intro {
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text);
     margin: 0 0 12px;
     padding: 0;
@@ -1530,7 +1547,7 @@
     border-radius: 50%;
   }
   .swatch-name {
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     text-align: center;
     white-space: nowrap;
     overflow: hidden;
@@ -1585,20 +1602,20 @@
   .font-sample {
     flex: 0 0 auto;
     width: 26px;
-    font-size: 15px;
+    font-size: calc(15px * var(--ui-text-scale, 1));
     font-weight: 600;
     color: var(--text-strong);
   }
   .font-name {
     flex: 1;
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .font-category {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     color: var(--text-muted);
   }
   .font-option.applying .font-category {
@@ -1607,15 +1624,15 @@
   .font-empty {
     padding: 10px;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     text-align: center;
   }
   kbd {
     display: inline-block;
     min-width: 110px;
     text-align: center;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 11px;
+    font-family: var(--font-ui);
+    font-size: calc(11px * var(--ui-text-scale, 1));
     color: var(--text-strong);
     background: var(--surface-bg);
     border: 1px solid var(--border);
@@ -1629,7 +1646,7 @@
   }
   .about {
     color: var(--text-strong);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
   }
   .about-logo {
     display: block;

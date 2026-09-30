@@ -117,7 +117,7 @@
     overflow: hidden;
     background: var(--sidebar-bg);
     border-left: 1px solid var(--border);
-    font: 12px system-ui, sans-serif;
+    font: calc(12px * var(--ui-text-scale, 1)) system-ui, sans-serif;
     color: var(--text);
     user-select: none;
   }
@@ -131,6 +131,8 @@
   }
   .tabs button {
     display: inline-flex;
+    flex: 1 1 auto;
+    min-width: 0;
     align-items: center;
     gap: 6px;
     background: transparent;
@@ -141,6 +143,11 @@
     padding: 5px 8px;
     cursor: pointer;
     white-space: nowrap;
+  }
+  .tabs button span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tabs button:hover {
     color: var(--text-strong);
@@ -183,7 +190,7 @@
   }
   .empty .error {
     color: var(--danger, #f87171);
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
   }
   .rail {
     display: flex;

@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { formatResetCountdown, formatUpdatedAgo } from "../src/lib/usage.ts";
+import {
+  formatResetCountdown,
+  formatUpdatedAgo,
+  joinLabels,
+  selectUsageClis,
+} from "../src/lib/usage.ts";
 
 const NOW = 1790743269;
 
@@ -24,6 +29,45 @@ describe("formatResetCountdown", () => {
   it("reports resetting for past timestamps", () => {
     assert.equal(formatResetCountdown(NOW, NOW), "resetting…");
     assert.equal(formatResetCountdown(NOW - 10, NOW), "resetting…");
+  });
+});
+
+describe("selectUsageClis", () => {
+  const supported = [
+    { cli: "codex", label: "Codex" },
+    { cli: "claude", label: "Claude Code" },
+  ];
+
+  it("keeps detected entries with a provider, in order", () => {
+    const detected = [
+      { cli: "opencode", label: "OpenCode", path: "/bin/opencode" },
+      { cli: "codex", label: "Codex", path: "/bin/codex" },
+      { cli: "claude", label: "Claude Code", path: "/bin/claude" },
+    ];
+    assert.deepEqual(
+      selectUsageClis(detected, supported).map((entry) => entry.cli),
+      ["codex", "claude"],
+    );
+  });
+
+  it("returns empty without overlap", () => {
+    assert.deepEqual(selectUsageClis([], supported), []);
+    assert.deepEqual(
+      selectUsageClis([{ cli: "opencode" }], supported),
+      [],
+    );
+  });
+});
+
+describe("joinLabels", () => {
+  it("joins one, two, and many labels", () => {
+    assert.equal(joinLabels([]), "");
+    assert.equal(joinLabels(["Codex"]), "Codex");
+    assert.equal(joinLabels(["Codex", "Claude Code"]), "Codex and Claude Code");
+    assert.equal(
+      joinLabels(["Codex", "Claude Code", "Gemini CLI"]),
+      "Codex, Claude Code, and Gemini CLI",
+    );
   });
 });
 

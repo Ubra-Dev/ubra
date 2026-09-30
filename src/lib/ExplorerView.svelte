@@ -314,7 +314,7 @@
     flex-direction: column;
     min-height: 0;
     flex: 1 1 auto;
-    font: 12px system-ui, sans-serif;
+    font: calc(12px * var(--ui-text-scale, 1)) system-ui, sans-serif;
     color: var(--text);
   }
   .head {
@@ -429,7 +429,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     font: inherit;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     padding: 1px 8px;
     cursor: pointer;
   }
