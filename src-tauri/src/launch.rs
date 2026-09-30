@@ -138,23 +138,36 @@ pub fn incompatible_message(running: u32) -> String {
     )
 }
 
+/// Whether a fresh daemon should be spawned for a probe outcome. A daemon
+/// that already answers holds the startup lock, so spawning would only add
+/// an "already running" sibling that exits immediately.
+fn should_spawn(status: &DaemonStatus) -> bool {
+    matches!(status, DaemonStatus::Absent)
+}
+
 /// Connect, starting a detached daemon first when none answers. Fails with
 /// restart instructions when an incompatible daemon holds the state dir.
 pub fn launch_or_connect(state_dir: &std::path::Path) -> Result<TcpStream, String> {
     if let Ok(stream) = connect_authenticated(state_dir, Duration::from_millis(500)) {
         return Ok(stream);
     }
-    if let DaemonStatus::Incompatible { protocol } = probe_daemon(state_dir) {
+    let probe = probe_daemon(state_dir);
+    if let DaemonStatus::Incompatible { protocol } = probe {
         return Err(incompatible_message(protocol));
     }
-    let log = crate::daemon::open_private_file(&state_dir.join("daemon.log"), true, true)
-        .map_err(|e| format!("cannot open private daemon log: {e}"))?;
-    spawn_detached(
-        &daemon_binary(),
-        &["--state-dir", &state_dir.to_string_lossy()],
-        log,
-    )
-    .map_err(|e| format!("cannot start ubra-daemon: {e}"))?;
+    // A current daemon answers but the first authentication missed (e.g. it
+    // was mid-startup): poll it instead of spawning a redundant sibling that
+    // would only exit "already running".
+    if should_spawn(&probe) {
+        let log = crate::daemon::open_private_file(&state_dir.join("daemon.log"), true, true)
+            .map_err(|e| format!("cannot open private daemon log: {e}"))?;
+        spawn_detached(
+            &daemon_binary(),
+            &["--state-dir", &state_dir.to_string_lossy()],
+            log,
+        )
+        .map_err(|e| format!("cannot start ubra-daemon: {e}"))?;
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -186,6 +199,13 @@ mod tests {
         assert!(message.contains('2'));
         assert!(message.contains(&PROTOCOL_VERSION.to_string()));
         assert!(message.contains("shutdown"));
+    }
+
+    #[test]
+    fn spawns_only_when_absent() {
+        assert!(should_spawn(&DaemonStatus::Absent));
+        assert!(!should_spawn(&DaemonStatus::Current));
+        assert!(!should_spawn(&DaemonStatus::Incompatible { protocol: 2 }));
     }
 
     #[test]

@@ -29,6 +29,7 @@
     TerminalAttachment,
     fetchReplay,
     fetchSnapshot,
+    snapshotFailurePlan,
     type AttachResult,
     type DaemonStatus,
     type TerminalExit,
@@ -279,11 +280,16 @@
       retryAction = retry;
     };
 
-    const retryAttach = (): void => {
+    let snapshotFailures = 0;
+
+    const reattach = (fresh: boolean): void => {
       if (lease) dropSession(sessionKey, lease);
       lease = null;
+      paneId = null;
+      exited = false;
       unavailable = null;
       notice = null;
+      if (fresh) snapshotFailures = 0;
       attachment = new TerminalAttachment();
       term.clear();
       generation += 1;
@@ -336,11 +342,19 @@
         snapshot = await fetchSnapshot(id, result.epoch, result.incarnation);
       } catch (error) {
         if (disposed || gen !== generation) return;
+        // Stale identity or transport loss between attach and snapshot: the
+        // daemon was replaced under us. Re-resolve instead of faking an exit.
+        snapshotFailures += 1;
+        if (snapshotFailurePlan(snapshotFailures) === "retry") {
+          reattach(false);
+          return;
+        }
         term.write(`\r\n[snapshot unavailable: ${String(error)}]\r\n`);
-        handleExit(false, null);
+        showUnavailable(`snapshot unavailable: ${String(error)}`, () => reattach(true));
         return;
       }
       if (disposed || gen !== generation) return;
+      snapshotFailures = 0;
       paneId = id;
       if (result.attached === "exited") {
         // Retained final screen of a naturally exited session.
@@ -361,7 +375,7 @@
           notice = null;
           invoke("pty_close", { key: sessionKey })
             .catch((error) => console.error(error))
-            .finally(() => retryAttach());
+            .finally(() => reattach(true));
         };
         term.write(`\r\n[${result.note}]\r\n`);
       }
@@ -380,7 +394,7 @@
       }
       if (disposed || gen !== generation) return;
       term.write(`\r\n[${message}]\r\n`);
-      showUnavailable(message, retryAttach);
+      showUnavailable(message, () => reattach(true));
     };
 
     const attachFlow = async (gen: number): Promise<void> => {
@@ -401,19 +415,6 @@
           );
         }
       }
-    };
-
-    const reattach = (): void => {
-      if (lease) dropSession(sessionKey, lease);
-      lease = null;
-      paneId = null;
-      exited = false;
-      unavailable = null;
-      notice = null;
-      attachment = new TerminalAttachment();
-      term.clear();
-      generation += 1;
-      void attachFlow(generation);
     };
 
     (async () => {
@@ -447,7 +448,10 @@
         const status = event.payload;
         connected = status.connected;
         disconnected = !status.connected;
-        if (status.connected && status.reconnected) reattach();
+        // Reconnected daemons renumbered everything; panes stuck showing
+        // unavailable also retry here, covering first connects that landed
+        // after their initial attach failed.
+        if (status.connected && (status.reconnected || unavailable)) reattach(true);
       });
       if (disposed) {
         daemonUnlisten();
