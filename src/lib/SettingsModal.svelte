@@ -4,6 +4,9 @@
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
@@ -37,6 +40,13 @@
   } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
+  import {
+    formatResetCountdown,
+    formatUpdatedAgo,
+    joinLabels,
+    selectUsageClis,
+  } from "./usage";
+  import { usage } from "./usage.svelte";
   import { updater } from "./updater.svelte";
 
   type SectionId =
@@ -44,7 +54,8 @@
     | "alerts"
     | "shortcuts"
     | "app"
-    | "workspace";
+    | "workspace"
+    | "usage";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
@@ -52,6 +63,7 @@
     { id: "shortcuts", label: "Shortcuts", icon: "command" },
     { id: "app", label: "App", icon: "info" },
     { id: "workspace", label: "Workspace", icon: "layers" },
+    { id: "usage", label: "Usage", icon: "activity" },
   ];
 
   let section = $state<SectionId>("app");
@@ -59,6 +71,10 @@
   let autostart = $state(false);
   let autostartLoaded = $state(false);
   let autostartError = $state<string | null>(null);
+  let telemetrySupported = $state(false);
+  let telemetryConsented = $state(false);
+  let telemetryLoaded = $state(false);
+  let telemetryError = $state<string | null>(null);
   let appName = $state("Ubra");
   let appVersion = $state("");
   let soundFile = $state(store.soundFile);
@@ -100,6 +116,13 @@
         autostartLoaded = true;
       })
       .catch((e) => console.error("ubra: autostart check failed", e));
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+        telemetryConsented = status.consented;
+        telemetryLoaded = true;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
     invoke<{ name: string; version: string }>("app_info")
       .then((info) => {
         appName = info.name;
@@ -128,6 +151,17 @@
     cliDraftReady = true;
   });
 
+  // Load usage providers when the section opens; refresh only supported CLIs.
+  $effect(() => {
+    if (section !== "usage") return;
+    const detected = agentClis.clis;
+    if (detected === null) return;
+    void (async () => {
+      const supported = await usage.ensureSupported();
+      usage.refreshAll(selectUsageClis(detected, supported).map((entry) => entry.cli));
+    })();
+  });
+
 
   function onAutostartChange(e: Event): void {
     const checked = (e.target as HTMLInputElement).checked;
@@ -140,10 +174,23 @@
     });
   }
 
-  function onDefaultCliSelect(e: Event): void {
+  async function onTelemetryChange(e: Event): Promise<void> {
+    const checked = (e.target as HTMLInputElement).checked;
+    telemetryError = null;
+    try {
+      await applyTelemetryConsent(checked);
+      telemetryConsented = checked;
+    } catch (err) {
+      console.error("ubra: telemetry consent failed", err);
+      telemetryConsented = !checked;
+      telemetryError = "Couldn't update the telemetry preference; reverted.";
+    }
+  }
+
+  function onDefaultCliSelect(picked: string): void {
     const ws = store.workspace();
     if (!ws) return;
-    const value = (e.target as HTMLSelectElement).value;
+    const value = picked;
     cliSelection = value;
     if (value === CUSTOM_COMMAND) {
       store.setWorkspaceDefaultCli(ws.id, cliCustom || null);
@@ -294,7 +341,7 @@
   >
     <div class="header">
       <span>Settings</span>
-      <button onclick={close} aria-label="Close settings">
+      <button onclick={close} title="Close settings" aria-label="Close settings">
         <Icon name="x" size={14} />
       </button>
     </div>
@@ -429,6 +476,7 @@
                       <button
                         onclick={() => store.bumpUiScale(-1)}
                         disabled={store.uiScale <= MIN_UI_SCALE}
+                        title="Smaller interface text"
                         aria-label="Smaller interface text"
                       >
                         &minus;
@@ -436,6 +484,7 @@
                       <button
                         onclick={() => store.bumpUiScale(1)}
                         disabled={store.uiScale >= MAX_UI_SCALE}
+                        title="Bigger interface text"
                         aria-label="Bigger interface text"
                       >
                         +
@@ -463,6 +512,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(-1)}
                         disabled={store.termFontSize <= MIN_TERM_FONT_SIZE}
+                        title="Smaller terminal font"
                         aria-label="Smaller terminal font"
                       >
                         &minus;
@@ -470,6 +520,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(1)}
                         disabled={store.termFontSize >= MAX_TERM_FONT_SIZE}
+                        title="Bigger terminal font"
                         aria-label="Bigger terminal font"
                       >
                         +
@@ -771,6 +822,34 @@
                 </div>
               </div>
             </div>
+            {#if telemetrySupported}
+              <div class="group">
+                <h3 class="group-label">Telemetry</h3>
+                <div class="card">
+                  <label class="row switch">
+                    <span class="label">Share anonymous usage and crash reports</span>
+                    <input
+                      type="checkbox"
+                      checked={telemetryConsented}
+                      disabled={!telemetryLoaded}
+                      onchange={onTelemetryChange}
+                    />
+                    <span class="track" aria-hidden="true">
+                      <span class="thumb"></span>
+                    </span>
+                  </label>
+                  {#if telemetryError}
+                    <div class="hint error-hint" role="alert">
+                      {telemetryError}
+                    </div>
+                  {/if}
+                </div>
+                <div class="hint">
+                  Helps improve Ubra. Anonymous events and crash reports only —
+                  never code, file paths, or commands. Takes effect immediately.
+                </div>
+              </div>
+            {/if}
             <div class="group about-block">
               <img
                 class="about-logo"
@@ -829,23 +908,13 @@
                   {:else}
                     <label class="row">
                       <span class="label">Default agent CLI</span>
-                      <span class="select-wrap">
-                        <select
-                          value={cliSelection}
-                          onchange={onDefaultCliSelect}
-                          aria-label="Default agent CLI"
-                        >
-                          <option value="">None (plain shells)</option>
-                          {#each agentClis.clis as entry (entry.cli)}
-                            <option value={entry.cli} title={entry.path}>
-                              {entry.label} · {entry.cli}
-                            </option>
-                          {/each}
-                          <option value={CUSTOM_COMMAND}>
-                            Custom command…
-                          </option>
-                        </select>
-                      </span>
+                      <AgentCliSelect
+                        entries={agentClis.clis}
+                        bind:value={cliSelection}
+                        noneLabel="None (plain shells)"
+                        ariaLabel="Default agent CLI"
+                        onChange={onDefaultCliSelect}
+                      />
                     </label>
                     {#if cliSelection === CUSTOM_COMMAND}
                       <label class="row">
@@ -901,6 +970,90 @@
               </div>
             {:else}
               <div class="hint">No workspace open.</div>
+            {/if}
+          </section>
+        {:else if section === "usage"}
+          <section aria-label="Usage">
+            <h2>Usage</h2>
+            {#if agentClis.clis === null || usage.supported === null}
+              <div class="hint">Loading supported usage providers…</div>
+            {:else}
+              {@const showable = selectUsageClis(agentClis.clis, usage.supported)}
+              {#if showable.length === 0}
+                <div class="hint">
+                  Plan usage is available for {joinLabels(
+                    usage.supported.map((entry) => entry.label),
+                  )}. Sign in with a supported CLI to view it.
+                </div>
+              {:else}
+                {#each showable as entry (entry.cli)}
+                  {@const snap = usage.entries[entry.cli]}
+                  {@const busy = usage.loading[entry.cli] === true}
+                  <div class="group">
+                    <h3 class="group-label">{entry.label}</h3>
+                    <div class="card" aria-busy={busy}>
+                      <div class="row">
+                        <span class="folder-value" title={entry.path}>
+                          {entry.path}
+                        </span>
+                        <button
+                          class="btn btn-sm"
+                          onclick={() => usage.refresh(entry.cli)}
+                          disabled={busy}
+                        >
+                          <Icon name="refresh" size={12} />
+                          <span>{busy ? "Loading…" : "Refresh"}</span>
+                        </button>
+                      </div>
+                      {#if !snap}
+                        <div class="hint">Loading usage…</div>
+                      {:else if snap.status === "ready" && snap.snapshot}
+                        {@const shot = snap.snapshot}
+                        {#each shot.windows as window (window.label)}
+                          <div class="usage-window">
+                            <div class="usage-head">
+                              <span class="label">{window.label}</span>
+                              <span class="usage-value">
+                                {#if window.percentUsed !== undefined}
+                                  {window.percentUsed.toFixed(0)}% used
+                                {/if}
+                                {#if window.percentUsed !== undefined && window.resetsAt !== undefined}
+                                  ·
+                                {/if}
+                                {#if window.resetsAt !== undefined}
+                                  resets {formatResetCountdown(window.resetsAt)}
+                                {/if}
+                              </span>
+                            </div>
+                            {#if window.percentUsed !== undefined}
+                              <div
+                                class="usage-bar"
+                                role="progressbar"
+                                aria-label={window.label}
+                                aria-valuenow={Math.round(window.percentUsed)}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                              >
+                                <span
+                                  style={`width:${Math.min(100, window.percentUsed)}%`}
+                                ></span>
+                              </div>
+                            {/if}
+                          </div>
+                        {/each}
+                        <div class="hint">
+                          {shot.source}{#if shot.plan} · {shot.plan}{/if} · Updated
+                          {formatUpdatedAgo(shot.fetchedAt)}
+                        </div>
+                      {:else}
+                        <div class="hint">
+                          {snap.message ?? "Usage unavailable."}
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              {/if}
             {/if}
           </section>
         {/if}
@@ -1042,6 +1195,40 @@
   .card > .row + .row,
   .card > .hint + .row {
     border-top: 1px solid var(--separator);
+  }
+  .card > .row + .usage-window,
+  .card > .usage-window + .usage-window {
+    border-top: 1px solid var(--separator);
+  }
+  .usage-window {
+    padding: 8px 0;
+  }
+  .usage-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .usage-head .label {
+    flex: 1;
+  }
+  .usage-value {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .usage-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-active);
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .usage-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
   }
   .row {
     display: flex;

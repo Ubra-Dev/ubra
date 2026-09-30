@@ -24,6 +24,7 @@ import {
   isActiveAgentState,
   moveWorkspace,
   resizePaneInTab,
+  resolveWorkspaceRoot,
   MAX_LAYOUT_BYTES,
   MAX_LAYOUT_DEPTH,
   MAX_LAYOUT_ENTITIES,
@@ -877,5 +878,68 @@ describe("findWorkspaceByRoot", () => {
     assert.equal(findWorkspaceByRoot([a, b], "/repo/web/")?.id, a.id);
     assert.equal(findWorkspaceByRoot([a, b], "/repo/other"), null);
     assert.equal(findWorkspaceByRoot([a, b], ""), null);
+  });
+
+  it("matches an explicit Explorer root", () => {
+    const a = defaultWorkspace("A");
+    a.root = "/repo/extra";
+    assert.equal(findWorkspaceByRoot([a], "/repo/extra/"), a);
+  });
+});
+
+describe("workspace root", () => {
+  it("round-trips an explicit root through sanitize", () => {
+    const layout = defaultLayout();
+    layout.workspaces[0].root = "/repo/web";
+    const loaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    assert.equal(loaded.workspaces[0].root, "/repo/web");
+  });
+
+  it("keeps legacy documents without a root loadable", () => {
+    const loaded = sanitizeLayout(JSON.parse(JSON.stringify(defaultLayout())));
+    assert.equal(loaded.workspaces[0].root, undefined);
+  });
+
+  it("rejects a non-string root", () => {
+    const raw = JSON.parse(JSON.stringify(defaultLayout()));
+    raw.workspaces[0].root = 42;
+    assert.throws(() => sanitizeLayout(raw), /workspace root/);
+  });
+});
+
+describe("resolveWorkspaceRoot", () => {
+  it("prefers the explicit root and current folder-workspace default", () => {
+    const ws = defaultWorkspace("web");
+    const root = ws.tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    root.cwd = "/pane/cwd";
+    ws.defaultCwd = "/repo/default";
+    ws.root = "/repo/explicit";
+    assert.equal(resolveWorkspaceRoot(ws, root.id), "/repo/explicit");
+    delete ws.root;
+    assert.equal(resolveWorkspaceRoot(ws, root.id), "/repo/default");
+  });
+
+  it("falls back to the active pane cwd, then the first cwd in the tab", () => {
+    const ws = defaultWorkspace("web");
+    const tab = ws.tabs[0];
+    assert.equal(tab.root.kind, "pane");
+    if (tab.root.kind !== "pane") throw new Error("Expected pane");
+    tab.root.cwd = "/repo/web";
+    assert.equal(resolveWorkspaceRoot(ws, tab.root.id), "/repo/web");
+    assert.equal(resolveWorkspaceRoot(ws, "missing-pane"), "/repo/web");
+    assert.equal(resolveWorkspaceRoot(ws), "/repo/web");
+  });
+
+  it("treats empty values as unset", () => {
+    const ws = defaultWorkspace("web");
+    ws.root = "";
+    ws.defaultCwd = "";
+    const root = ws.tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    root.cwd = "";
+    assert.equal(resolveWorkspaceRoot(ws, root.id), undefined);
   });
 });

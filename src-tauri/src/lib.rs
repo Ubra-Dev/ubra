@@ -3,13 +3,17 @@ pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
 pub mod daemon;
+pub mod files;
+pub mod git;
 pub mod git_branch;
 pub mod layout_store;
 mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
 pub mod sound;
+pub mod telemetry;
 mod terminal_state;
+pub mod usage;
 
 use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
@@ -90,6 +94,20 @@ fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
 }
 
 #[tauri::command]
+fn supported_usage_clis() -> Vec<usage::SupportedCli> {
+    usage::supported_clis()
+}
+
+#[tauri::command]
+async fn cli_usage(
+    cache: State<'_, usage::UsageCache>,
+    cli: String,
+    force: bool,
+) -> Result<usage::CliUsage, String> {
+    Ok(cache.usage(&cli, force).await)
+}
+
+#[tauri::command]
 fn load_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     load_layout_from(&dir).map_err(|e| e.to_string())
@@ -135,6 +153,71 @@ fn export_saved_setups(app: AppHandle) -> Result<String, String> {
 fn reset_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<Option<String>, String> {
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     layout_store::reset_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn fs_list_dir(root: String, path: String) -> Result<files::DirListing, String> {
+    files::list_dir(&root, &path)
+}
+
+#[tauri::command]
+fn fs_read_file(root: String, path: String) -> Result<files::FileContent, String> {
+    files::read_file(&root, &path)
+}
+
+#[tauri::command]
+fn git_status(root: String) -> Result<git::GitStatus, String> {
+    git::status(&root)
+}
+
+#[tauri::command]
+fn git_diff_file(root: String, path: String, staged: bool) -> Result<git::GitDiff, String> {
+    git::diff_file(&root, &path, staged)
+}
+
+#[tauri::command]
+fn git_stage(root: String, paths: Vec<String>) -> Result<String, String> {
+    git::stage(&root, &paths)
+}
+
+#[tauri::command]
+fn git_unstage(root: String, paths: Vec<String>) -> Result<String, String> {
+    git::unstage(&root, &paths)
+}
+
+#[tauri::command]
+fn git_commit(root: String, message: String) -> Result<String, String> {
+    git::commit(&root, &message)
+}
+
+#[tauri::command]
+fn git_push(root: String) -> Result<String, String> {
+    git::push(&root)
+}
+
+#[tauri::command]
+fn git_pull(root: String) -> Result<String, String> {
+    git::pull(&root)
+}
+
+#[tauri::command]
+fn git_branches(root: String) -> Result<git::GitBranches, String> {
+    git::branches(&root)
+}
+
+#[tauri::command]
+fn git_worktrees(root: String) -> Result<Vec<git::GitWorktree>, String> {
+    git::worktrees(&root)
+}
+
+#[tauri::command]
+fn git_switch(root: String, branch: String) -> Result<String, String> {
+    git::switch(&root, &branch)
+}
+
+#[tauri::command]
+fn git_init(root: String) -> Result<String, String> {
+    git::init(&root)
 }
 
 #[tauri::command]
@@ -298,6 +381,13 @@ pub fn run() {
             let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
             app.manage(manager.clone());
             app.manage(ShellState::default());
+            app.manage(usage::UsageCache::new());
+            match data_dir(app.handle()) {
+                Ok(dir) => {
+                    telemetry::init_from_disk(&dir);
+                }
+                Err(e) => eprintln!("ubra: telemetry init skipped: {e}"),
+            }
             match build_tray(app.handle()) {
                 Ok(()) => app
                     .state::<ShellState>()
@@ -401,6 +491,8 @@ pub fn run() {
             pty_snapshot,
             agent_snapshot,
             detect_agent_clis,
+            supported_usage_clis,
+            cli_usage,
             git_branch,
             load_layout,
             save_layout,
@@ -410,9 +502,27 @@ pub fn run() {
             save_saved_setups,
             export_saved_setups,
             reset_saved_setups,
+            fs_list_dir,
+            fs_read_file,
+            git_status,
+            git_diff_file,
+            git_stage,
+            git_unstage,
+            git_commit,
+            git_push,
+            git_pull,
+            git_branches,
+            git_worktrees,
+            git_switch,
+            git_init,
             quit_app,
             autostart_enabled,
             autostart_set,
+            telemetry::telemetry_status,
+            telemetry::telemetry_set_consent,
+            telemetry::telemetry_set_distinct_id,
+            telemetry::telemetry_capture,
+            telemetry::telemetry_flag,
             notify_agent,
             play_sound,
             check_sound_file,
@@ -422,12 +532,15 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(
-                event,
+                &event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 if let Err(error) = app.state::<Arc<PtyManager>>().shutdown() {
                     eprintln!("ubra: shutdown failed: {error}");
                 }
+            }
+            if matches!(&event, tauri::RunEvent::Exit) {
+                telemetry::shutdown_flush();
             }
         });
 }

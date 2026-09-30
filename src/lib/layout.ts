@@ -42,6 +42,8 @@ export interface Workspace {
   name: string;
   tabs: Tab[];
   activeTabId: string;
+  /** Project folder shown in the Explorer / Source Control panels. */
+  root?: string;
   /** Agent command auto-run in new tabs/panes; unset disables auto-run. */
   defaultCli?: string;
   /** Spawn directory for new tabs/panes; unset keeps the backend default. */
@@ -510,6 +512,10 @@ function sanitizeWorkspace(v: unknown, context: LoadContext): Workspace {
   if (typeof defaultCwd === "string" && defaultCwd.trim()) {
     workspace.defaultCwd = defaultCwd;
   }
+  if (value["root"] !== undefined) {
+    if (typeof value["root"] !== "string") throw new Error("Invalid saved workspace root.");
+    workspace.root = value["root"];
+  }
   return workspace;
 }
 
@@ -573,9 +579,30 @@ export function baseName(path: string): string {
   return parts[parts.length - 1];
 }
 
+/**
+ * Folder shown by Explorer / Source Control: explicit sidebar root, then the
+ * current folder-workspace default, then the active pane or first pane cwd.
+ */
+export function resolveWorkspaceRoot(
+  ws: Workspace,
+  activePaneId?: string | null,
+): string | undefined {
+  if (ws.root?.trim()) return ws.root;
+  if (ws.defaultCwd?.trim()) return ws.defaultCwd;
+  const tab = activeTab(ws);
+  if (activePaneId) {
+    const pane = findPane(tab.root, activePaneId);
+    if (pane?.cwd?.trim()) return pane.cwd;
+  }
+  const firstCwd = (node: LayoutNode): string | undefined => {
+    if (node.kind === "pane") return node.cwd?.trim() ? node.cwd : undefined;
+    return firstCwd(node.first) ?? firstCwd(node.second);
+  };
+  return firstCwd(tab.root);
+}
+
 /** Find the workspace already pointing at a folder, if any. Trailing slashes
- * are ignored so picker results match stored roots either way. Matches
- * defaultCwd (the workspace's project folder). */
+ * are ignored so picker results match saved roots and folder-workspace defaults. */
 export function findWorkspaceByRoot(
   workspaces: Workspace[],
   dir: string,
@@ -583,7 +610,9 @@ export function findWorkspaceByRoot(
   const want = dir.replace(/[\\/]+$/, "");
   if (want === "") return null;
   return (
-    workspaces.find((ws) => ws.defaultCwd?.replace(/[\\/]+$/, "") === want) ??
+    workspaces.find((ws) =>
+      [ws.root, ws.defaultCwd].some((root) => root?.replace(/[\\/]+$/, "") === want),
+    ) ??
     null
   );
 }

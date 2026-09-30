@@ -6,6 +6,8 @@
     label: string;
     danger?: boolean;
     icon?: IconName;
+    /** Agent CLI id; renders a brand tile instead of `icon` when set. */
+    cli?: string;
   }
 
   /**
@@ -19,6 +21,7 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
   import Icon from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
 
@@ -86,7 +89,9 @@
       class:danger={item.danger}
       onclick={() => onPick(item.id)}
     >
-      {#if item.icon}
+      {#if item.cli}
+        <AgentCliIcon cli={item.cli} size={14} />
+      {:else if item.icon}
         <Icon name={item.icon} size={12} />
       {/if}
       {item.label}

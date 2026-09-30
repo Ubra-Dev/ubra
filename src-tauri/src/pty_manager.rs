@@ -176,6 +176,9 @@ impl PtyManager {
             cmd.arg(arg);
         }
         cmd.cwd(cwd.or_else(default_cwd).unwrap_or_else(|| ".".to_string()));
+        // Fixed color-capable identity for the xterm.js renderer; see
+        // `apply_terminal_env` for why this never inherits the daemon env.
+        apply_terminal_env(&mut cmd);
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let root_pid = child.process_id().unwrap_or(0);
@@ -494,6 +497,19 @@ fn reader_loop(
     sink.exited(id, success, code);
 }
 
+/// Advertise a fixed color-capable terminal to pane processes.
+///
+/// The renderer is always xterm.js, so panes get `xterm-256color` plus
+/// truecolor rather than inheriting the daemon's launch-time environment:
+/// a long-lived daemon would otherwise freeze stale values — notably a
+/// `NO_COLOR` exported only in the terminal it happened to be launched
+/// from — into every future pane, silently disabling TUI colors.
+fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env_remove("NO_COLOR");
+}
+
 fn default_shell() -> String {
     if let Ok(shell) = std::env::var("SHELL") {
         if !shell.is_empty() {
@@ -566,6 +582,26 @@ impl Utf8Splitter {
 #[cfg(test)]
 mod tests {
     use super::Utf8Splitter;
+    use portable_pty::CommandBuilder;
+
+    #[test]
+    fn pane_env_advertises_color_and_drops_stale_no_color() {
+        let mut cmd = CommandBuilder::new("sh");
+        // Simulate a daemon launched from a colorless terminal session.
+        cmd.env("TERM", "dumb");
+        cmd.env_remove("COLORTERM");
+        cmd.env("NO_COLOR", "1");
+        super::apply_terminal_env(&mut cmd);
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(cmd.get_env("NO_COLOR"), None);
+    }
 
     #[test]
     fn close_bursts_preserve_every_deliberate_exit_until_consumed() {

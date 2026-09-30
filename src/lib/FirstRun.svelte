@@ -1,10 +1,16 @@
 <script lang="ts">
+  import { PUBLIC_POSTHOG_HOST, PUBLIC_POSTHOG_PROJECT_TOKEN } from "$env/static/public";
+  import posthog from "posthog-js";
   import { onMount, tick } from "svelte";
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
+  import { posthogLogs } from "./posthogLogs";
   import { store } from "./store.svelte";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
 
   let projectDirectory = $state<string | null>(null);
   const detected = $derived(agentClis.clis);
@@ -13,14 +19,23 @@
   let customCommand = $state("");
   let pickingDirectory = $state(false);
   let errorMessage = $state<string | null>(null);
-  let selectEl = $state<HTMLSelectElement | null>(null);
+  let selectEl = $state<AgentCliSelect | null>(null);
   let customEl = $state<HTMLInputElement | null>(null);
+  let telemetryOptIn = $state(false);
+  let telemetrySupported = $state(false);
+  let onboardingActionBusy = $state(false);
 
   const command = $derived(resolveAgentCommand(selection, customCommand));
   const selectedCli = $derived(detected?.find((entry) => entry.cli === selection) ?? null);
 
   onMount(() => {
     void agentClis.ensure();
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+        telemetryOptIn = status.consented;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
   });
 
   // Settle the initial selection once when detection resolves; never
@@ -44,8 +59,8 @@
     else if (clis.length === 0) selection = CUSTOM_COMMAND;
   });
 
-  function onSelectChange(e: Event): void {
-    if ((e.target as HTMLSelectElement).value === CUSTOM_COMMAND) {
+  function onSelectChange(picked: string): void {
+    if (picked === CUSTOM_COMMAND) {
       void tick().then(() => customEl?.focus());
     }
   }
@@ -73,15 +88,34 @@
     }
   }
 
-  function startAgent(): void {
-    if (!projectDirectory || !command.trim()) return;
+  async function startAgent(): Promise<void> {
+    if (onboardingActionBusy || !projectDirectory || !command.trim()) return;
+    onboardingActionBusy = true;
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
     const paneId = store.completeOnboarding(projectDirectory, command);
     if (!paneId) {
       errorMessage = "Couldn't prepare the project terminal. Try skipping setup.";
+      onboardingActionBusy = false;
+      return;
+    }
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_completed");
+      posthogLogs.onboardingCompleted();
     }
   }
 
-  function skipSetup(): void {
+  async function skipSetup(): Promise<void> {
+    if (onboardingActionBusy) return;
+    onboardingActionBusy = true;
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_skipped");
+      posthogLogs.onboardingSkipped();
+    }
     store.skipOnboarding();
   }
 </script>
@@ -166,21 +200,16 @@
           {#if detected.length > 0}
             <span class="command-field">
               <span class="command-prompt" aria-hidden="true">$</span>
-              <select
+              <AgentCliSelect
                 bind:this={selectEl}
+                entries={detected}
                 bind:value={selection}
-                aria-labelledby="command-label"
-                aria-describedby="command-hint"
-                onchange={onSelectChange}
-              >
-                <option value="" disabled>Choose an agent CLI</option>
-                {#each detected as entry (entry.cli)}
-                  <option value={entry.cli} title={entry.path}>
-                    {entry.label} · {entry.cli}
-                  </option>
-                {/each}
-                <option value={CUSTOM_COMMAND}>Custom command…</option>
-              </select>
+                placeholder="Choose an agent CLI"
+                variant="field"
+                ariaLabel="Agent command"
+                ariaDescribedBy="command-hint"
+                onChange={onSelectChange}
+              />
             </span>
           {/if}
           {#if selection === CUSTOM_COMMAND}
@@ -226,16 +255,32 @@
         <div class="error" role="alert">{errorMessage}</div>
       {/if}
 
+      {#if telemetrySupported}
+        <label class="consent-row">
+          <input type="checkbox" bind:checked={telemetryOptIn} />
+          <span>
+            Help improve Ubra by sharing anonymous usage and crash reports.
+            <span class="hint-inline">
+              Never code, file paths, or commands. Change anytime in Settings.
+            </span>
+          </span>
+        </label>
+      {/if}
+
       <div class="actions">
         <button
           class="start-button"
           type="submit"
-          onclick={startAgent}
-          disabled={!projectDirectory || !command.trim()}
+          disabled={!projectDirectory || !command.trim() || onboardingActionBusy}
         >
           Open project and start agent
         </button>
-        <button class="skip-button" type="button" onclick={skipSetup}>
+        <button
+          class="skip-button"
+          type="button"
+          onclick={skipSetup}
+          disabled={onboardingActionBusy}
+        >
           {store.firstRun ? "Skip setup" : "Cancel"}
         </button>
       </div>
@@ -488,15 +533,6 @@
     color: var(--text-strong);
     font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
-  .command-field select {
-    width: 100%;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    cursor: pointer;
-  }
   .detecting {
     color: var(--text-subtle);
     font-size: 12px;
@@ -509,6 +545,24 @@
     color: var(--text-subtle);
     font-size: 11px;
     line-height: 1.45;
+  }
+  .consent-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 18px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .consent-row input {
+    margin-top: 3px;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
+  }
+  .consent-row .hint-inline {
+    color: var(--text-subtle);
   }
   .status-tip {
     display: flex;

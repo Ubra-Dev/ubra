@@ -9,12 +9,15 @@
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
   import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
+  import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import { agentClis } from "$lib/agentClis.svelte";
+  import { posthogLogs } from "$lib/posthogLogs";
+  import { syncTelemetryToConsent } from "$lib/telemetrySync";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
   import "$lib/uiFontFaces";
@@ -22,6 +25,8 @@
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
+    // Consent first: align the analytics client before any lifecycle events.
+    void syncTelemetryToConsent().then(() => posthogLogs.applicationBooted());
     void store.boot();
     agent.start();
     workspaceGit.start();
@@ -180,6 +185,7 @@
             {/each}
           </div>
         </div>
+        <RightSidebar />
       </div>
       <StatusBar />
     </div>

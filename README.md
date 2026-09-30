@@ -24,12 +24,18 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 - **Agent awareness** — panes running agent CLIs (`claude`, `codex`, `opencode`, …)
   surface working/finished badges in pane headers, tabs, and the sidebar, plus a
   notification and sound when an agent finishes while you're elsewhere.
+- **Explorer & Source Control** — a collapsible right sidebar shows the
+  active workspace's folder tree (open, reveal, copy path) and git status
+  with per-file diffs, staging, commits, branch switching, and push/pull,
+  all scoped to the workspace folder.
 - **Notifications & sounds** — finished-agent alerts delivered as a system
   notification, an in-app toast, or off, with done/needs-attention chimes
   (custom sound file and per-agent muting supported) that play even when the
   window is hidden to the tray.
 - **Headless automation (experimental)** — a separate authenticated local daemon
   and JSON CLI expose terminal and agent-state operations without a window.
+- **Plan usage** — Settings → Usage shows plan windows for supported Codex and
+  Claude Code logins. Credentials stay in the Rust backend and are read-only.
 
 ## Install
 
@@ -246,6 +252,9 @@ Native platform checklist:
    separate from the GUI bundle. Run the daemon/CLI with a fresh `--state-dir`,
    execute a marker-file command through ConPTY, read output, close the pane and
    shut down. Check invalid commands return a nonzero exit code on every OS.
+8. Open the right sidebar's Explorer on a scratch folder: browse, reveal, and
+   copy paths. In a scratch git repo, verify Source Control status groups,
+   diffs, staging, a commit, and push/pull against a local bare remote.
 
 The development checklist below complements, but does not replace, these gates.
 
@@ -268,6 +277,9 @@ The development checklist below complements, but does not replace, these gates.
   row reveals and focuses its pane. Focusing it in the foreground acknowledges
   unread completion/attention without changing runtime status. Hovering a row
   reveals an X that uses the existing pane-close confirmation.
+- The right sidebar follows the active workspace folder: Explorer browses,
+  opens, and reveals files; Source Control stages, commits, pushes, and pulls.
+  Collapse state and commit drafts persist across view switches.
 - Unexpected stops show Needs review; deliberate pane closes are silent.
   A directly launched agent's successful exit can confirm completion, but a
   parent shell's exit code does not establish the nested agent's success.
