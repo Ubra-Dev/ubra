@@ -25,8 +25,9 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   surface working/finished badges in pane headers, tabs, and the sidebar, plus a
   notification and sound when an agent finishes while you're elsewhere.
 - **Explorer & Source Control** — a collapsible right sidebar shows the
-  active workspace's folder tree (open, reveal, copy path) and git status
-  with per-file diffs, staging, commits, branch switching, and push/pull,
+  active workspace's folder tree (click to preview with syntax highlighting,
+  plus open, reveal, copy path) and git status with per-file diffs, staging,
+  commits, branch switching, push/pull, and a worktree/branch directory,
   all scoped to the workspace folder.
 - **Notifications & sounds** — finished-agent alerts delivered as a system
   notification, an in-app toast, or off, with done/needs-attention chimes
@@ -215,8 +216,10 @@ Native platform checklist:
    execute a marker-file command through ConPTY, read output, close the pane and
    shut down. Check invalid commands return a nonzero exit code on every OS.
 8. Open the right sidebar's Explorer on a scratch folder: browse, reveal, and
-   copy paths. In a scratch git repo, verify Source Control status groups,
-   diffs, staging, a commit, and push/pull against a local bare remote.
+   copy paths; click a file to preview it with syntax highlighting (try a
+   binary and an oversized file too). In a scratch git repo, verify Source
+   Control status groups, diffs, staging, a commit, push/pull against a local
+   bare remote, and the worktree/branch directory with a linked worktree.
 
 The development checklist below complements, but does not replace, these gates.
 
@@ -240,8 +243,9 @@ The development checklist below complements, but does not replace, these gates.
   unread completion/attention without changing runtime status. Hovering a row
   reveals an X that uses the existing pane-close confirmation.
 - The right sidebar follows the active workspace folder: Explorer browses,
-  opens, and reveals files; Source Control stages, commits, pushes, and pulls.
-  Collapse state and commit drafts persist across view switches.
+  previews, opens, and reveals files; Source Control stages, commits, pushes,
+  and pulls, with worktrees and branches listed at the bottom. Collapse state
+  and commit drafts persist across view switches.
 - Unexpected stops show Needs review; deliberate pane closes are silent.
   A directly launched agent's successful exit can confirm completion, but a
   parent shell's exit code does not establish the nested agent's success.

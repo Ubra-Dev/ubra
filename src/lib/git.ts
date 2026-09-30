@@ -28,6 +28,16 @@ export interface GitBranches {
   branches: string[];
 }
 
+export interface GitWorktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  locked: string | null;
+  prunable: string | null;
+}
+
 export function gitStatus(root: string): Promise<GitStatus> {
   return invoke<GitStatus>("git_status", { root });
 }
@@ -60,6 +70,17 @@ export function gitPull(root: string): Promise<string> {
 
 export function gitBranches(root: string): Promise<GitBranches> {
   return invoke<GitBranches>("git_branches", { root });
+}
+
+export function gitWorktrees(root: string): Promise<GitWorktree[]> {
+  return invoke<GitWorktree[]>("git_worktrees", { root });
+}
+
+/** Short human label: branch name, "(detached HEAD)", or "(bare)". */
+export function worktreeLabel(w: GitWorktree): string {
+  if (w.branch) return w.branch;
+  if (w.bare) return "(bare)";
+  return "(detached HEAD)";
 }
 
 export function gitSwitch(root: string, branch: string): Promise<string> {

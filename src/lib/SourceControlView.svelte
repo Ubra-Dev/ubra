@@ -19,9 +19,12 @@
     gitStatus,
     gitSwitch,
     gitUnstage,
+    gitWorktrees,
     isClean,
     statusLabel,
+    worktreeLabel,
     type GitStatus,
+    type GitWorktree,
   } from "./git";
   import { baseName } from "./layout";
   import { toasts } from "./toasts.svelte.ts";
@@ -56,6 +59,8 @@
   let branchCurrent = $state<string | null>(null);
   let branchesLoading = $state(false);
   let branchesLoaded = false;
+  let worktrees = $state<GitWorktree[]>([]);
+  let extrasError = $state<string | null>(null);
 
   $effect(() => {
     draftCache.set(root, message);
@@ -138,6 +143,21 @@
       loadError = fail(e);
     } finally {
       loading = false;
+    }
+    if (loadError || !status?.isRepo) {
+      worktrees = [];
+      extrasError = null;
+      return;
+    }
+    try {
+      const [branches, trees] = await Promise.all([gitBranches(root), gitWorktrees(root)]);
+      branchList = branches.branches;
+      branchCurrent = branches.current;
+      branchesLoaded = true;
+      worktrees = trees;
+      extrasError = null;
+    } catch (e) {
+      extrasError = fail(e);
     }
   }
 
@@ -486,6 +506,58 @@
           {/each}
         </div>
       {/each}
+      {#if extrasError}
+        <div class="status error">{extrasError}</div>
+      {:else}
+        <div class="group">
+          <div class="group-head">
+            <span class="group-title">Worktrees · {worktrees.length}</span>
+          </div>
+          {#if worktrees.length === 0}
+            <div class="status dim">No worktrees.</div>
+          {:else}
+            {#each worktrees as w (w.path)}
+              <div class="wt-row" title={w.path}>
+                <Icon name="git-branch" size={12} />
+                <span class="fname">{worktreeLabel(w)}</span>
+                <span class="fdir">{w.path}</span>
+                {#if w.locked !== null}
+                  <span class="flag" title={w.locked === "" ? "Locked" : `Locked: ${w.locked}`}>
+                    locked
+                  </span>
+                {/if}
+                {#if w.prunable !== null}
+                  <span
+                    class="flag warn"
+                    title={w.prunable === "" ? "Prunable" : `Prunable: ${w.prunable}`}
+                  >
+                    prunable
+                  </span>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        </div>
+        <div class="group">
+          <div class="group-head">
+            <span class="group-title">Branches · {branchList.length}</span>
+          </div>
+          {#if branchList.length === 0}
+            <div class="status dim">No branches yet.</div>
+          {:else}
+            {#each branchList as branch (branch)}
+              <div class="wt-row" class:current={branch === branchCurrent}>
+                {#if branch === branchCurrent}
+                  <Icon name="check" size={12} />
+                {:else}
+                  <span class="check-sp"></span>
+                {/if}
+                <span class="fname">{branch}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -844,5 +916,29 @@
   }
   .empty p {
     margin: 0 0 12px;
+  }
+  .wt-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px 3px 10px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .wt-row.current {
+    color: var(--text-strong);
+  }
+  .flag {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 5px;
+    line-height: 1.6;
+  }
+  .flag.warn {
+    color: var(--attention);
+    border-color: var(--attention);
   }
 </style>
