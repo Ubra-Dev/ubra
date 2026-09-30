@@ -151,6 +151,7 @@ try {
   let client = await openClient();
   const ping = await client.request({ op: "ping" });
   assert(ping.ok && typeof ping.epoch === "number", "ping reports epoch");
+  assert(Number.isSafeInteger(ping.epoch) && ping.epoch >= 1, "epoch is a JS-safe integer");
   const epoch1 = ping.epoch;
 
   const attach = await client.request({
@@ -163,6 +164,8 @@ try {
   assert(attach.ok && attach.attached === "created", `fresh key creates (got ${attach.attached})`);
   const pane = attach.pane;
   assert(pane > 0 && attach.epoch === epoch1, "attach carries epoch + pane id");
+  const incarnation = attach.incarnation;
+  assert(Number.isSafeInteger(incarnation) && incarnation >= 1, "attach carries incarnation");
 
   const write = await client.request({ op: "pty_write", pane, data: "echo smoke-marker-42\n" });
   assert(write.ok, "write accepted");
@@ -179,10 +182,12 @@ try {
   }
   assert(seen, "pane ran the command");
 
-  const snap = await client.request({ op: "pty_snapshot", pane });
+  // Mirror the frontend: echo the attach-time epoch/incarnation back so the
+  // freshness check runs exactly as it does for a real pane.
+  const snap = await client.request({ op: "pty_snapshot", pane, epoch: epoch1, incarnation });
   assert(snap.ok && snap.pages >= 1 && snap.data.length > 0, "paged snapshot serves content");
   if (snap.pages > 1) {
-    const page = await client.request({ op: "pty_snapshot_page", pane, page: 1 });
+    const page = await client.request({ op: "pty_snapshot_page", pane, page: 1, epoch: epoch1, incarnation });
     assert(page.ok && page.page === 1, "snapshot page 1 serves");
   }
 

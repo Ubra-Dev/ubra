@@ -876,6 +876,13 @@ pub struct DaemonCore {
     gui_peers: Mutex<std::collections::HashSet<u64>>,
 }
 
+/// Largest daemon epoch that survives a JSON round-trip through the Svelte
+/// frontend, which parses numbers as f64 (exact only below 2^53). The
+/// frontend echoes the attach-time epoch back on every guarded call, so any
+/// epoch at or above 2^53 would corrupt in transit and fail every freshness
+/// check as stale. 53 bits remain unique per daemon lifetime in practice.
+const MAX_JS_SAFE_EPOCH: u64 = (1_u64 << 53) - 1;
+
 fn new_epoch() -> u64 {
     let mut bytes = [0_u8; 8];
     if getrandom::fill(&mut bytes).is_err() {
@@ -883,9 +890,9 @@ fn new_epoch() -> u64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1);
-        return nanos.max(1);
+        return (nanos & MAX_JS_SAFE_EPOCH).max(1);
     }
-    u64::from_ne_bytes(bytes).max(1)
+    (u64::from_ne_bytes(bytes) & MAX_JS_SAFE_EPOCH).max(1)
 }
 
 impl DaemonCore {
@@ -2618,6 +2625,15 @@ mod tests {
             "{{\"op\":\"pty_attach\",\"key\":\"{key}\",\"frontend\":true}}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn epoch_survives_frontend_number_round_trip() {
+        for _ in 0..64 {
+            let epoch = new_epoch();
+            assert!((1..=MAX_JS_SAFE_EPOCH).contains(&epoch));
+            assert_eq!((epoch as f64) as u64, epoch);
+        }
     }
 
     #[test]

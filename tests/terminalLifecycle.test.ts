@@ -63,3 +63,12 @@ it("assembleReplay uses inline history unless truncated, then pages fully", asyn
   const full = await assembleReplay("tail", 3, true, async (page) => `p${page};`);
   assert.equal(full, "p0;p1;p2;");
 });
+
+it("snapshotFailurePlan retries bounded times, then surfaces unavailable", async () => {
+  const { snapshotFailurePlan } = await import("../src/lib/terminalLifecycle.ts");
+  assert.equal(snapshotFailurePlan(0), "retry");
+  assert.equal(snapshotFailurePlan(1), "retry");
+  assert.equal(snapshotFailurePlan(2), "retry");
+  assert.equal(snapshotFailurePlan(3), "unavailable");
+  assert.equal(snapshotFailurePlan(99), "unavailable");
+});
