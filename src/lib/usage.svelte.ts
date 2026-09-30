@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CliUsage } from "./usage";
+import type { CliUsage, SupportedUsageCli } from "./usage";
 
 /** Freshness window matching the backend cache TTL. */
 const FRESH_SECONDS = 5 * 60;
@@ -9,7 +9,30 @@ class UsageStore {
   entries = $state<Record<string, CliUsage>>({});
   /** In-flight fetches per CLI stem. */
   loading = $state<Record<string, boolean>>({});
+  /** Subscription CLIs with a usage provider; null until loaded. */
+  supported = $state<SupportedUsageCli[] | null>(null);
   private inflight = new Map<string, Promise<void>>();
+  private supportedInflight: Promise<SupportedUsageCli[]> | null = null;
+
+  /** Provider registry; concurrent callers share the fetch. */
+  ensureSupported(): Promise<SupportedUsageCli[]> {
+    if (this.supported) return Promise.resolve(this.supported);
+    if (!this.supportedInflight) {
+      this.supportedInflight = invoke<SupportedUsageCli[]>(
+        "supported_usage_clis",
+      )
+        .then((supported) => {
+          this.supported = supported;
+          return supported;
+        })
+        .catch((error: unknown) => {
+          console.error("ubra: usage providers fetch failed", error);
+          this.supportedInflight = null;
+          return [];
+        });
+    }
+    return this.supportedInflight;
+  }
 
   private isFresh(cli: string): boolean {
     const fetchedAt = this.entries[cli]?.snapshot?.fetchedAt;

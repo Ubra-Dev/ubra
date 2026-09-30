@@ -319,6 +319,11 @@ fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
 }
 
 #[tauri::command]
+fn supported_usage_clis() -> Vec<usage::SupportedCli> {
+    usage::supported_clis()
+}
+
+#[tauri::command]
 async fn cli_usage(
     cache: State<'_, usage::UsageCache>,
     cli: String,
@@ -393,6 +398,11 @@ fn fs_list_dir(root: String, path: String) -> Result<files::DirListing, String> 
 }
 
 #[tauri::command]
+fn fs_read_file(root: String, path: String) -> Result<files::FileContent, String> {
+    files::read_file(&root, &path)
+}
+
+#[tauri::command]
 fn git_status(root: String) -> Result<git::GitStatus, String> {
     git::status(&root)
 }
@@ -430,6 +440,11 @@ fn git_pull(root: String) -> Result<String, String> {
 #[tauri::command]
 fn git_branches(root: String) -> Result<git::GitBranches, String> {
     git::branches(&root)
+}
+
+#[tauri::command]
+fn git_worktrees(root: String) -> Result<Vec<git::GitWorktree>, String> {
+    git::worktrees(&root)
 }
 
 #[tauri::command]
@@ -735,6 +750,7 @@ pub fn run() {
             integrations_install,
             integrations_remove,
             detect_agent_clis,
+            supported_usage_clis,
             cli_usage,
             git_branch,
             load_layout,
@@ -746,6 +762,7 @@ pub fn run() {
             export_saved_setups,
             reset_saved_setups,
             fs_list_dir,
+            fs_read_file,
             git_status,
             git_diff_file,
             git_stage,
@@ -754,6 +771,7 @@ pub fn run() {
             git_push,
             git_pull,
             git_branches,
+            git_worktrees,
             git_switch,
             git_init,
             quit_app,

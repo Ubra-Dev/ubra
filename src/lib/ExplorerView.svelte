@@ -10,6 +10,7 @@
   import { onMount } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import Icon from "./Icon.svelte";
   import {
     COPY_TOAST_DISMISS_MS,
@@ -52,6 +53,7 @@
   const expanded = new SvelteSet<string>();
   let showHidden = $state(false);
   let selected = $state<string | null>(null);
+  let preview = $state<string | null>(null);
   let picking = $state(false);
   let menu = $state<{
     rel: string;
@@ -139,19 +141,16 @@
   function activate(rel: string, entry: DirEntry): void {
     selected = rel;
     if (entry.isDir) toggle(rel);
+    else preview = rel;
   }
 
-  async function openRow(rel: string, entry: DirEntry): Promise<void> {
+  function openRow(rel: string, entry: DirEntry): void {
     selected = rel;
     if (entry.isDir && !entry.isSymlink) {
       toggle(rel);
       return;
     }
-    try {
-      await openPath(joinFsPath(root, rel));
-    } catch (e) {
-      toasts.push("Couldn't open file", e instanceof Error ? e.message : String(e), "");
-    }
+    preview = rel;
   }
 
   function openMenu(e: MouseEvent, rel: string): void {
@@ -291,6 +290,9 @@
       {/if}
     {/each}
   </div>
+  {#if preview}
+    <FilePreviewDialog root={root} rel={preview} onClose={() => (preview = null)} />
+  {/if}
   {#if menu}
     <ContextMenu
       x={menu.x}
@@ -314,7 +316,7 @@
     flex-direction: column;
     min-height: 0;
     flex: 1 1 auto;
-    font: 12px system-ui, sans-serif;
+    font: calc(12px * var(--ui-text-scale, 1)) system-ui, sans-serif;
     color: var(--text);
   }
   .head {
@@ -429,7 +431,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     font: inherit;
-    font-size: 11px;
+    font-size: calc(11px * var(--ui-text-scale, 1));
     padding: 1px 8px;
     cursor: pointer;
   }

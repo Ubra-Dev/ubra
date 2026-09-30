@@ -549,6 +549,28 @@ mod claude {
     }
 }
 
+/// A subscription CLI with a usage provider. Labels match `AGENT_TABLE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SupportedCli {
+    pub cli: &'static str,
+    pub label: &'static str,
+}
+
+/// Subscription CLIs with a usage provider, in display order. The settings
+/// Usage section lists these — never every detected binary.
+pub fn supported_clis() -> Vec<SupportedCli> {
+    vec![
+        SupportedCli {
+            cli: "codex",
+            label: "Codex",
+        },
+        SupportedCli {
+            cli: "claude",
+            label: "Claude Code",
+        },
+    ]
+}
+
 /// Fetch fresh usage for one CLI stem. Unknown stems never touch the network.
 pub async fn fetch_usage(cli: &str, client: &reqwest::Client) -> CliUsage {
     match cli {
@@ -634,6 +656,15 @@ pub(crate) fn now_epoch() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_clis_lists_providers_in_order() {
+        let clis = super::supported_clis();
+        let stems: Vec<&str> = clis.iter().map(|c| c.cli).collect();
+        assert_eq!(stems, vec!["codex", "claude"]);
+        assert_eq!(clis[0].label, "Codex");
+        assert_eq!(clis[1].label, "Claude Code");
+    }
 
     #[test]
     fn unknown_cli_is_unsupported_without_network() {

@@ -597,7 +597,7 @@
   }
   .find-input {
     width: 180px;
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     color: var(--text);
     background: var(--input-bg);
     border: 1px solid var(--input-border);

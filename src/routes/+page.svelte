@@ -20,14 +20,16 @@
   import { agentClis } from "$lib/agentClis.svelte";
   import { syncTelemetryToConsent } from "$lib/telemetrySync";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
+  import { posthogLogs } from "$lib/posthogLogs";
   import { themeStyle } from "$lib/themes";
   import "$lib/uiFontFaces";
   import { uiFontStyle } from "$lib/uiFonts";
-  import { uiZoomStyle } from "$lib/uiScale";
+  import { uiTextScaleStyle } from "$lib/uiScale";
 
   onMount(() => {
     // Consent first: align the analytics client before anything captures.
     void syncTelemetryToConsent();
+    posthogLogs.applicationBooted();
     void store.boot();
     agent.start();
     workspaceGit.start();
@@ -164,7 +166,7 @@
 
 <svelte:window onkeydown={onGlobalKeyDown} />
 
-<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)};${uiFontStyle(store.uiFontId)}`}>
+<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiTextScaleStyle(store.uiScale)};${uiFontStyle(store.uiFontId)}`}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
   {:else if store.recoveryRequired}
@@ -240,19 +242,21 @@
     background: var(--app-bg);
     color: var(--text);
     color-scheme: var(--color-scheme);
+    font-family: var(--font-ui);
+    font-size: calc(16px * var(--ui-text-scale, 1));
   }
   .recovery {
     min-height: 100vh;
     display: grid;
     place-items: center;
-    font: 14px/1.6 var(--font-ui);
+    font: calc(14px * var(--ui-text-scale, 1))/1.6 var(--font-ui);
     overflow-y: auto;
   }
   .recovery-content {
     max-width: 620px;
     padding: 32px;
   }
-  .recovery h1 { font-size: 22px; color: var(--text-strong); }
+  .recovery h1 { font-size: calc(22px * var(--ui-text-scale, 1)); color: var(--text-strong); }
   .recovery pre, .backup { white-space: pre-wrap; overflow-wrap: anywhere; }
   .recovery pre { color: var(--text-muted); }
   .recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -272,7 +276,7 @@
     justify-content: center;
     height: 100vh;
     color: var(--text-muted);
-    font: 14px var(--font-ui);
+    font: calc(14px * var(--ui-text-scale, 1)) var(--font-ui);
   }
   .shell {
     display: flex;

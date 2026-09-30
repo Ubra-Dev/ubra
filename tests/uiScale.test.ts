@@ -6,7 +6,7 @@ import {
   MIN_UI_SCALE,
   clampUiScale,
   stepUiScale,
-  uiZoomStyle,
+  uiTextScaleStyle,
 } from "../src/lib/uiScale.ts";
 
 describe("clampUiScale", () => {
@@ -42,9 +42,16 @@ describe("stepUiScale", () => {
   });
 });
 
-describe("uiZoomStyle", () => {
-  it("formats the clamped scale as a zoom style", () => {
-    assert.equal(uiZoomStyle(100), "zoom:100%");
-    assert.equal(uiZoomStyle(MAX_UI_SCALE + 50), `zoom:${MAX_UI_SCALE}%`);
+describe("uiTextScaleStyle", () => {
+  it("scales interface text independently of the viewport", () => {
+    assert.equal(uiTextScaleStyle(75), "--ui-text-scale:0.75");
+    assert.equal(uiTextScaleStyle(100), "--ui-text-scale:1");
+    assert.equal(uiTextScaleStyle(150), "--ui-text-scale:1.5");
+  });
+
+  it("clamps saved values and defaults invalid input", () => {
+    assert.equal(uiTextScaleStyle(MAX_UI_SCALE + 50), "--ui-text-scale:1.5");
+    assert.equal(uiTextScaleStyle(MIN_UI_SCALE - 50), "--ui-text-scale:0.75");
+    assert.equal(uiTextScaleStyle(NaN), "--ui-text-scale:1");
   });
 });

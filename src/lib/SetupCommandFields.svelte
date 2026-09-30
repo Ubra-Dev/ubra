@@ -152,15 +152,15 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
   }
   .field-label {
     color: var(--text);
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
   }
   input.mono {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px;
+    font-family: var(--font-ui);
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text);
     background: var(--input-bg);
     border: 1px solid var(--input-border);
@@ -177,7 +177,7 @@
   }
   button.mini {
     flex: 0 0 auto;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text);
     background: var(--surface-bg);
     border: 1px solid var(--border);
@@ -196,7 +196,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text);
     cursor: pointer;
   }
@@ -211,12 +211,12 @@
   }
   .muted {
     margin: 0;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text-muted);
   }
   .inline-error {
     margin: 0;
-    font-size: 12px;
+    font-size: calc(12px * var(--ui-text-scale, 1));
     color: var(--text-strong);
   }
 </style>

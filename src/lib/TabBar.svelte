@@ -169,7 +169,7 @@
     min-width: 0;
     padding: 6px 8px;
     background: var(--tabbar-bg);
-    font: 12px var(--font-ui);
+    font: calc(12px * var(--ui-text-scale, 1)) var(--font-ui);
     user-select: none;
   }
   .tab-list {

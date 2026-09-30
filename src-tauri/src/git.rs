@@ -71,6 +71,20 @@ pub struct GitBranches {
     pub branches: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktree {
+    pub path: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub bare: bool,
+    /// Reason when locked; empty string when locked without a reason.
+    pub locked: Option<String>,
+    /// Reason when prunable; empty string when prunable without a reason.
+    pub prunable: Option<String>,
+}
+
 struct GitOutput {
     stdout: String,
     truncated: bool,
@@ -372,6 +386,95 @@ fn parse_status(output: &str, truncated: bool) -> Result<GitStatus, String> {
         }
     }
     Ok(status)
+}
+
+/// Strip C-style quotes git applies to unusual paths; content kept verbatim.
+fn unquote(path: &str) -> String {
+    if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
+        path[1..path.len() - 1].to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn parse_worktrees(output: &str) -> Result<Vec<GitWorktree>, String> {
+    fn finish(current: &mut Option<GitWorktree>, out: &mut Vec<GitWorktree>) {
+        if let Some(worktree) = current.take() {
+            out.push(worktree);
+        }
+    }
+    let mut worktrees = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+    for line in output.lines() {
+        if line.is_empty() {
+            finish(&mut current, &mut worktrees);
+            continue;
+        }
+        let (label, value) = match line.split_once(' ') {
+            Some((label, value)) => (label, Some(value)),
+            None => (line, None),
+        };
+        match label {
+            "worktree" => {
+                finish(&mut current, &mut worktrees);
+                let path = value
+                    .filter(|v| !v.is_empty())
+                    .ok_or("Cannot parse git worktrees.")?;
+                current = Some(GitWorktree {
+                    path: unquote(path),
+                    head: None,
+                    branch: None,
+                    detached: false,
+                    bare: false,
+                    locked: None,
+                    prunable: None,
+                });
+            }
+            "HEAD" => {
+                let worktree = current.as_mut().ok_or("Cannot parse git worktrees.")?;
+                worktree.head = value.filter(|v| !v.is_empty()).map(str::to_string);
+            }
+            "branch" => {
+                let worktree = current.as_mut().ok_or("Cannot parse git worktrees.")?;
+                if let Some(name) = value.and_then(|v| v.strip_prefix("refs/heads/")) {
+                    worktree.branch = Some(name.to_string());
+                } else if let Some(name) = value.filter(|v| !v.is_empty()) {
+                    worktree.branch = Some(name.to_string());
+                }
+            }
+            "detached" => {
+                current
+                    .as_mut()
+                    .ok_or("Cannot parse git worktrees.")?
+                    .detached = true;
+            }
+            "bare" => {
+                current.as_mut().ok_or("Cannot parse git worktrees.")?.bare = true;
+            }
+            "locked" => {
+                current
+                    .as_mut()
+                    .ok_or("Cannot parse git worktrees.")?
+                    .locked = Some(value.unwrap_or("").to_string());
+            }
+            "prunable" => {
+                current
+                    .as_mut()
+                    .ok_or("Cannot parse git worktrees.")?
+                    .prunable = Some(value.unwrap_or("").to_string());
+            }
+            // Tolerate future attributes.
+            _ => {}
+        }
+    }
+    finish(&mut current, &mut worktrees);
+    Ok(worktrees)
+}
+
+pub fn worktrees(root: &str) -> Result<Vec<GitWorktree>, String> {
+    let root = check_root(root)?;
+    let out = run_git(&root, &["worktree", "list", "--porcelain"], LOCAL_TIMEOUT)?;
+    parse_worktrees(&out.stdout)
 }
 
 pub fn status(root: &str) -> Result<GitStatus, String> {
@@ -798,5 +901,65 @@ mod tests {
 
         remove_dir(&dir);
         remove_dir(&bare);
+    }
+
+    #[test]
+    fn parses_porcelain_worktrees() {
+        let output = "worktree /repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /repo-wt\nHEAD def456\nbranch refs/heads/feature\nlocked\n\nworktree /bare\nbare\n\nworktree /detached\nHEAD 789abc\ndetached\nprunable gone\n\n";
+        let list = parse_worktrees(output).unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0].path, "/repo");
+        assert_eq!(list[0].head.as_deref(), Some("abc123"));
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        assert!(!list[0].detached);
+        assert!(!list[0].bare);
+        assert!(list[0].locked.is_none());
+        assert_eq!(list[1].branch.as_deref(), Some("feature"));
+        assert_eq!(list[1].locked.as_deref(), Some(""));
+        assert!(list[2].bare);
+        assert!(list[2].head.is_none());
+        assert!(list[3].detached);
+        assert!(list[3].branch.is_none());
+        assert_eq!(list[3].prunable.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn worktree_parser_tolerates_unknown_lines_and_rejects_malformed() {
+        let tolerant = "worktree /repo\nHEAD abc\nfrobnicator yes\nbranch refs/heads/main\n\n";
+        let list = parse_worktrees(tolerant).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+
+        assert!(parse_worktrees("HEAD abc\n").is_err());
+        assert!(parse_worktrees("worktree\n").is_err());
+        assert!(parse_worktrees("detached\n").is_err());
+    }
+
+    #[test]
+    fn lists_real_linked_worktrees() {
+        let dir = test_dir("worktrees");
+        let link = test_dir("worktrees-link");
+        remove_dir(&dir);
+        remove_dir(&link);
+        fs::create_dir_all(&dir).unwrap();
+        let root = root_str(&dir);
+        assert!(worktrees(&root).is_err());
+        git(&dir, &["init"]);
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "first"]);
+        git(
+            &dir,
+            &["worktree", "add", link.to_str().unwrap(), "-b", "feature"],
+        );
+
+        let list = worktrees(&root).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|w| w.branch.as_deref() == Some("feature")));
+        assert!(list.iter().all(|w| w.head.is_some()));
+        assert!(list.iter().all(|w| !w.bare && !w.detached));
+
+        remove_dir(&link);
+        remove_dir(&dir);
     }
 }

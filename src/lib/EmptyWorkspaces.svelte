@@ -42,13 +42,13 @@
   h1 {
     margin: 0;
     color: var(--text-strong);
-    font-size: 20px;
+    font-size: calc(20px * var(--ui-text-scale, 1));
     font-weight: 620;
   }
   p {
     margin: 10px 0 0;
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-text-scale, 1));
     line-height: 1.55;
   }
   .actions {

@@ -15,6 +15,7 @@ export function stepUiScale(current: number, delta: 1 | -1): number {
   return clampUiScale(clampUiScale(current) + delta * UI_SCALE_STEP);
 }
 
-export function uiZoomStyle(scale: number): string {
-  return `zoom:${clampUiScale(scale)}%`;
+/** Scale explicit interface font sizes without changing layout or terminal glyphs. */
+export function uiTextScaleStyle(scale: number): string {
+  return `--ui-text-scale:${clampUiScale(scale) / 100}`;
 }
