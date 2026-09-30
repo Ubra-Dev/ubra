@@ -9,6 +9,10 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "build:desktop": "npm run build && npm run bundle:bins",
+    "bundle:bins": "node scripts/stage-bins.mjs",
+    "dev:bins": "cargo build --manifest-path src-tauri/Cargo.toml --bins",
+    "tauri:build": "tauri build --config src-tauri/tauri.release.conf.json",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

@@ -10,14 +10,13 @@
 //! ```
 
 use crate::daemon::{
-    connect_authenticated, default_state_dir, open_private_file, read_frame, write_frame,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    connect_authenticated, default_state_dir, read_frame, write_frame, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION,
 };
 use crate::pty_manager::PaneId;
 use std::io::BufReader;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -75,7 +74,33 @@ pub enum CliCommand {
     Snapshot,
     RulesReload,
     Shutdown,
+    AgentReport {
+        hook_event: Option<String>,
+        family: Option<String>,
+        reference: Option<String>,
+        exe: Option<String>,
+        cwd: Option<String>,
+        model: Option<String>,
+        resume_cmd: Vec<String>,
+    },
+    Integrations {
+        action: IntegrationAction,
+        family: Option<String>,
+    },
+    Close {
+        pane: Option<PaneId>,
+        key: Option<String>,
+    },
+    StopAll,
+    Flush,
     Help,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IntegrationAction {
+    Install,
+    Status,
+    Remove,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,6 +128,15 @@ usage: ubra-cli [--state-dir DIR] <command> [args]
   snapshot                      version + panes + agent states
   rules-reload                  re-read detection rule files
   shutdown                      kill panes and stop the daemon
+  close <pane> | --key KEY     terminate a pane and drop its recovery data
+  stop-all                      terminate all panes and drop recovery data
+  flush                         checkpoint all panes immediately
+  agent-report [--family F] [--reference R] [--exe E] [--cwd D]
+               [--model M] [--hook-event E] [--resume-cmd ...]
+                                report an exact agent session (hook entrypoint;
+                                silent outside Ubra panes)
+  integrations <install|status|remove> [--family F]
+                                manage agent session-reporting hooks
   help";
 
 fn pane_arg(args: &[String], i: usize, what: &str) -> Result<PaneId, String> {
@@ -279,6 +313,88 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliOptions, String> {
         "read" => CliCommand::Read {
             pane: pane_arg(args, 0, "pane")?,
         },
+        "close" => {
+            if args.first().is_some_and(|s| s == "--key") {
+                CliCommand::Close {
+                    pane: None,
+                    key: Some(
+                        args.get(1)
+                            .cloned()
+                            .filter(|k| !k.is_empty())
+                            .ok_or("missing --key value")?,
+                    ),
+                }
+            } else {
+                CliCommand::Close {
+                    pane: Some(pane_arg(args, 0, "pane")?),
+                    key: None,
+                }
+            }
+        }
+        "stop-all" => CliCommand::StopAll,
+        "flush" => CliCommand::Flush,
+        "agent-report" => {
+            let mut hook_event = None;
+            let mut family = None;
+            let mut reference = None;
+            let mut exe = None;
+            let mut cwd = None;
+            let mut model = None;
+            let mut resume_cmd = Vec::new();
+            let mut i = 0;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                if flag == "--resume-cmd" {
+                    resume_cmd.extend(args[i + 1..].iter().cloned());
+                    break;
+                }
+                let slot = match flag {
+                    "--hook-event" => &mut hook_event,
+                    "--family" => &mut family,
+                    "--reference" => &mut reference,
+                    "--exe" => &mut exe,
+                    "--cwd" => &mut cwd,
+                    "--model" => &mut model,
+                    _ => return Err(format!("unknown agent-report flag: {flag}")),
+                };
+                i += 1;
+                *slot = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or(format!("missing {flag} value"))?,
+                );
+                i += 1;
+            }
+            CliCommand::AgentReport {
+                hook_event,
+                family,
+                reference,
+                exe,
+                cwd,
+                model,
+                resume_cmd,
+            }
+        }
+        "integrations" => {
+            let action = match args.first().map(String::as_str) {
+                Some("install") => IntegrationAction::Install,
+                Some("status") => IntegrationAction::Status,
+                Some("remove") => IntegrationAction::Remove,
+                _ => return Err("usage: integrations <install|status|remove> [--family F]".into()),
+            };
+            let mut family = None;
+            let mut i = 1;
+            while i < args.len() {
+                if args[i].as_str() == "--family" {
+                    i += 1;
+                    family = Some(args.get(i).cloned().ok_or("missing --family value")?);
+                } else {
+                    return Err(format!("unknown integrations flag: {}", args[i]));
+                }
+                i += 1;
+            }
+            CliCommand::Integrations { action, family }
+        }
         "panes" => CliCommand::Panes,
         "agents" => CliCommand::Agents {
             watch: match args.first().map(String::as_str) {
@@ -297,67 +413,16 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliOptions, String> {
 }
 
 fn state_dir_of(opts: &CliOptions) -> PathBuf {
-    opts.state_dir.clone().unwrap_or_else(default_state_dir)
+    opts.state_dir
+        .clone()
+        .or_else(|| std::env::var_os("UBRA_STATE_DIR").map(PathBuf::from))
+        .unwrap_or_else(default_state_dir)
 }
 
-fn try_authenticated(state_dir: &std::path::Path) -> Option<TcpStream> {
-    connect_authenticated(state_dir, Duration::from_millis(500)).ok()
-}
-
-fn daemon_log(state_dir: &std::path::Path) -> Result<std::fs::File, String> {
-    open_private_file(&state_dir.join("daemon.log"), true, true)
-        .map_err(|e| format!("cannot open private daemon log: {e}"))
-}
-
-fn daemon_binary() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            #[cfg(windows)]
-            let name = "ubra-daemon.exe";
-            #[cfg(not(windows))]
-            let name = "ubra-daemon";
-            let sibling = dir.join(name);
-            if sibling.is_file() {
-                return sibling;
-            }
-        }
-    }
-    PathBuf::from("ubra-daemon")
-}
-
-/// Connect, starting a daemon first when none answers.
+/// Connect, starting a detached daemon first when none answers. Shared
+/// with the desktop app via [`crate::launch`].
 pub fn connect_or_start(state_dir: &std::path::Path) -> Result<TcpStream, String> {
-    if let Some(stream) = try_authenticated(state_dir) {
-        return Ok(stream);
-    }
-    let log = daemon_log(state_dir)?;
-    let mut child = Command::new(daemon_binary())
-        .arg("--state-dir")
-        .arg(state_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .map_err(|e| format!("cannot start ubra-daemon: {e}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-        if let Ok(stream) = connect_authenticated(
-            state_dir,
-            deadline
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(250)),
-        ) {
-            return Ok(stream);
-        }
-    }
-    Err(format!(
-        "ubra-daemon did not answer (state dir {}; log at daemon.log)",
-        state_dir.display()
-    ))
+    crate::launch::launch_or_connect(state_dir)
 }
 
 fn valid_pane_id(value: &serde_json::Value) -> bool {
@@ -418,6 +483,10 @@ fn validate_response(value: &serde_json::Value, op: &str) -> Result<(), String> 
         }
         "wait_output" => valid_pane_id(&value["pane"]),
         "shutdown" => value["shutdown"] == true,
+        "pty_close" => value["closed"].is_boolean(),
+        "stop_all" => value["stopped"].as_u64().is_some(),
+        "flush" => value["panes"].as_u64().is_some(),
+        "agent_report" => value["role"].is_string(),
         _ => true,
     };
     if shape_ok {
@@ -494,13 +563,227 @@ fn print(value: &serde_json::Value) {
     );
 }
 
+fn cli_home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn run_integrations(action: IntegrationAction, family: Option<String>) -> Result<(), String> {
+    use crate::agent_adapters::{
+        install_claude_hooks, integration_status, remove_claude_hooks, Integration, ADAPTERS,
+    };
+    if let Some(family) = &family {
+        let supported = ADAPTERS.iter().any(|adapter| {
+            (adapter.family == family || adapter.executables.contains(&family.as_str()))
+                && adapter.integration == Integration::ClaudeHooks
+        });
+        if !supported {
+            return Err(format!("no verified hook mechanism for family: {family}"));
+        }
+    }
+    let home = cli_home_dir();
+    match action {
+        IntegrationAction::Install => {
+            let cli = std::env::current_exe()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|e| format!("cannot locate ubra-cli: {e}"))?;
+            let changed = install_claude_hooks(&home, &cli).map_err(|e| e.to_string())?;
+            print(&serde_json::json!({
+                "ok": true, "family": family.unwrap_or_else(|| "claude".to_string()),
+                "installed": true, "changed": changed,
+            }));
+            Ok(())
+        }
+        IntegrationAction::Status => {
+            let mut statuses = integration_status(&home);
+            if let Some(family) = family {
+                statuses.retain(|status| status.family == family);
+            }
+            print(&serde_json::json!(statuses));
+            Ok(())
+        }
+        IntegrationAction::Remove => {
+            let changed = remove_claude_hooks(&home).map_err(|e| e.to_string())?;
+            print(&serde_json::json!({
+                "ok": true, "family": family.unwrap_or_else(|| "claude".to_string()),
+                "installed": false, "changed": changed,
+            }));
+            Ok(())
+        }
+    }
+}
+
+/// Minimal request/response without stdout chatter for hook contexts.
+fn quiet_request(
+    stream: &mut TcpStream,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1_000_000);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut value = value;
+    value["id"] = id.into();
+    let encoded = value.to_string();
+    if encoded.len() + 1 > MAX_FRAME_BYTES {
+        return Err("request exceeds frame byte limit".into());
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    write_frame(stream, &encoded, deadline).map_err(|e| format!("lost daemon connection: {e}"))?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    loop {
+        let line = read_frame(&mut reader, deadline)
+            .map_err(|e| format!("lost daemon connection: {e}"))?;
+        let reply: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| format!("bad daemon reply: {e}"))?;
+        if reply["event"].is_string() || reply["id"] != id {
+            continue;
+        }
+        if reply["ok"] != true {
+            return Err(reply["error"]
+                .as_str()
+                .unwrap_or("daemon operation failed")
+                .to_string());
+        }
+        return Ok(reply);
+    }
+}
+
+/// Hook entrypoint: report the exact agent session. Silent on success and
+/// silent outside Ubra panes; failures surface only for manual runs so a
+/// broken hook never breaks the agent session it observes.
+#[allow(clippy::too_many_arguments)]
+fn run_agent_report(
+    state_dir: &std::path::Path,
+    hook_event: Option<String>,
+    family: Option<String>,
+    reference: Option<String>,
+    exe: Option<String>,
+    cwd: Option<String>,
+    model: Option<String>,
+    resume_cmd: Vec<String>,
+) -> Result<(), String> {
+    use std::io::IsTerminal;
+    let manual = std::io::stdin().is_terminal();
+    let _ = hook_event;
+    let key = match std::env::var("UBRA_PANE_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        Some(key) => key,
+        None => return Ok(()),
+    };
+    let incarnation: u64 = match std::env::var("UBRA_SESSION_INCARNATION")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        Some(incarnation) => incarnation,
+        None => return Ok(()),
+    };
+    let epoch: Option<u64> = std::env::var("UBRA_EPOCH")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let mut stdin_text = String::new();
+    if !manual {
+        use std::io::Read;
+        let _ = std::io::stdin()
+            .take(1024 * 1024)
+            .read_to_string(&mut stdin_text);
+    }
+    let hook = crate::agent_adapters::parse_hook_stdin(&stdin_text);
+    let stdin_json: serde_json::Value = serde_json::from_str(&stdin_text).unwrap_or_default();
+    let string_field = |flag: Option<String>, key: &str| {
+        flag.or_else(|| {
+            stdin_json
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let reference = reference.or(hook.reference);
+    let family = string_field(family, "family");
+    match (&family, &reference) {
+        (Some(_), Some(_)) => {}
+        _ if !manual => return Ok(()),
+        _ => return Err("agent-report needs --family and --reference (or hook stdin)".into()),
+    }
+    let resume_argv = if resume_cmd.is_empty() {
+        stdin_json
+            .get("resume_argv")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        resume_cmd
+    };
+    // Hooks never start a daemon: no daemon means the pane is already gone.
+    let Ok(mut stream) = connect_authenticated(state_dir, Duration::from_secs(2)) else {
+        return Ok(());
+    };
+    let mut payload = serde_json::json!({
+        "op": "agent_report", "key": key, "incarnation": incarnation,
+        "family": family, "reference": reference,
+        "resume_argv": resume_argv, "pid": std::process::id(),
+    });
+    if let Some(epoch) = epoch {
+        payload["epoch"] = epoch.into();
+    }
+    if let Some(exe) = string_field(exe, "exe") {
+        payload["exe"] = exe.into();
+    }
+    if let Some(cwd) = cwd.or(hook.cwd) {
+        payload["cwd"] = cwd.into();
+    }
+    if let Some(model) = model.or(hook.model) {
+        payload["model"] = model.into();
+    }
+    match quiet_request(&mut stream, payload) {
+        Ok(_) => Ok(()),
+        Err(error) if !manual => {
+            eprintln!("ubra-cli agent-report: {error}");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Execute one CLI command against the daemon.
 pub fn run(opts: CliOptions) -> Result<(), String> {
     if opts.command == CliCommand::Help {
         println!("{CLI_USAGE}");
         return Ok(());
     }
+    if let CliCommand::Integrations { action, family } = &opts.command {
+        return run_integrations(*action, family.clone());
+    }
     let state_dir = state_dir_of(&opts);
+    if let CliCommand::AgentReport {
+        hook_event,
+        family,
+        reference,
+        exe,
+        cwd,
+        model,
+        resume_cmd,
+    } = &opts.command
+    {
+        return run_agent_report(
+            &state_dir,
+            hook_event.clone(),
+            family.clone(),
+            reference.clone(),
+            exe.clone(),
+            cwd.clone(),
+            model.clone(),
+            resume_cmd.clone(),
+        );
+    }
     let mut stream = if opts.command == CliCommand::Shutdown {
         connect_authenticated(&state_dir, Duration::from_secs(2))
             .map_err(|e| format!("cannot confirm daemon shutdown: {e}"))?
@@ -605,6 +888,18 @@ pub fn run(opts: CliOptions) -> Result<(), String> {
         )?),
         CliCommand::Shutdown => {
             print(&request(&mut stream, serde_json::json!({"op":"shutdown"}))?);
+        }
+        CliCommand::Close { pane, key } => print(&request(
+            &mut stream,
+            serde_json::json!({"op": "pty_close", "pane": pane, "key": key}),
+        )?),
+        CliCommand::StopAll => print(&request(
+            &mut stream,
+            serde_json::json!({"op": "stop_all"}),
+        )?),
+        CliCommand::Flush => print(&request(&mut stream, serde_json::json!({"op": "flush"}))?),
+        CliCommand::AgentReport { .. } | CliCommand::Integrations { .. } => {
+            unreachable!("handled before connecting")
         }
     }
     Ok(())
@@ -781,6 +1076,89 @@ mod tests {
         assert!(parse_cli_args(&args(&["wait-state", "2"])).is_err());
         assert!(parse_cli_args(&args(&["wait-state", "2", "idle", "--timeout"])).is_err());
         assert!(parse_cli_args(&args(&["wait-state", "2", "idle", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn parses_close_stop_flush() {
+        assert_eq!(
+            parse_cli_args(&args(&["close", "3"])).unwrap().command,
+            CliCommand::Close {
+                pane: Some(3),
+                key: None
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["close", "--key", "pane-1"]))
+                .unwrap()
+                .command,
+            CliCommand::Close {
+                pane: None,
+                key: Some("pane-1".to_string())
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["stop-all"])).unwrap().command,
+            CliCommand::StopAll
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["flush"])).unwrap().command,
+            CliCommand::Flush
+        );
+        assert!(parse_cli_args(&args(&["close"])).is_err());
+        assert!(parse_cli_args(&args(&["close", "--key"])).is_err());
+    }
+
+    #[test]
+    fn parses_agent_report_and_integrations() {
+        assert_eq!(
+            parse_cli_args(&args(&[
+                "agent-report",
+                "--family",
+                "claude",
+                "--reference",
+                "s1",
+                "--resume-cmd",
+                "claude",
+                "--resume",
+                "s1"
+            ]))
+            .unwrap()
+            .command,
+            CliCommand::AgentReport {
+                hook_event: None,
+                family: Some("claude".to_string()),
+                reference: Some("s1".to_string()),
+                exe: None,
+                cwd: None,
+                model: None,
+                resume_cmd: vec![
+                    "claude".to_string(),
+                    "--resume".to_string(),
+                    "s1".to_string()
+                ],
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["integrations", "status"]))
+                .unwrap()
+                .command,
+            CliCommand::Integrations {
+                action: IntegrationAction::Status,
+                family: None
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["integrations", "install", "--family", "claude"]))
+                .unwrap()
+                .command,
+            CliCommand::Integrations {
+                action: IntegrationAction::Install,
+                family: Some("claude".to_string())
+            }
+        );
+        assert!(parse_cli_args(&args(&["integrations"])).is_err());
+        assert!(parse_cli_args(&args(&["integrations", "bogus"])).is_err());
+        assert!(parse_cli_args(&args(&["agent-report", "--bogus"])).is_err());
     }
 
     #[test]

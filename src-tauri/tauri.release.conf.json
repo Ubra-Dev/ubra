@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "_comment": "Release overlay: bundles the daemon + CLI sidecars. Plain cargo/tauri builds stay sidecar-free so tests and dev never depend on staged binaries. Build with: npm run tauri:build",
+  "build": {
+    "beforeBuildCommand": "npm run build:desktop"
+  },
+  "bundle": {
+    "externalBin": ["binaries/ubra-daemon", "binaries/ubra-cli"]
+  }
+}

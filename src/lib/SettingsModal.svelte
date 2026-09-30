@@ -72,6 +72,58 @@
   let folderError = $state<string | null>(null);
   let soundFileChecking = $state(false);
 
+  interface IntegrationEntry {
+    family: string;
+    label: string;
+    installed: boolean;
+    mechanism: string;
+  }
+  let integrations = $state<IntegrationEntry[] | null>(null);
+  let integrationsBusy = $state(false);
+  let integrationsError = $state<string | null>(null);
+
+  function refreshIntegrations(): void {
+    invoke<IntegrationEntry[]>("integrations_status")
+      .then((entries) => {
+        integrations = entries;
+        integrationsError = null;
+      })
+      .catch((e) => {
+        integrationsError = String(e);
+      });
+  }
+
+  function setIntegration(family: string, install: boolean): void {
+    integrationsBusy = true;
+    integrationsError = null;
+    invoke<boolean>(install ? "integrations_install" : "integrations_remove", { family })
+      .then(() => refreshIntegrations())
+      .catch((e) => {
+        integrationsError = String(e);
+      })
+      .finally(() => {
+        integrationsBusy = false;
+      });
+  }
+
+  function quitUbra(): void {
+    void (async () => {
+      try {
+        await store.flushNow();
+        await invoke("quit_app");
+      } catch (error) {
+        toasts.push("Quit failed", String(error), "", { kind: "copy" });
+      }
+    })();
+  }
+
+  function stopAllAndQuit(): void {
+    store.cancelStopAllQuit();
+    invoke("stop_all_terminals_and_quit").catch((error) =>
+      toasts.push("Couldn't stop terminals", String(error), "", { kind: "copy" }),
+    );
+  }
+
   const shortcuts = cheatSheet(isMacPlatform(navigator.platform));
 
   function close(): void {
@@ -100,6 +152,7 @@
       })
       .catch((e) => console.error("ubra: app info failed", e));
     void agentClis.ensure();
+    refreshIntegrations();
   });
 
   // Seed the CLI draft from the active workspace once detection resolves.
@@ -697,25 +750,118 @@
               </div>
             </div>
             <div class="group">
+              <h3 class="group-label">Terminal persistence</h3>
+              <div class="card">
+                <label class="row switch">
+                  <span class="label">Resume agent conversations after restarts</span>
+                  <input
+                    type="checkbox"
+                    checked={store.agentRecovery}
+                    onchange={(e) => store.setAgentRecovery(e.currentTarget.checked)}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row switch">
+                  <span class="label">Save terminal screen history</span>
+                  <input
+                    type="checkbox"
+                    checked={store.saveScreenHistory}
+                    onchange={(e) => store.setSaveScreenHistory(e.currentTarget.checked)}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="hint">
+                Quitting Ubra leaves terminals running in the background;
+                reopening reattaches to the same processes and screens. After a
+                restart, panes restore their directories and recent output, and
+                agents resume when their exact session was reported. Turning
+                history off removes saved screen history.
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Agent integrations</h3>
+              <div class="card">
+                {#if integrations === null}
+                  <div class="row"><span class="label">Loading…</span></div>
+                {:else}
+                  {#each integrations.filter((e) => e.mechanism !== "reported-only") as entry (entry.family)}
+                    <div class="row">
+                      <span class="label">
+                        {entry.label} session reporting
+                        {#if entry.installed}
+                          <span class="pill">installed</span>
+                        {/if}
+                      </span>
+                      {#if entry.installed}
+                        <button
+                          class="btn"
+                          disabled={integrationsBusy}
+                          onclick={() => setIntegration(entry.family, false)}
+                        >
+                          Remove
+                        </button>
+                      {:else}
+                        <button
+                          class="btn"
+                          disabled={integrationsBusy}
+                          onclick={() => setIntegration(entry.family, true)}
+                        >
+                          Install
+                        </button>
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if integrations.every((e) => e.mechanism === "reported-only")}
+                    <div class="row"><span class="label">No installable integrations.</span></div>
+                  {/if}
+                {/if}
+              </div>
+              {#if integrationsError}
+                <div class="hint error-hint" role="alert">{integrationsError}</div>
+              {/if}
+              <div class="hint">
+                Installed hooks report exact agent sessions so conversations
+                can resume after a restart. Existing hooks are preserved;
+                removal deletes only Ubra entries.
+              </div>
+            </div>
+            <div class="group">
               <h3 class="group-label">Quit</h3>
               <div class="card">
                 <div class="row">
                   <span class="label">
-                    Quit Ubra and terminate owned pane processes
+                    Quit Ubra; terminals keep running in the background
                   </span>
-                  <button
-                    class="btn"
-                    onclick={() => {
-                      invoke("quit_app").catch((error) =>
-                        toasts.push("Quit failed", String(error), "", {
-                          kind: "copy",
-                        }),
-                      );
-                    }}
-                  >
-                    Quit Ubra
-                  </button>
+                  <button class="btn" onclick={quitUbra}>Quit Ubra</button>
                 </div>
+                {#if store.stopAllQuitRequested}
+                  <div class="row confirm-row">
+                    <span class="label">
+                      Terminate every terminal and drop automatic recovery?
+                      Layouts are kept.
+                    </span>
+                    <span class="confirm-actions">
+                      <button class="btn" onclick={() => store.cancelStopAllQuit()}>
+                        Cancel
+                      </button>
+                      <button class="btn danger" onclick={stopAllAndQuit}>
+                        Stop all and quit
+                      </button>
+                    </span>
+                  </div>
+                {:else}
+                  <div class="row">
+                    <span class="label">Terminate all terminals and quit</span>
+                    <button class="btn" onclick={() => store.requestStopAllQuit()}>
+                      Stop all…
+                    </button>
+                  </div>
+                {/if}
               </div>
             </div>
             <div class="group about-block">
@@ -1145,6 +1291,23 @@
   .btn-sm {
     padding: 2px 10px;
     font-size: 11px;
+  }
+  .btn.danger {
+    border-color: var(--danger, #b3261e);
+    color: var(--danger, #b3261e);
+  }
+  .pill {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--surface-hover);
+    color: var(--text-subtle);
+    font-size: 11px;
+  }
+  .confirm-actions {
+    display: inline-flex;
+    gap: 8px;
   }
   .file-input {
     border: 1px solid var(--input-border);

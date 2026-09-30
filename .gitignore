@@ -11,3 +11,7 @@ vite.config.ts.timestamp-*
 
 # Local toolchain (rustup/cargo/npm-cache used by this workspace)
 .tooling/
+
+# Staged Tauri sidecar binaries (built by npm run bundle:bins)
+/src-tauri/binaries/*
+!/src-tauri/binaries/README.md

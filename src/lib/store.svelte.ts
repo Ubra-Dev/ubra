@@ -117,6 +117,12 @@ class AppStore {
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
   toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
   soundEnabled = $state<boolean>(true);
+  /** Resume agent conversations automatically after a daemon restart. */
+  agentRecovery = $state<boolean>(true);
+  /** Persist terminal screen history for recovery. */
+  saveScreenHistory = $state<boolean>(true);
+  /** Stop-all-terminals quit awaiting confirmation in Settings. */
+  stopAllQuitRequested = $state<boolean>(false);
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
   /** Custom notification sound file (blank = synthesized default chime). */
@@ -189,6 +195,10 @@ class AppStore {
       if (savedPosition !== null) this.toastPosition = parseToastPosition(savedPosition);
       const savedSound = window.localStorage.getItem("ubra.soundEnabled");
       if (savedSound !== null) this.soundEnabled = savedSound !== "false";
+      const savedRecovery = window.localStorage.getItem("ubra.agentRecovery");
+      if (savedRecovery !== null) this.agentRecovery = savedRecovery !== "false";
+      const savedHistory = window.localStorage.getItem("ubra.saveScreenHistory");
+      if (savedHistory !== null) this.saveScreenHistory = savedHistory !== "false";
       try {
         const savedMuted = window.localStorage.getItem("ubra.mutedAgents");
         if (savedMuted !== null) {
@@ -447,6 +457,44 @@ class AppStore {
   setSoundEnabled(enabled: boolean): void {
     this.soundEnabled = enabled;
     this.savePref("ubra.soundEnabled", String(enabled));
+  }
+
+  setAgentRecovery(enabled: boolean): void {
+    this.agentRecovery = enabled;
+    this.savePref("ubra.agentRecovery", String(enabled));
+  }
+
+  setSaveScreenHistory(enabled: boolean): void {
+    this.saveScreenHistory = enabled;
+    this.savePref("ubra.saveScreenHistory", String(enabled));
+    void this.pushHistoryOption();
+  }
+
+  /** Push the history option to the daemon (also sent on reconnect). */
+  async pushHistoryOption(): Promise<void> {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("daemon_set_options", { saveHistory: this.saveScreenHistory });
+    } catch (error) {
+      console.error("ubra: failed to push history option", error);
+    }
+  }
+
+  /** Open Settings on the stop-all-terminals confirmation. */
+  requestStopAllQuit(): void {
+    this.settingsOpen = true;
+    this.stopAllQuitRequested = true;
+  }
+
+  cancelStopAllQuit(): void {
+    this.stopAllQuitRequested = false;
+  }
+
+  /** Flush pending layout changes immediately (quit paths await this). */
+  async flushNow(): Promise<void> {
+    clearTimeout(this.saveTimer ?? undefined);
+    this.saveTimer = null;
+    await this.flush();
   }
 
   setSoundFile(path: string): void {

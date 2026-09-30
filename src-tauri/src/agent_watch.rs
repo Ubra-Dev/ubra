@@ -159,6 +159,10 @@ pub fn match_agent(stem: &str) -> Option<(&'static str, &'static str)> {
     if let Some(&(cli, label)) = AGENT_TABLE.iter().find(|(name, _)| *name == stem) {
         return Some((cli, label));
     }
+    // Official executable aliases (e.g. `kiro-cli`) resolve to their canonical family.
+    if let Some(adapter) = crate::agent_adapters::find_by_executable(stem) {
+        return Some((adapter.family, adapter.label));
+    }
     if stem == "muse-bin" || stem.starts_with("muse-bin-") {
         return Some(("muse", "Muse"));
     }

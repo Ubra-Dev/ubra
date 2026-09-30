@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { agent } from "$lib/agent.svelte";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
@@ -27,6 +29,25 @@
     agent.start();
     workspaceGit.start();
     void agentClis.ensure();
+    // Native quit paths (tray, keyboard, close without tray) flush pending
+    // layout changes first; terminals keep running in the background daemon.
+    void listen("request-quit", () => {
+      void (async () => {
+        try {
+          await store.flushNow();
+          await invoke("quit_app");
+        } catch (error) {
+          console.error("ubra: quit failed", error);
+        }
+      })();
+    });
+    void listen("request-stop-all-quit", () => {
+      store.requestStopAllQuit();
+    });
+    // The daemon forgets options on restart; re-push on every connect.
+    void listen<{ connected: boolean }>("daemon-status", (event) => {
+      if (event.payload.connected) void store.pushHistoryOption();
+    });
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
