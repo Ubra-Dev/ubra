@@ -14,3 +14,6 @@
 - [ ] One logical change; every caller migrated (no shims/aliases)
 - [ ] Follows the existing pattern in touched files
 - [ ] Tests only where a plausible bug would fail them
+- [ ] I have permission to contribute this work under MIT; imported components keep their original licenses
+- [ ] Copied/adapted code or assets are identified with upstream source, version, and license (or none were imported)
+- [ ] Required third-party notices are preserved; dependency/asset changes were checked with `npm run licenses`

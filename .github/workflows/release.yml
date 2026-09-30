@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  PUBLIC_POSTHOG_PROJECT_TOKEN: ""
+  PUBLIC_POSTHOG_HOST: ""
+
 jobs:
   verify:
     uses: ./.github/workflows/ci.yml
@@ -58,16 +62,84 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Prepare macOS signing
+        if: runner.os == 'macOS'
+        run: node scripts/prepare-signing.mjs
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+      - name: Prepare Windows signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/prepare-signing.ps1
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
       # Direct CLI build (no tauri-action): bundles via the pinned
       # @tauri-apps/cli in devDependencies, with daemon + CLI sidecars.
-      - name: Tauri build
+      - name: Tauri build (macOS)
+        if: runner.os == 'macOS'
         run: npm run tauri:build
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Tauri build (Linux)
+        if: runner.os == 'Linux'
+        run: npm run tauri:build
+
+      - name: Tauri build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm run tauri:build -- --config "$env:UBRA_SIGNING_CONFIG"
+
+      - name: Verify signing and notarization
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        run: node scripts/verify-signing.mjs
+
+      - name: Remove macOS signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -n "${UBRA_SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$UBRA_SIGNING_KEYCHAIN"
+          fi
+
+      - name: Remove Windows signing certificate
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:UBRA_SIGNING_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:UBRA_SIGNING_THUMBPRINT" -Force
+          }
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ runner.os }}
           path: src-tauri/target/release/bundle/
+          if-no-files-found: error
+
+      - name: Upload third-party notices and corresponding source
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: legal
+          include-hidden-files: true
+          path: |
+            .tooling/legal/LICENSE
+            .tooling/legal/THIRD_PARTY_NOTICES.txt
+            .tooling/legal/dependency-inventory.json
+            .tooling/legal/THIRD_PARTY_SOURCES.tar.gz
           if-no-files-found: error
 
   publish:
@@ -98,10 +170,16 @@ jobs:
             fi
           done
 
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: actions/download-artifact@v4
         with:
           path: bundles
+      - name: Prepare downloads and SHA-256 checksums
+        run: node scripts/release-checksums.mjs bundles release-assets
       - uses: softprops/action-gh-release@v2
         with:
-          files: bundles/**/*
+          files: release-assets/*
           generate_release_notes: true
