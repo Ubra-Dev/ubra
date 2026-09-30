@@ -1,14 +1,43 @@
 <script lang="ts">
+  import { onMount, tick } from "svelte";
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
-  import Icon from "./Icon.svelte";
+  import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
+  import { agentClis } from "./agentClis.svelte";
   import { store } from "./store.svelte";
 
   let projectDirectory = $state<string | null>(null);
-  let command = $state("");
+  const detected = $derived(agentClis.clis);
+  let selection = $state("");
+  let selectionSettled = false;
+  let customCommand = $state("");
   let pickingDirectory = $state(false);
   let errorMessage = $state<string | null>(null);
-  let commandInput = $state<HTMLInputElement | null>(null);
+  let selectEl = $state<HTMLSelectElement | null>(null);
+  let customEl = $state<HTMLInputElement | null>(null);
+
+  const command = $derived(resolveAgentCommand(selection, customCommand));
+  const selectedCli = $derived(detected?.find((entry) => entry.cli === selection) ?? null);
+
+  onMount(() => {
+    void agentClis.ensure();
+  });
+
+  // Settle the initial selection once when detection resolves; never
+  // clobber a choice the user (or a later refresh) already made.
+  $effect(() => {
+    const clis = agentClis.clis;
+    if (clis === null || selectionSettled) return;
+    selectionSettled = true;
+    if (clis.length === 1) selection = clis[0].cli;
+    else if (clis.length === 0) selection = CUSTOM_COMMAND;
+  });
+
+  function onSelectChange(e: Event): void {
+    if ((e.target as HTMLSelectElement).value === CUSTOM_COMMAND) {
+      void tick().then(() => customEl?.focus());
+    }
+  }
 
 
   async function chooseProject(): Promise<void> {
@@ -23,7 +52,7 @@
       });
       if (typeof path === "string") {
         projectDirectory = path;
-        commandInput?.focus();
+        (selectEl ?? customEl)?.focus();
       }
     } catch (error) {
       console.error("ubra: project folder picker failed", error);
@@ -50,7 +79,7 @@
   tabindex="-1" data-keyboard-overlay use:overlayFocus>
   <div class="card">
     <aside class="intro">
-      <div class="brand"><Icon name="layers" size={17} /><span>Ubra</span></div>
+      <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
       <div class="intro-copy">
         <h1 id="welcome-title">Put your agent in its project.</h1>
         <p>
@@ -115,25 +144,65 @@
         {/if}
       </div>
 
-      <label class="field-group command-group">
-        <span class="field-label">Agent command</span>
-        <span class="command-field">
-          <span class="command-prompt" aria-hidden="true">$</span>
-          <input
-            type="text"
-            bind:this={commandInput}
-            bind:value={command}
-            placeholder="codex"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            aria-describedby="command-hint"
-          />
-        </span>
+      <div class="field-group command-group">
+        <span class="field-label" id="command-label">Agent command</span>
+        {#if detected === null}
+          <span class="command-field">
+            <span class="command-prompt" aria-hidden="true">$</span>
+            <span class="detecting">Detecting installed agents…</span>
+          </span>
+        {:else}
+          {#if detected.length > 0}
+            <span class="command-field">
+              <span class="command-prompt" aria-hidden="true">$</span>
+              <select
+                bind:this={selectEl}
+                bind:value={selection}
+                aria-labelledby="command-label"
+                aria-describedby="command-hint"
+                onchange={onSelectChange}
+              >
+                <option value="" disabled>Choose an agent CLI</option>
+                {#each detected as entry (entry.cli)}
+                  <option value={entry.cli} title={entry.path}>
+                    {entry.label} · {entry.cli}
+                  </option>
+                {/each}
+                <option value={CUSTOM_COMMAND}>Custom command…</option>
+              </select>
+            </span>
+          {/if}
+          {#if selection === CUSTOM_COMMAND}
+            <span class="command-field">
+              <span class="command-prompt" aria-hidden="true">$</span>
+              <input
+                type="text"
+                bind:this={customEl}
+                bind:value={customCommand}
+                placeholder="my-agent --yes"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-label="Custom agent command"
+                aria-describedby="command-hint"
+              />
+            </span>
+          {/if}
+        {/if}
         <span class="hint" id="command-hint">
-          Use an installed CLI, such as codex, claude, or opencode.
+          {#if selectedCli}
+            Found at {selectedCli.path}
+          {:else if detected === null}
+            Looking for installed agent CLIs…
+          {:else if detected.length === 0}
+            No agent CLIs detected — enter any installed command.
+          {:else if selection === CUSTOM_COMMAND}
+            Enter any installed command, with arguments if needed.
+          {:else}
+            {detected.length} installed agent{detected.length === 1 ? "" : "s"} detected.
+          {/if}
         </span>
-      </label>
+      </div>
 
       <div class="status-tip">
         <span class="status-dot" aria-hidden="true"></span>
@@ -195,15 +264,13 @@
     border-right: 1px solid var(--border);
   }
   .brand {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 9px;
-    color: var(--text-strong);
-    font-size: 14px;
-    font-weight: 650;
   }
-  .brand :global(svg) {
-    color: var(--accent);
+  .brand-logo {
+    display: block;
+    height: 36px;
+    width: auto;
   }
   .intro-copy {
     margin-top: 70px;
@@ -274,7 +341,7 @@
     align-items: center;
     gap: 7px;
     color: var(--text-muted);
-    font: 11px system-ui, sans-serif;
+    font: 11px var(--font-ui);
   }
   .preview-state i {
     width: 7px;
@@ -409,6 +476,19 @@
     background: transparent;
     color: var(--text-strong);
     font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .command-field select {
+    width: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-strong);
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    cursor: pointer;
+  }
+  .detecting {
+    color: var(--text-subtle);
+    font-size: 12px;
   }
   .command-field:focus-within {
     border-color: var(--accent);

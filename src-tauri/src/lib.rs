@@ -1,3 +1,4 @@
+pub mod agent_clis;
 pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
@@ -81,6 +82,11 @@ fn agent_snapshot(service: State<'_, AgentStatusService>) -> AgentUpdate {
 #[tauri::command]
 fn git_branch(path: String) -> Option<String> {
     git_branch::branch_for(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
+    agent_clis::detect()
 }
 
 #[tauri::command]
@@ -313,7 +319,6 @@ pub fn run() {
                 }
             };
             let service = AgentStatusService::start(&manager, rules_dir, move |update| {
-                let _ = poll_app.emit("agent-states", &update.states);
                 let _ = poll_app.emit("agent-state-update", &update);
             });
             app.manage(service);
@@ -393,6 +398,7 @@ pub fn run() {
             pty_kill,
             pty_snapshot,
             agent_snapshot,
+            detect_agent_clis,
             git_branch,
             load_layout,
             save_layout,

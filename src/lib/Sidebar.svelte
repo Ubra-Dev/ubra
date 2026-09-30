@@ -439,7 +439,7 @@
     overflow: hidden;
     background: var(--sidebar-bg);
     padding: 10px 8px;
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     user-select: none;
   }

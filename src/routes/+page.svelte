@@ -8,19 +8,24 @@
   import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
+  import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
+  import { agentClis } from "$lib/agentClis.svelte";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
+  import "$lib/uiFontFaces";
+  import { uiFontStyle } from "$lib/uiFonts";
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
     void store.boot();
     agent.start();
     workspaceGit.start();
+    void agentClis.ensure();
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
@@ -134,7 +139,7 @@
 
 <svelte:window onkeydown={onGlobalKeyDown} />
 
-<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)}`}>
+<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)};${uiFontStyle(store.uiFontId)}`}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
   {:else if store.recoveryRequired}
@@ -178,6 +183,9 @@
       </div>
       <StatusBar />
     </div>
+    {#if store.layout.workspaces.length === 0 && !store.onboardingOpen}
+      <EmptyWorkspaces />
+    {/if}
     {#if store.onboardingOpen}
       <FirstRun />
     {/if}
@@ -200,6 +208,7 @@
     overflow: hidden;
   }
   .root {
+    --font-ui: system-ui, sans-serif;
     width: 100vw;
     height: 100vh;
     background: var(--app-bg);
@@ -210,7 +219,7 @@
     min-height: 100vh;
     display: grid;
     place-items: center;
-    font: 14px/1.6 system-ui, sans-serif;
+    font: 14px/1.6 var(--font-ui);
     overflow-y: auto;
   }
   .recovery-content {
@@ -237,7 +246,7 @@
     justify-content: center;
     height: 100vh;
     color: var(--text-muted);
-    font: 14px system-ui, sans-serif;
+    font: 14px var(--font-ui);
   }
   .shell {
     display: flex;

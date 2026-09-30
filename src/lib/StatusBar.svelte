@@ -213,7 +213,7 @@
     min-width: 0;
     background: var(--sidebar-bg);
     border-top: 1px solid var(--border);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     user-select: none;
   }

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  activeWorkspace,
   baseName,
   clearStaleZoom,
   closePaneInTab,
@@ -195,6 +196,58 @@ describe("sanitizeLayout", () => {
     layout.workspaces[0].activeTabId = layout.workspaces[0].tabs[0].id;
     layout.activeWorkspaceId = "missing";
     assert.throws(() => sanitizeLayout(layout), /active workspace/);
+  });
+
+  it("accepts zero workspaces with an empty active reference", () => {
+    const layout = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "" };
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
+  });
+
+  it("resolves no active workspace when none exist", () => {
+    const empty = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "" };
+    assert.equal(activeWorkspace(empty), undefined);
+    const fresh = defaultLayout();
+    assert.equal(activeWorkspace(fresh)?.id, fresh.activeWorkspaceId);
+  });
+
+  it("rejects zero workspaces with a stale active reference", () => {
+    const layout = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "ws-1" };
+    assert.throws(() => sanitizeLayout(layout), /active workspace/);
+    const missing = { ...defaultLayout(), workspaces: [] };
+    delete (missing as { activeWorkspaceId?: string }).activeWorkspaceId;
+    assert.throws(() => sanitizeLayout(missing), /active workspace/);
+  });
+
+  it("keeps per-workspace terminal defaults", () => {
+    const layout = defaultLayout();
+    const ws = layout.workspaces[0];
+    (ws as { defaultCli?: string }).defaultCli = "codex --yolo";
+    (ws as { defaultCwd?: string }).defaultCwd = "/repo/web";
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
+  });
+
+  it("drops invalid per-workspace terminal defaults", () => {
+    const layout = defaultLayout();
+    const ws = layout.workspaces[0] as unknown as Record<string, unknown>;
+    ws["defaultCli"] = 42;
+    ws["defaultCwd"] = "   ";
+    const clean = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    assert.equal("defaultCli" in clean.workspaces[0], false);
+    assert.equal("defaultCwd" in clean.workspaces[0], false);
+  });
+
+  it("loads pre-defaults documents unchanged", () => {
+    const layout = defaultLayout();
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
   });
 
   it("normalizes extreme finite weights without overflow or lost geometry", () => {

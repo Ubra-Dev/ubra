@@ -72,7 +72,7 @@
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
     padding: 9px 12px;
     cursor: pointer;
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
   }
   .toast:hover {

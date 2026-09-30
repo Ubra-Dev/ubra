@@ -380,7 +380,7 @@
   }
   .find-input {
     width: 180px;
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     background: var(--input-bg);
     border: 1px solid var(--input-border);
