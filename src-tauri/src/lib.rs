@@ -3,9 +3,9 @@ pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
 pub mod daemon;
-pub mod git_branch;
 pub mod files;
 pub mod git;
+pub mod git_branch;
 pub mod layout_store;
 mod process_tree;
 pub mod pty_manager;
@@ -13,6 +13,7 @@ pub mod screen_rules;
 pub mod sound;
 pub mod telemetry;
 mod terminal_state;
+pub mod usage;
 
 use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
@@ -90,6 +91,20 @@ fn git_branch(path: String) -> Option<String> {
 #[tauri::command]
 fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
     agent_clis::detect()
+}
+
+#[tauri::command]
+fn supported_usage_clis() -> Vec<usage::SupportedCli> {
+    usage::supported_clis()
+}
+
+#[tauri::command]
+async fn cli_usage(
+    cache: State<'_, usage::UsageCache>,
+    cli: String,
+    force: bool,
+) -> Result<usage::CliUsage, String> {
+    Ok(cache.usage(&cli, force).await)
 }
 
 #[tauri::command]
@@ -366,6 +381,7 @@ pub fn run() {
             let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
             app.manage(manager.clone());
             app.manage(ShellState::default());
+            app.manage(usage::UsageCache::new());
             match data_dir(app.handle()) {
                 Ok(dir) => {
                     telemetry::init_from_disk(&dir);
@@ -475,6 +491,8 @@ pub fn run() {
             pty_snapshot,
             agent_snapshot,
             detect_agent_clis,
+            supported_usage_clis,
+            cli_usage,
             git_branch,
             load_layout,
             save_layout,

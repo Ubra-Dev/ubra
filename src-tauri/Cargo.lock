@@ -5574,6 +5574,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "posthog-rs",
+ "reqwest",
  "rodio",
  "serde",
  "serde_json",

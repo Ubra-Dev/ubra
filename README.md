@@ -34,6 +34,8 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   window is hidden to the tray.
 - **Headless automation (experimental)** — a separate authenticated local daemon
   and JSON CLI expose terminal and agent-state operations without a window.
+- **Plan usage** — Settings → Usage shows plan windows for supported Codex and
+  Claude Code logins. Credentials stay in the Rust backend and are read-only.
 
 ## Install
 
