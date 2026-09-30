@@ -96,6 +96,96 @@ fn pty_spawns_and_captures_output() {
     );
 }
 
+/// Panes advertise a color-capable terminal even when the spawner (a
+/// long-lived daemon) carries a stale colorless environment.
+#[test]
+fn pty_spawn_advertises_color_capable_terminal() {
+    fn env_command() -> (Option<String>, Vec<String>) {
+        #[cfg(windows)]
+        return (
+            Some("cmd.exe".to_string()),
+            vec![
+                "/C".to_string(),
+                "echo TERM=%TERM% COLORTERM=%COLORTERM% NO_COLOR=%NO_COLOR%".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        return (
+            Some("sh".to_string()),
+            vec![
+                "-c".to_string(),
+                "echo TERM=$TERM COLORTERM=$COLORTERM NO_COLOR=${NO_COLOR-unset}".to_string(),
+            ],
+        );
+    }
+
+    // Simulate a daemon launched from a colorless session: the pane must
+    // not inherit any of this. Restored immediately after spawn, which
+    // captures the child environment.
+    let saved_term = std::env::var_os("TERM");
+    let saved_colorterm = std::env::var_os("COLORTERM");
+    let saved_no_color = std::env::var_os("NO_COLOR");
+    std::env::set_var("TERM", "dumb");
+    std::env::remove_var("COLORTERM");
+    std::env::set_var("NO_COLOR", "1");
+
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    let (shell, args) = env_command();
+    let id = manager.spawn(shell, None, args, 80, 24).unwrap();
+
+    match saved_term {
+        Some(v) => std::env::set_var("TERM", v),
+        None => std::env::remove_var("TERM"),
+    }
+    match saved_colorterm {
+        Some(v) => std::env::set_var("COLORTERM", v),
+        None => std::env::remove_var("COLORTERM"),
+    }
+    match saved_no_color {
+        Some(v) => std::env::set_var("NO_COLOR", v),
+        None => std::env::remove_var("NO_COLOR"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut transcript = String::new();
+    let mut handshake = Handshake::new();
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(got, data)) => {
+                assert_eq!(got, id);
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, success)) => {
+                assert_eq!(got, id);
+                assert!(success, "env probe should exit 0");
+                break;
+            }
+            Err(_) => panic!("timed out waiting for env probe; got: {transcript:?}"),
+        }
+    }
+    assert!(
+        transcript.contains("TERM=xterm-256color"),
+        "pane should advertise xterm-256color, got: {transcript:?}"
+    );
+    assert!(
+        transcript.contains("COLORTERM=truecolor"),
+        "pane should advertise truecolor, got: {transcript:?}"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        transcript.contains("NO_COLOR=unset"),
+        "pane must not inherit NO_COLOR, got: {transcript:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        transcript.contains("NO_COLOR=%NO_COLOR%"),
+        "pane must not inherit NO_COLOR, got: {transcript:?}"
+    );
+}
+
 #[test]
 fn pty_kill_terminates_live_pane() {
     let (tx, rx) = mpsc::channel();
