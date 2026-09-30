@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { acquireSession, closeSession, dropSession } from "../src/lib/ptySessions.ts";
+import {
+  acquireSession, attachResultFor, closeSession, dropSession, forgetSession,
+  noteAttachResult,
+} from "../src/lib/ptySessions.ts";
 
 function deferred() {
   let resolve!: (id: number) => void;
@@ -63,5 +66,20 @@ describe("pane session ownership", () => {
     const retried = acquireSession("failure", async () => 13, kill);
     assert.equal(await retried.ready, 13);
     closeSession("failure");
+  });
+
+  it("forgetSession releases the lease and cached result without killing", async () => {
+    const killed: number[] = [];
+    const kill = async (id: number) => { killed.push(id); };
+    const lease = acquireSession("restart", async () => 16, kill);
+    assert.equal(await lease.ready, 16);
+    noteAttachResult("restart", { pane: 16, epoch: 1 });
+    forgetSession("restart");
+    assert.equal(attachResultFor("restart"), null);
+    const replacement = acquireSession("restart", async () => 17, kill);
+    assert.notEqual(replacement, lease);
+    assert.equal(await replacement.ready, 17);
+    assert.deepEqual(killed, []);
+    closeSession("restart");
   });
 });
