@@ -9,6 +9,7 @@
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
   import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
+  import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
@@ -180,6 +181,7 @@
             {/each}
           </div>
         </div>
+        <RightSidebar />
       </div>
       <StatusBar />
     </div>

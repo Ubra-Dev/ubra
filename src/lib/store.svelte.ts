@@ -21,6 +21,7 @@ import {
   moveWorkspace,
   preferredAgentCli as pickPreferredAgentCli,
   resizePaneInTab,
+  resolveWorkspaceRoot,
   sanitizeLayout,
   setZoomedPane,
   splitPaneInTab,
@@ -66,6 +67,7 @@ import {
 } from "./sidebarResize";
 
 export type CloseKind = "workspace" | "tab" | "pane";
+export type RightPanelView = "explorer" | "source-control";
 
 export interface PendingClose {
   kind: CloseKind;
@@ -94,6 +96,9 @@ class AppStore {
   saveError = $state<string | null>(null);
   /** True while a layout save is scheduled or in flight. */
   saving = $state(false);
+  rightPanelOpen = $state(true);
+  rightPanelView = $state<RightPanelView>("explorer");
+  leftPanelOpen = $state(true);
   recoveryRequired = $state(false);
   recoveryBusy = $state(false);
   recoveryError = $state<string | null>(null);
@@ -201,6 +206,14 @@ class AppStore {
       if (savedFile !== null) this.soundFile = savedFile;
       const savedStyle = window.localStorage.getItem("ubra.soundStyle");
       if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
+      const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
+      if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
+      const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
+      if (savedLeftOpen !== null) this.leftPanelOpen = savedLeftOpen !== "false";
+      const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
+      if (savedPanelView === "explorer" || savedPanelView === "source-control") {
+        this.rightPanelView = savedPanelView;
+      }
       const savedAgentCli = window.localStorage.getItem("ubra.lastAgentCli");
       if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
     } catch {
@@ -456,6 +469,21 @@ class AppStore {
     this.savePref("ubra.mutedAgents", JSON.stringify(this.mutedAgents));
   }
 
+  setRightPanelOpen(open: boolean): void {
+    this.rightPanelOpen = open;
+    this.savePref("ubra.rightPanelOpen", String(open));
+  }
+
+  setLeftPanelOpen(open: boolean): void {
+    this.leftPanelOpen = open;
+    this.savePref("ubra.leftPanelOpen", String(open));
+  }
+
+  setRightPanelView(view: RightPanelView): void {
+    this.rightPanelView = view;
+    this.savePref("ubra.rightPanelView", view);
+  }
+
   isAgentMuted(cli: string): boolean {
     return this.mutedAgents.some((m) => m.toLowerCase() === cli.toLowerCase());
   }
@@ -544,6 +572,7 @@ class AppStore {
       workspace.activeTabId = tab.id;
     }
     workspace.defaultCwd = projectDirectory;
+    workspace.root = projectDirectory;
     this.layout.workspaces.push(workspace);
     this.layout.activeWorkspaceId = workspace.id;
     const tab = workspace.tabs[0];
@@ -586,6 +615,28 @@ class AppStore {
       ws.name = name.trim();
       this.saveSoon();
     }
+  }
+
+  setWorkspaceRoot(id: string, root: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && root.trim()) {
+      ws.root = root;
+      this.saveSoon();
+    }
+  }
+
+  clearWorkspaceRoot(id: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && ws.root !== undefined) {
+      delete ws.root;
+      this.saveSoon();
+    }
+  }
+
+  /** Folder the right sidebar shows for the active workspace, if any. */
+  activeWorkspaceRoot(): string | undefined {
+    const ws = this.workspace();
+    return ws ? resolveWorkspaceRoot(ws, this.focusedPaneId) : undefined;
   }
 
   moveWorkspace(
@@ -865,6 +916,7 @@ class AppStore {
       if (workspace) {
         workspace.name = baseName(projectDirectory) || "Project";
         workspace.defaultCwd = projectDirectory;
+        workspace.root = projectDirectory;
       }
     }
     this.pendingTerminalCommands.queue(pane.id, command ?? "");

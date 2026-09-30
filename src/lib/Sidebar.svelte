@@ -210,7 +210,7 @@
 
 </script>
 
-{#if store.layout}
+{#if store.layout && store.leftPanelOpen}
   <aside class="sidebar" style="width: {store.sidebarWidth}px">
     <div class="split" bind:this={splitEl} bind:clientHeight={splitHeight}>
       <section class="pane" aria-label="Workspaces" style:flex-grow={splitRatio}>

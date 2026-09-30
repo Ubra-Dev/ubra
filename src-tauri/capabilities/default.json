@@ -7,6 +7,8 @@
     "core:default",
     "opener:allow-open-url",
     "opener:allow-default-urls",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     "dialog:allow-open",
     "updater:allow-check",
     "updater:allow-download-and-install",
