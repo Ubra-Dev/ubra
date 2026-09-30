@@ -48,6 +48,18 @@ export interface DaemonStatus {
   error?: string | null;
 }
 
+/**
+ * Snapshot failures mean transport/identity trouble, never natural exit:
+ * retained exits snapshot fine, and live panes only fail when the daemon
+ * is gone or replaced. Retry the attach a bounded number of times, then
+ * surface unavailable-with-retry instead of a fake exit.
+ */
+export type SnapshotFailurePlan = "retry" | "unavailable";
+export const MAX_SNAPSHOT_FAILURES = 3;
+export function snapshotFailurePlan(failures: number): SnapshotFailurePlan {
+  return failures < MAX_SNAPSHOT_FAILURES ? "retry" : "unavailable";
+}
+
 /** Listeners precede spawn/snapshot. Painting and replay are one synchronous cutover. */
 export class TerminalAttachment {
   private id: number | null = null;
