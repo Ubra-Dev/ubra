@@ -669,7 +669,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     color: var(--text);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     overflow: hidden;
   }
   .dialog :focus-visible {

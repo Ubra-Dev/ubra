@@ -332,6 +332,98 @@ impl DetectionRules {
                 opencode_ready,
             ],
         );
+
+        // MiMoCode renders an OpenCode-style footer: a spinner row with an
+        // `esc interrupt` hint while busy (two-stage `esc again to interrupt`
+        // after the first press), idle-only `@`/`$`/`/` hints, and a titled
+        // permission dialog. The destructive-command variant omits "allow
+        // always", so only "allow once" is required.
+        let mut mimo_approval = ScreenRule::new(
+            Blocked,
+            "mimo-permission-options",
+            &[
+                "permission required",
+                "allow once",
+                "reject",
+                "⇆ select",
+                "enter confirm",
+            ],
+            14,
+        );
+        mimo_approval.tail_contains = vec!["⇆ select".into(), "enter confirm".into()];
+        let mut mimo_question = ScreenRule::new(
+            Blocked,
+            "mimo-text-question",
+            &["type your own answer", "enter", "esc dismiss"],
+            12,
+        );
+        mimo_question.tail_contains = vec!["esc dismiss".into()];
+        let mut mimo_busy =
+            ScreenRule::new(Working, "mimo-interrupt-footer", &["esc interrupt"], 6);
+        mimo_busy.tail_contains = vec!["esc interrupt".into()];
+        mimo_busy.bind_composer("esc interrupt", &["type your message..."], false);
+        let mut mimo_busy_confirm = ScreenRule::new(
+            Working,
+            "mimo-interrupt-confirm-footer",
+            &["esc again to interrupt"],
+            6,
+        );
+        mimo_busy_confirm.tail_contains = vec!["esc again to interrupt".into()];
+        mimo_busy_confirm.bind_composer("esc again to interrupt", &["type your message..."], false);
+        let mut mimo_ready = ScreenRule::new(
+            Idle,
+            "mimo-empty-composer",
+            &["type your message...", "attach file", "commands"],
+            6,
+        );
+        mimo_ready.not_contains = vec![
+            "interrupt".into(),
+            "allow once".into(),
+            "permission required".into(),
+        ];
+        mimo_ready.tail_contains = vec!["commands".into()];
+        profiles.insert(
+            "mimo".into(),
+            vec![
+                mimo_approval,
+                mimo_question,
+                mimo_busy,
+                mimo_busy_confirm,
+                mimo_ready,
+            ],
+        );
+
+        // Antigravity (`agy`) renders a single-line generating footer and
+        // permission options phrased as conversation-scoped allow/deny rules.
+        // No composer marker is evidenced yet, so there is no idle rule:
+        // completion needs a live screen capture.
+        let agy_approval = ScreenRule::new(
+            Blocked,
+            "agy-permission-options",
+            &["in this conversation", "always allow", "always deny"],
+            14,
+        );
+        let mut agy_busy = ScreenRule::new(
+            Working,
+            "agy-generating-footer",
+            &["generating... (enter/esc to cancel)"],
+            6,
+        );
+        agy_busy.tail_contains = vec!["generating... (enter/esc to cancel)".into()];
+        profiles.insert("agy".into(), vec![agy_approval, agy_busy]);
+
+        // cursor-agent approval dialogs pair single-key hints: approve `(y)`
+        // with reject `(esc or n)` (delete uses `(n)`), plus per-tool
+        // questions. No busy/composer markers are evidenced yet.
+        let cursor_approval =
+            ScreenRule::new(Blocked, "cursor-approval-options", &["(y)", "esc or n"], 14);
+        let cursor_delete = ScreenRule::new(
+            Blocked,
+            "cursor-delete-confirm",
+            &["delete this file?", "(y)", "(n)"],
+            14,
+        );
+        profiles.insert("cursor-agent".into(), vec![cursor_approval, cursor_delete]);
         Self { per_cli: profiles }
     }
 
@@ -571,6 +663,41 @@ mod tests {
                 include_str!("../fixtures/agent_screens/gemini_review.txt"),
                 ScreenState::Blocked,
             ),
+            (
+                "mimo",
+                include_str!("../fixtures/agent_screens/mimo_approval.txt"),
+                ScreenState::Blocked,
+            ),
+            (
+                "mimo",
+                include_str!("../fixtures/agent_screens/mimo_question.txt"),
+                ScreenState::Blocked,
+            ),
+            (
+                "mimo",
+                include_str!("../fixtures/agent_screens/mimo_busy.txt"),
+                ScreenState::Working,
+            ),
+            (
+                "mimo",
+                include_str!("../fixtures/agent_screens/mimo_ready.txt"),
+                ScreenState::Idle,
+            ),
+            (
+                "agy",
+                include_str!("../fixtures/agent_screens/agy_approval.txt"),
+                ScreenState::Blocked,
+            ),
+            (
+                "agy",
+                include_str!("../fixtures/agent_screens/agy_busy.txt"),
+                ScreenState::Working,
+            ),
+            (
+                "cursor-agent",
+                include_str!("../fixtures/agent_screens/cursor_approval.txt"),
+                ScreenState::Blocked,
+            ),
         ] {
             assert_eq!(
                 rules.evidence(cli, screen).map(|e| e.kind),
@@ -662,6 +789,11 @@ mod tests {
                 include_str!("../fixtures/agent_screens/opencode_busy.txt"),
                 include_str!("../fixtures/agent_screens/opencode_ready.txt"),
             ),
+            (
+                "mimo",
+                include_str!("../fixtures/agent_screens/mimo_busy.txt"),
+                include_str!("../fixtures/agent_screens/mimo_ready.txt"),
+            ),
         ] {
             assert_eq!(
                 rules.evidence(cli, busy).map(|e| e.kind),
@@ -683,6 +815,40 @@ mod tests {
                 "{cli}: new busy evidence must survive older ready history"
             );
         }
+    }
+    #[test]
+    fn mimo_two_stage_interrupt_and_destructive_approval_match() {
+        let rules = DetectionRules::bundled();
+        // A second esc press arms `esc again to interrupt`; it must still
+        // read as Working, not fall through to Idle or Unknown.
+        assert_eq!(
+            rules
+                .evidence("mimo", "esc again to interrupt  tab switch mode")
+                .map(|e| e.kind),
+            Some(ScreenState::Working)
+        );
+        // The destructive-command dialog omits "allow always".
+        assert_eq!(
+            rules
+                .evidence(
+                    "mimo",
+                    "△ Permission required\n✗ Confirm irreversible deletion\nAllow once  Reject\n⇆ select  enter confirm",
+                )
+                .map(|e| e.kind),
+            Some(ScreenState::Blocked)
+        );
+    }
+    #[test]
+    fn cursor_delete_confirm_uses_plain_y_n_hints() {
+        let rules = DetectionRules::bundled();
+        assert_eq!(
+            rules
+                .evidence("cursor-agent", "Delete this file?\nDelete (y)  Keep (n)")
+                .map(|e| e.kind),
+            Some(ScreenState::Blocked)
+        );
+        // Hints without the delete question match nothing.
+        assert_eq!(rules.evidence("cursor-agent", "Delete (y)  Keep (n)"), None);
     }
     #[test]
     fn wrapping_case_and_unused_rows_do_not_change_evidence() {

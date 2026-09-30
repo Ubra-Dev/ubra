@@ -44,6 +44,10 @@ export interface Workspace {
   activeTabId: string;
   /** Project folder shown in the Explorer / Source Control panels. */
   root?: string;
+  /** Agent command auto-run in new tabs/panes; unset disables auto-run. */
+  defaultCli?: string;
+  /** Spawn directory for new tabs/panes; unset keeps the backend default. */
+  defaultCwd?: string;
 }
 
 export interface Layout {
@@ -98,7 +102,7 @@ export function defaultLayout(): Layout {
   return { version: LAYOUT_VERSION, workspaces: [ws], activeWorkspaceId: ws.id };
 }
 
-export function activeWorkspace(layout: Layout): Workspace {
+export function activeWorkspace(layout: Layout): Workspace | undefined {
   return (
     layout.workspaces.find((w) => w.id === layout.activeWorkspaceId) ??
     layout.workspaces[0]
@@ -107,6 +111,29 @@ export function activeWorkspace(layout: Layout): Workspace {
 
 export function activeTab(ws: Workspace): Tab {
   return ws.tabs.find((t) => t.id === ws.activeTabId) ?? ws.tabs[0];
+}
+
+/**
+ * Best guess for a new workspace's agent command: the active workspace's
+ * default first ("current"), then the last CLI stored anywhere, then the
+ * most recently added workspace that has one. Empty when nothing is known.
+ */
+export function preferredAgentCli(
+  workspaces: Workspace[],
+  activeWorkspaceId: string,
+  lastUsedCli: string,
+): string {
+  const current = workspaces
+    .find((ws) => ws.id === activeWorkspaceId)
+    ?.defaultCli?.trim();
+  if (current) return current;
+  const last = lastUsedCli.trim();
+  if (last) return last;
+  for (let i = workspaces.length - 1; i >= 0; i--) {
+    const fallback = workspaces[i].defaultCli?.trim();
+    if (fallback) return fallback;
+  }
+  return "";
 }
 
 export function countPanes(node: LayoutNode): number {
@@ -469,12 +496,27 @@ function sanitizeWorkspace(v: unknown, context: LoadContext): Workspace {
   if (!tabs.some((tab) => tab.id === activeTabId)) {
     throw new Error("Invalid saved layout: active tab is missing.");
   }
-  const ws: Workspace = { id, name: text(value["name"], "workspace name"), tabs, activeTabId };
+  const workspace: Workspace = {
+    id,
+    name: text(value["name"], "workspace name"),
+    tabs,
+    activeTabId,
+  };
   if (value["root"] !== undefined) {
     if (typeof value["root"] !== "string") throw new Error("Invalid saved workspace root.");
-    ws.root = value["root"];
+    workspace.root = value["root"];
   }
-  return ws;
+  // Terminal defaults are optional and tolerant: unusable values drop so a
+  // foreign or hand-edited document still loads.
+  const defaultCli = value["defaultCli"];
+  if (typeof defaultCli === "string" && defaultCli.trim()) {
+    workspace.defaultCli = defaultCli;
+  }
+  const defaultCwd = value["defaultCwd"];
+  if (typeof defaultCwd === "string" && defaultCwd.trim()) {
+    workspace.defaultCwd = defaultCwd;
+  }
+  return workspace;
 }
 
 /** Validate before rendering; unsafe repairs require explicit recovery, never a fresh fallback. */
@@ -484,15 +526,25 @@ export function sanitizeLayout(v: unknown): Layout {
     throw new Error(`Unsupported saved layout version: ${String(value["version"])}.`);
   }
   const rawWorkspaces = value["workspaces"];
-  if (!Array.isArray(rawWorkspaces) || rawWorkspaces.length === 0 ||
-      rawWorkspaces.length > MAX_LAYOUT_ENTITIES) {
-    throw new Error("Invalid saved layout: a bounded, nonempty workspace list is required.");
+  if (!Array.isArray(rawWorkspaces) || rawWorkspaces.length > MAX_LAYOUT_ENTITIES) {
+    throw new Error("Invalid saved layout: a bounded workspace list is required.");
   }
   const context: LoadContext = { ids: new Set(), entities: 0 };
   const workspaces = rawWorkspaces.map((workspace) => sanitizeWorkspace(workspace, context));
-  const activeWorkspaceId = text(value["activeWorkspaceId"], "active workspace identity");
-  if (!workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
-    throw new Error("Invalid saved layout: active workspace is missing.");
+  // Zero workspaces is valid (closing the last one returns to onboarding);
+  // its active reference is the empty string, never a stale identity.
+  const rawActive = value["activeWorkspaceId"];
+  let activeWorkspaceId: string;
+  if (workspaces.length === 0) {
+    if (rawActive !== "") {
+      throw new Error("Invalid saved layout: active workspace must be empty when no workspaces exist.");
+    }
+    activeWorkspaceId = "";
+  } else {
+    activeWorkspaceId = text(rawActive, "active workspace identity");
+    if (!workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
+      throw new Error("Invalid saved layout: active workspace is missing.");
+    }
   }
   let bytes: number;
   try {
@@ -525,6 +577,16 @@ export function baseName(path: string): string {
   if (trimmed === "") return path === "" ? "" : "/";
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1];
+}
+
+/** Pane header/context title: explicit title, else the cwd's last segment. */
+export function paneDisplayTitle(node: PaneNode): string {
+  if (node.title) return node.title;
+  if (node.cwd) {
+    const base = baseName(node.cwd);
+    if (base) return base;
+  }
+  return "Terminal";
 }
 
 /**

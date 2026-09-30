@@ -1,0 +1,3 @@
+Type your message... (type / for commands)
+example-model · Build
+tab switch mode  ctrl+p settings  @ attach file  $ subagent  / commands

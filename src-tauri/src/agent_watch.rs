@@ -54,6 +54,8 @@ pub const AGENT_TABLE: &[(&str, &str)] = &[
     ("antigravity", "Antigravity CLI"),
     ("antigravity-cli", "Antigravity CLI"),
     ("maki", "Maki"),
+    ("mimo", "MiMoCode"),
+    ("agy", "Antigravity CLI"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -617,6 +619,8 @@ mod tests {
             Some(("antigravity-cli", "Antigravity CLI"))
         );
         assert_eq!(match_agent("maki"), Some(("maki", "Maki")));
+        assert_eq!(match_agent("mimo"), Some(("mimo", "MiMoCode")));
+        assert_eq!(match_agent("agy"), Some(("agy", "Antigravity CLI")));
     }
 
     #[test]

@@ -4,10 +4,11 @@
   import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { agent } from "./agent.svelte";
+  import { agentClis } from "./agentClis.svelte";
   import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
-  import type { PaneNode } from "./layout";
+  import { paneDisplayTitle, type PaneNode } from "./layout";
   import { toasts } from "./toasts.svelte.ts";
 
   let {
@@ -28,6 +29,95 @@
   let editing = $state(false);
   let draft = $state("");
   let menu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+
+  // Split-button agent picker: hovering a split button opens a menu of
+  // detected agent CLIs to run in the new pane. Click still splits with
+  // the default shell; ArrowDown opens the menu from the keyboard.
+  const SPLIT_MENU_OPEN_MS = 400;
+  const SPLIT_MENU_CLOSE_MS = 200;
+  let splitMenu = $state<{
+    dir: "row" | "col";
+    x: number;
+    y: number;
+    opener: HTMLElement | null;
+  } | null>(null);
+  let hoverOpenTimer: ReturnType<typeof setTimeout> | null = null;
+  let hoverCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  const hasAgentClis = $derived((agentClis.clis?.length ?? 0) > 0);
+
+  function cancelHoverOpen(): void {
+    if (hoverOpenTimer !== null) {
+      clearTimeout(hoverOpenTimer);
+      hoverOpenTimer = null;
+    }
+  }
+
+  function cancelHoverClose(): void {
+    if (hoverCloseTimer !== null) {
+      clearTimeout(hoverCloseTimer);
+      hoverCloseTimer = null;
+    }
+  }
+
+  function dismissSplitMenu(): void {
+    cancelHoverOpen();
+    cancelHoverClose();
+    splitMenu = null;
+  }
+
+  function openSplitMenu(target: HTMLElement, dir: "row" | "col"): void {
+    if (!hasAgentClis) {
+      void agentClis.ensure();
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    announceMenuOpen();
+    splitMenu = { dir, x: rect.left, y: rect.bottom + 4, opener: target };
+  }
+
+  function scheduleHoverClose(): void {
+    cancelHoverClose();
+    hoverCloseTimer = setTimeout(() => {
+      hoverCloseTimer = null;
+      splitMenu = null;
+    }, SPLIT_MENU_CLOSE_MS);
+  }
+
+  function splitButtonEnter(e: PointerEvent, dir: "row" | "col"): void {
+    if (e.pointerType !== "mouse") return;
+    cancelHoverClose();
+    if (splitMenu) {
+      if (splitMenu.dir !== dir) {
+        openSplitMenu(e.currentTarget as HTMLElement, dir);
+      }
+      return;
+    }
+    cancelHoverOpen();
+    const target = e.currentTarget as HTMLElement;
+    hoverOpenTimer = setTimeout(() => {
+      hoverOpenTimer = null;
+      openSplitMenu(target, dir);
+    }, SPLIT_MENU_OPEN_MS);
+  }
+
+  function splitButtonLeave(e: PointerEvent): void {
+    if (e.pointerType !== "mouse") return;
+    cancelHoverOpen();
+    if (splitMenu) scheduleHoverClose();
+  }
+
+  function onSplitPick(id: string): void {
+    const picked = splitMenu;
+    dismissSplitMenu();
+    if (picked) store.splitPaneWithCommand(node.id, picked.dir, id);
+  }
+
+  function onSplitKey(e: KeyboardEvent, dir: "row" | "col"): void {
+    if (e.key !== "ArrowDown") return;
+    e.preventDefault();
+    dismissSplitMenu();
+    openSplitMenu(e.currentTarget as HTMLElement, dir);
+  }
   const agentLabel = $derived(agent.paneAgentLabel(node.id));
   const agentStatus = $derived(agent.paneStatus(node.id));
 
@@ -58,9 +148,7 @@
     }
   });
 
-  const title = $derived(
-    node.title ?? node.cwd?.split("/").filter(Boolean).pop() ?? "Terminal",
-  );
+  const title = $derived(paneDisplayTitle(node));
 
   function focus(el: HTMLInputElement): void {
     el.focus();
@@ -175,14 +263,26 @@
     {/if}
     <span class="actions">
       <button
-        title={`Split right (${mod}D)`}
-        onclick={() => store.splitPane(node.id, "row")}
+        title={hasAgentClis ? `Split right (${mod}D) — hover to pick an agent` : `Split right (${mod}D)`}
+        onclick={() => {
+          dismissSplitMenu();
+          store.splitPane(node.id, "row");
+        }}
+        onpointerenter={(e) => splitButtonEnter(e, "row")}
+        onpointerleave={splitButtonLeave}
+        onkeydown={(e) => onSplitKey(e, "row")}
       >
         <Icon name="columns" size={12} />
       </button>
       <button
-        title={`Split down (${mod}${isMac ? "⇧" : "Shift+"}D)`}
-        onclick={() => store.splitPane(node.id, "col")}
+        title={hasAgentClis ? `Split down (${mod}${isMac ? "⇧" : "Shift+"}D) — hover to pick an agent` : `Split down (${mod}${isMac ? "⇧" : "Shift+"}D)`}
+        onclick={() => {
+          dismissSplitMenu();
+          store.splitPane(node.id, "col");
+        }}
+        onpointerenter={(e) => splitButtonEnter(e, "col")}
+        onpointerleave={splitButtonLeave}
+        onkeydown={(e) => onSplitKey(e, "col")}
       >
         <Icon name="rows" size={12} />
       </button>
@@ -245,6 +345,23 @@
       onDismiss={() => (menu = null)}
     />
   {/if}
+  {#if splitMenu}
+    <ContextMenu
+      x={splitMenu.x}
+      y={splitMenu.y}
+      opener={splitMenu.opener}
+      items={(agentClis.clis ?? []).map((entry) => ({
+        id: entry.cli,
+        label: `${entry.label} · ${entry.cli}`,
+      }))}
+      onPick={onSplitPick}
+      onDismiss={dismissSplitMenu}
+      onHoverChange={(inside) => {
+        if (inside) cancelHoverClose();
+        else scheduleHoverClose();
+      }}
+    />
+  {/if}
 </div>
 
 <style>
@@ -266,7 +383,7 @@
     flex: 0 0 26px;
     padding: 0 4px 0 10px;
     background: var(--pane-header-bg);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     user-select: none;
     cursor: grab;

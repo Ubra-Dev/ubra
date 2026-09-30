@@ -29,8 +29,10 @@
     onPick: (id: string) => void;
     onDismiss: () => void;
     opener?: HTMLElement | null;
+    /** Hover tracking for hover-opened menus; omitted by click-opened menus. */
+    onHoverChange?: (inside: boolean) => void;
   }
-  let { x, y, items, onPick, onDismiss, opener = null }: Props = $props();
+  let { x, y, items, onPick, onDismiss, opener = null, onHoverChange }: Props = $props();
   let menuEl: HTMLDivElement;
 
   function onKeydown(e: KeyboardEvent): void {
@@ -74,7 +76,9 @@
 
 <div class="menu" role="menu" tabindex="-1" data-keyboard-overlay
   bind:this={menuEl} use:overlayFocus={{ initial: '[role="menuitem"]', opener }}
-  onkeydown={onKeydown} style:left={cx + "px"} style:top={cy + "px"}>
+  onkeydown={onKeydown} style:left={cx + "px"} style:top={cy + "px"}
+  onpointerenter={() => onHoverChange?.(true)}
+  onpointerleave={() => onHoverChange?.(false)}>
   {#each items as item (item.id)}
     <button
       role="menuitem"
@@ -102,7 +106,7 @@
     border-radius: 6px;
     padding: 4px;
     box-shadow: 0 4px 16px var(--shadow-color);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
   }
   .menu button {
     display: flex;
@@ -119,11 +123,12 @@
   }
   .menu button:hover,
   .menu button:focus-visible {
-    background: var(--accent);
     color: var(--text-strong);
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
   }
   .menu button.danger:hover,
   .menu button.danger:focus-visible {
-    background: var(--error-hover-bg);
+    outline-color: var(--error-text);
   }
 </style>

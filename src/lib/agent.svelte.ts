@@ -36,6 +36,10 @@ class AgentStore {
   private disposed = new Set<number>();
   private foreground = false;
   private started = false;
+  // TEMP perf instrumentation (removed after the lag audit).
+  private perfLog = false;
+  private perfCount = 0;
+  private perfWindowStart = 0;
   get states(): Record<string, AgentStatus> { return this.model.states; }
   get attention(): string[] { return this.unreadNodes("attention"); }
   get done(): string[] { return this.unreadNodes("done"); }
@@ -66,7 +70,25 @@ class AgentStore {
   start(): void {
     if (this.started) return;
     this.started = true;
+    try {
+      this.perfLog = window.localStorage.getItem("ubra.perfLog") === "1";
+    } catch {
+      this.perfLog = false;
+    }
     void this.startSubscriptions().catch(console.error);
+  }
+
+  /** TEMP perf instrumentation (removed after the lag audit). */
+  private perfNoteUpdate(): void {
+    if (!this.perfLog) return;
+    const now = Date.now();
+    if (this.perfWindowStart === 0) this.perfWindowStart = now;
+    this.perfCount += 1;
+    if (now - this.perfWindowStart >= 30_000) {
+      console.log(`ubra-perf: ${this.perfCount} agent updates in 30s`);
+      this.perfCount = 0;
+      this.perfWindowStart = now;
+    }
   }
   private async startSubscriptions(): Promise<void> {
     const win = getCurrentWindow();
@@ -186,6 +208,7 @@ class AgentStore {
     }
   }
   private onUpdate(update: AgentUpdate): void {
+    this.perfNoteUpdate();
     const result = applyAgentUpdate(this.model, update);
     this.model = result.model;
     for (const live of this.disposed) this.model = acknowledgeAgent(this.model, live, true);

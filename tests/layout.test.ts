@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  activeWorkspace,
   baseName,
   clearStaleZoom,
   closePaneInTab,
@@ -26,6 +27,8 @@ import {
   MAX_LAYOUT_DEPTH,
   MAX_LAYOUT_ENTITIES,
   newId,
+  paneDisplayTitle,
+  preferredAgentCli,
   resolveWorkspaceRoot,
   sanitizeLayout,
   swapPanesInTab,
@@ -47,6 +50,36 @@ describe("defaultLayout", () => {
     assert.equal(layout.activeWorkspaceId, layout.workspaces[0].id);
     assert.equal(layout.workspaces[0].tabs.length, 1);
     assert.equal(countPanes(layout.workspaces[0].tabs[0].root), 1);
+  });
+});
+
+describe("preferredAgentCli", () => {
+  it("prefers the active workspace default", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCli = "codex";
+    const b = defaultWorkspace("B");
+    b.defaultCli = "claude";
+    assert.equal(preferredAgentCli([a, b], b.id, "codex"), "claude");
+  });
+
+  it("falls back to the last used CLI without an active default", () => {
+    const a = defaultWorkspace("A");
+    assert.equal(preferredAgentCli([a], a.id, "opencode"), "opencode");
+  });
+
+  it("falls back to the most recently added workspace default", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCli = "codex";
+    const b = defaultWorkspace("B");
+    b.defaultCli = "claude";
+    const plain = defaultWorkspace("C");
+    assert.equal(preferredAgentCli([a, b, plain], plain.id, ""), "claude");
+  });
+
+  it("returns empty when nothing is known", () => {
+    const a = defaultWorkspace("A");
+    assert.equal(preferredAgentCli([a], a.id, ""), "");
+    assert.equal(preferredAgentCli([], "", "  "), "");
   });
 });
 
@@ -195,6 +228,58 @@ describe("sanitizeLayout", () => {
     layout.workspaces[0].activeTabId = layout.workspaces[0].tabs[0].id;
     layout.activeWorkspaceId = "missing";
     assert.throws(() => sanitizeLayout(layout), /active workspace/);
+  });
+
+  it("accepts zero workspaces with an empty active reference", () => {
+    const layout = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "" };
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
+  });
+
+  it("resolves no active workspace when none exist", () => {
+    const empty = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "" };
+    assert.equal(activeWorkspace(empty), undefined);
+    const fresh = defaultLayout();
+    assert.equal(activeWorkspace(fresh)?.id, fresh.activeWorkspaceId);
+  });
+
+  it("rejects zero workspaces with a stale active reference", () => {
+    const layout = { ...defaultLayout(), workspaces: [], activeWorkspaceId: "ws-1" };
+    assert.throws(() => sanitizeLayout(layout), /active workspace/);
+    const missing = { ...defaultLayout(), workspaces: [] };
+    delete (missing as { activeWorkspaceId?: string }).activeWorkspaceId;
+    assert.throws(() => sanitizeLayout(missing), /active workspace/);
+  });
+
+  it("keeps per-workspace terminal defaults", () => {
+    const layout = defaultLayout();
+    const ws = layout.workspaces[0];
+    (ws as { defaultCli?: string }).defaultCli = "codex --yolo";
+    (ws as { defaultCwd?: string }).defaultCwd = "/repo/web";
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
+  });
+
+  it("drops invalid per-workspace terminal defaults", () => {
+    const layout = defaultLayout();
+    const ws = layout.workspaces[0] as unknown as Record<string, unknown>;
+    ws["defaultCli"] = 42;
+    ws["defaultCwd"] = "   ";
+    const clean = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    assert.equal("defaultCli" in clean.workspaces[0], false);
+    assert.equal("defaultCwd" in clean.workspaces[0], false);
+  });
+
+  it("loads pre-defaults documents unchanged", () => {
+    const layout = defaultLayout();
+    assert.deepEqual(
+      sanitizeLayout(JSON.parse(JSON.stringify(layout))),
+      layout,
+    );
   });
 
   it("normalizes extreme finite weights without overflow or lost geometry", () => {
@@ -817,5 +902,26 @@ describe("resolveWorkspaceRoot", () => {
 
   it("returns undefined without a root or any pane cwd", () => {
     assert.equal(resolveWorkspaceRoot(defaultWorkspace("web")), undefined);
+  });
+});
+
+describe("paneDisplayTitle", () => {
+  it("prefers the explicit title", () => {
+    assert.equal(
+      paneDisplayTitle({ kind: "pane", id: "p", title: "api", cwd: "/repo/web" }),
+      "api",
+    );
+  });
+
+  it("falls back to the cwd's last segment", () => {
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "/repo/web" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "/repo/web/" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "C:\\repo\\web" }), "web");
+  });
+
+  it("falls back to Terminal without a title or usable cwd", () => {
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p" }), "Terminal");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "/repo/web" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "" }), "Terminal");
   });
 });

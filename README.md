@@ -272,8 +272,9 @@ The development checklist below complements, but does not replace, these gates.
 - Settings → Appearance has a background opacity slider (10–100%) for
   terminal-style translucency; the sidebar, tabs, and dialogs stay solid.
 - Settings (sidebar footer, or `Mod+,`) holds launch-at-login, theme, font
-  size, notification delivery, sounds and per-agent muting, the shortcut
-  reference, and version info.
+  size, the interface font picker (searchable bundled Google Fonts with
+  previews), notification delivery, sounds and per-agent muting, the
+  shortcut reference, and version info.
 
 ## Headless daemon + CLI (experimental)
 

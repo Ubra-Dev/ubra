@@ -1,7 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
+  import { CUSTOM_COMMAND } from "./agentClis";
+  import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
@@ -27,6 +30,11 @@
     MAX_UI_SCALE,
     MIN_UI_SCALE,
   } from "./uiScale";
+  import {
+    DEFAULT_UI_FONT_ID,
+    UI_FONTS,
+    matchUiFonts,
+  } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
 
@@ -34,13 +42,15 @@
     | "appearance"
     | "alerts"
     | "shortcuts"
-    | "app";
+    | "app"
+    | "workspace";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
     { id: "alerts", label: "Alerts", icon: "bell" },
     { id: "shortcuts", label: "Shortcuts", icon: "command" },
     { id: "app", label: "App", icon: "info" },
+    { id: "workspace", label: "Workspace", icon: "layers" },
   ];
 
   let section = $state<SectionId>("app");
@@ -51,8 +61,15 @@
   let appName = $state("Ubra");
   let appVersion = $state("");
   let soundFile = $state(store.soundFile);
+  let fontQuery = $state("");
   /** null = blank (default chime) or unchecked; otherwise backend verdict. */
   let soundFileValid = $state<boolean | null>(null);
+  /** Workspace-section draft: "" = off, a CLI id, or CUSTOM_COMMAND. */
+  let cliSelection = $state("");
+  let cliCustom = $state("");
+  let cliDraftReady = $state(false);
+  let folderPicking = $state(false);
+  let folderError = $state<string | null>(null);
   let soundFileChecking = $state(false);
 
   const shortcuts = cheatSheet(isMacPlatform(navigator.platform));
@@ -82,6 +99,26 @@
         appVersion = info.version;
       })
       .catch((e) => console.error("ubra: app info failed", e));
+    void agentClis.ensure();
+  });
+
+  // Seed the CLI draft from the active workspace once detection resolves.
+  $effect(() => {
+    if (cliDraftReady) return;
+    const detected = agentClis.clis;
+    if (detected === null) return;
+    const current = store.workspace()?.defaultCli?.trim() ?? "";
+    if (!current) {
+      cliSelection = "";
+      cliCustom = "";
+    } else if (detected.some((entry) => entry.cli === current)) {
+      cliSelection = current;
+      cliCustom = "";
+    } else {
+      cliSelection = CUSTOM_COMMAND;
+      cliCustom = current;
+    }
+    cliDraftReady = true;
   });
 
 
@@ -94,6 +131,46 @@
       autostart = !checked;
       autostartError = "Couldn't update launch at login; reverted.";
     });
+  }
+
+  function onDefaultCliSelect(e: Event): void {
+    const ws = store.workspace();
+    if (!ws) return;
+    const value = (e.target as HTMLSelectElement).value;
+    cliSelection = value;
+    if (value === CUSTOM_COMMAND) {
+      store.setWorkspaceDefaultCli(ws.id, cliCustom || null);
+      return;
+    }
+    cliCustom = "";
+    store.setWorkspaceDefaultCli(ws.id, value || null);
+  }
+
+  function onDefaultCliCustom(e: Event): void {
+    const ws = store.workspace();
+    if (!ws) return;
+    cliCustom = (e.target as HTMLInputElement).value;
+    store.setWorkspaceDefaultCli(ws.id, cliCustom || null);
+  }
+
+  async function pickDefaultFolder(): Promise<void> {
+    const ws = store.workspace();
+    if (!ws || folderPicking) return;
+    folderPicking = true;
+    folderError = null;
+    try {
+      const path = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose the default folder",
+      });
+      if (typeof path === "string") store.setWorkspaceDefaultCwd(ws.id, path);
+    } catch (error) {
+      console.error("ubra: default folder picker failed", error);
+      folderError = "Couldn't open the folder picker. Try again.";
+    } finally {
+      folderPicking = false;
+    }
   }
 
   function onThemeSelect(id: string): void {
@@ -223,7 +300,7 @@
             aria-current={section === s.id ? "true" : undefined}
             onclick={() => (section = s.id)}
           >
-            <Icon name={s.icon} size={13} />
+            <Icon name={s.icon} size={14} />
             <span>{s.label}</span>
           </button>
         {/each}
@@ -232,298 +309,423 @@
         {#if section === "appearance"}
           <section aria-label="Appearance">
             <h2>Appearance</h2>
-            <div class="row">
-              <span class="label">Terminal font size</span>
-              <span class="stepper">
-                <button
-                  onclick={() => store.bumpTermFontSize(-1)}
-                  disabled={store.termFontSize <= MIN_TERM_FONT_SIZE}
-                  aria-label="Smaller terminal font"
-                >
-                  &minus;
-                </button>
-                <span class="value">{store.termFontSize}px</span>
-                <button
-                  onclick={() => store.bumpTermFontSize(1)}
-                  disabled={store.termFontSize >= MAX_TERM_FONT_SIZE}
-                  aria-label="Bigger terminal font"
-                >
-                  +
-                </button>
-                <button
-                  class="reset"
-                  onclick={() => store.resetTermFontSize()}
-                  disabled={store.termFontSize === DEFAULT_TERM_FONT_SIZE}
-                >
-                  Reset
-                </button>
-              </span>
-            </div>
-            <div class="row">
-              <span class="label">Interface scale</span>
-              <span class="stepper">
-                <button
-                  onclick={() => store.bumpUiScale(-1)}
-                  disabled={store.uiScale <= MIN_UI_SCALE}
-                  aria-label="Smaller interface text"
-                >
-                  &minus;
-                </button>
-                <span class="value">{store.uiScale}%</span>
-                <button
-                  onclick={() => store.bumpUiScale(1)}
-                  disabled={store.uiScale >= MAX_UI_SCALE}
-                  aria-label="Bigger interface text"
-                >
-                  +
-                </button>
-                <button
-                  class="reset"
-                  onclick={() => store.resetUiScale()}
-                  disabled={store.uiScale === DEFAULT_UI_SCALE}
-                >
-                  Reset
-                </button>
-              </span>
-            </div>
-            <label class="row">
-              <span class="label">Terminal scrollback</span>
-              <span class="select-wrap">
-                <select
-                  value={store.termScrollback}
-                  onchange={(e) =>
-                    store.setTermScrollback(
-                      Number((e.target as HTMLSelectElement).value),
-                    )}
-                  aria-label="Terminal scrollback"
-                >
-                  {#each SCROLLBACK_OPTIONS as lines (lines)}
-                    <option value={lines}>{lines} lines</option>
+            <div class="group">
+              <h3 class="group-label" id="theme-label">Theme</h3>
+              <div class="card flush" role="group" aria-labelledby="theme-label">
+                <div class="swatches">
+                  {#each THEME_IDS as id}
+                    {@const theme = THEMES[id]}
+                    <button
+                      class="swatch"
+                      class:selected={store.themeId === id}
+                      aria-pressed={store.themeId === id}
+                      aria-label={`${theme.name}${store.themeId === id ? " (current)" : ""}`}
+                      title={theme.name}
+                      onclick={() => onThemeSelect(id)}
+                    >
+                      <span
+                        class="swatch-preview"
+                        style={`background:${theme.ui.appBg};border-color:${theme.ui.border}`}
+                        aria-hidden="true"
+                      >
+                        <span
+                          class="swatch-accent"
+                          style={`background:${theme.ui.accent}`}
+                        ></span>
+                        <span class="swatch-dots">
+                          <span
+                            style={`background:${theme.terminal.red}`}
+                          ></span>
+                          <span
+                            style={`background:${theme.terminal.green}`}
+                          ></span>
+                          <span
+                            style={`background:${theme.terminal.blue}`}
+                          ></span>
+                        </span>
+                      </span>
+                      <span class="swatch-name">{theme.name}</span>
+                    </button>
                   {/each}
-                </select>
-              </span>
-            </label>
-            <div class="row">
-              <span class="label">Background opacity</span>
-              <span class="stepper">
-                <input
-                  type="range"
-                  class="opacity-slider"
-                  min={MIN_TERM_OPACITY}
-                  max={MAX_TERM_OPACITY}
-                  step="1"
-                  value={store.termOpacity}
-                  oninput={(e) =>
-                    store.setTermOpacity(
-                      Number((e.target as HTMLInputElement).value),
-                    )}
-                  aria-label="Background opacity"
-                />
-                <span class="value">{store.termOpacity}%</span>
-              </span>
+                </div>
+              </div>
             </div>
-            <div class="field-label" id="theme-label">Theme</div>
-            <div
-              class="swatches"
-              role="group"
-              aria-labelledby="theme-label"
-            >
-              {#each THEME_IDS as id}
-                {@const theme = THEMES[id]}
-                <button
-                  class="swatch"
-                  class:selected={store.themeId === id}
-                  aria-pressed={store.themeId === id}
-                  aria-label={`${theme.name}${store.themeId === id ? " (current)" : ""}`}
-                  title={theme.name}
-                  onclick={() => onThemeSelect(id)}
-                >
-                  <span
-                    class="swatch-preview"
-                    style={`background:${theme.ui.appBg};border-color:${theme.ui.border}`}
-                    aria-hidden="true"
+            <div class="group">
+              <h3 class="group-label" id="font-label">Interface font</h3>
+              <div class="card flush">
+                <div class="font-search-row">
+                  <input
+                    type="search"
+                    class="font-search"
+                    bind:value={fontQuery}
+                    placeholder="Search fonts"
+                    aria-label="Search interface fonts"
+                  />
+                  <button
+                    class="btn btn-sm"
+                    onclick={() => store.resetUiFont()}
+                    disabled={store.uiFontId === DEFAULT_UI_FONT_ID}
                   >
-                    <span
-                      class="swatch-accent"
-                      style={`background:${theme.ui.accent}`}
-                    ></span>
-                    <span class="swatch-dots">
-                      <span style={`background:${theme.terminal.red}`}></span>
-                      <span style={`background:${theme.terminal.green}`}></span>
-                      <span style={`background:${theme.terminal.blue}`}></span>
+                    Reset
+                  </button>
+                </div>
+                <div
+                  class="font-list"
+                  role="listbox"
+                  aria-label="Interface font"
+                  aria-busy={store.uiFontApplying !== null}
+                >
+                  {#each matchUiFonts(fontQuery) as id (id)}
+                    {@const font = UI_FONTS[id]}
+                    {@const applying = store.uiFontApplying === id}
+                    <button
+                      class="font-option"
+                      class:selected={store.uiFontId === id}
+                      class:applying={applying}
+                      role="option"
+                      aria-selected={store.uiFontId === id}
+                      aria-label={`${font.name}${store.uiFontId === id ? " (current)" : ""}${applying ? " (applying)" : ""}`}
+                      onclick={() => store.setUiFont(id)}
+                    >
+                      <span
+                        class="font-sample"
+                        style={`font-family:${font.stack}`}
+                        aria-hidden="true"
+                      >
+                        Ag
+                      </span>
+                      <span
+                        class="font-name"
+                        style={`font-family:${font.stack}`}
+                      >
+                        {font.name}
+                      </span>
+                      <span class="font-category">
+                        {applying ? "Applying…" : font.category}
+                      </span>
+                    </button>
+                  {:else}
+                    <div class="font-empty">
+                      No fonts match &ldquo;{fontQuery}&rdquo;.
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Interface</h3>
+              <div class="card">
+                <div class="row">
+                  <span class="label">Text size</span>
+                  <span class="stepper">
+                    <span class="seg">
+                      <button
+                        onclick={() => store.bumpUiScale(-1)}
+                        disabled={store.uiScale <= MIN_UI_SCALE}
+                        aria-label="Smaller interface text"
+                      >
+                        &minus;
+                      </button>
+                      <button
+                        onclick={() => store.bumpUiScale(1)}
+                        disabled={store.uiScale >= MAX_UI_SCALE}
+                        aria-label="Bigger interface text"
+                      >
+                        +
+                      </button>
                     </span>
+                    <span class="value">{store.uiScale}%</span>
+                    <button
+                      class="btn btn-sm"
+                      onclick={() => store.resetUiScale()}
+                      disabled={store.uiScale === DEFAULT_UI_SCALE}
+                    >
+                      Reset
+                    </button>
                   </span>
-                  <span class="swatch-name">{theme.name}</span>
-                </button>
-              {/each}
+                </div>
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Terminal</h3>
+              <div class="card">
+                <div class="row">
+                  <span class="label">Font size</span>
+                  <span class="stepper">
+                    <span class="seg">
+                      <button
+                        onclick={() => store.bumpTermFontSize(-1)}
+                        disabled={store.termFontSize <= MIN_TERM_FONT_SIZE}
+                        aria-label="Smaller terminal font"
+                      >
+                        &minus;
+                      </button>
+                      <button
+                        onclick={() => store.bumpTermFontSize(1)}
+                        disabled={store.termFontSize >= MAX_TERM_FONT_SIZE}
+                        aria-label="Bigger terminal font"
+                      >
+                        +
+                      </button>
+                    </span>
+                    <span class="value">{store.termFontSize}px</span>
+                    <button
+                      class="btn btn-sm"
+                      onclick={() => store.resetTermFontSize()}
+                      disabled={store.termFontSize === DEFAULT_TERM_FONT_SIZE}
+                    >
+                      Reset
+                    </button>
+                  </span>
+                </div>
+                <label class="row">
+                  <span class="label">Scrollback</span>
+                  <span class="select-wrap">
+                    <select
+                      value={store.termScrollback}
+                      onchange={(e) =>
+                        store.setTermScrollback(
+                          Number((e.target as HTMLSelectElement).value),
+                        )}
+                      aria-label="Terminal scrollback"
+                    >
+                      {#each SCROLLBACK_OPTIONS as lines (lines)}
+                        <option value={lines}>{lines} lines</option>
+                      {/each}
+                    </select>
+                  </span>
+                </label>
+                <div class="row">
+                  <span class="label">Background opacity</span>
+                  <span class="stepper">
+                    <input
+                      type="range"
+                      class="opacity-slider"
+                      min={MIN_TERM_OPACITY}
+                      max={MAX_TERM_OPACITY}
+                      step="1"
+                      value={store.termOpacity}
+                      oninput={(e) =>
+                        store.setTermOpacity(
+                          Number((e.target as HTMLInputElement).value),
+                        )}
+                      aria-label="Background opacity"
+                    />
+                    <span class="value">{store.termOpacity}%</span>
+                  </span>
+                </div>
+              </div>
             </div>
           </section>
         {:else if section === "alerts"}
           <section aria-label="Alerts">
             <h2>Alerts</h2>
-            <h3 class="subheading">Notifications</h3>
-            <label class="row">
-              <span class="label">Agent finished</span>
-              <span class="select-wrap">
-                <select
-                  value={store.notifyDelivery}
-                  onchange={onDeliveryChange}
-                  aria-label="Notification delivery"
-                >
-                  <option value="system">System notification</option>
-                  <option value="inapp">In-app toast</option>
-                  <option value="off">Off</option>
-                </select>
-              </span>
-            </label>
-            {#if store.notifyDelivery === "inapp"}
-              <label class="row">
-                <span class="label">Toast position</span>
-                <span class="select-wrap">
-                  <select
-                    value={store.toastPosition}
-                    onchange={onToastPositionChange}
-                    aria-label="Toast position"
-                  >
-                    <option value="top-left">Top left</option>
-                    <option value="top-right">Top right</option>
-                    <option value="bottom-left">Bottom left</option>
-                    <option value="bottom-right">Bottom right</option>
-                  </select>
-                </span>
-              </label>
-            {/if}
-            <div class="row">
-              <span class="label">Test with current settings</span>
-              <button class="test-btn" onclick={sendTestNotification}>
-                <Icon name="bell" size={12} />
-                <span>Send test notification</span>
-              </button>
-            </div>
-            <div class="hint">
-              Fires a sample Codex finish through the settings above.
-            </div>
-            <div class="subsection">
-              <h3 class="subheading">Sounds</h3>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={store.soundEnabled}
-                  onchange={onSoundEnabledChange}
-                />
-                <span class="track" aria-hidden="true">
-                  <span class="thumb"></span>
-                </span>
-                <span>Play sound when an agent finishes</span>
-              </label>
-              <label class="row">
-                <span class="label">Chime</span>
-                <span class="select-wrap">
-                  <select
-                    value={store.soundStyle}
-                    onchange={onSoundStyleChange}
-                    aria-label="Notification chime"
-                  >
-                    <option value="default">Default chime</option>
-                    <option value="bright">Bright</option>
-                    <option value="soft">Soft</option>
-                    <option value="pop">Pop</option>
-                    <option value={CUSTOM_CHIME_ID}>Custom audio file…</option>
-                  </select>
-                </span>
-              </label>
-              {#if store.soundStyle === CUSTOM_CHIME_ID}
+            <div class="group">
+              <h3 class="group-label">Notifications</h3>
+              <div class="card">
                 <label class="row">
-                  <span class="label">Custom sound</span>
-                  <input
-                    type="text"
-                    bind:value={soundFile}
-                    onchange={onSoundFileChange}
-                    placeholder="~/Music/chime.mp3"
-                    aria-label="Custom sound file path"
-                    aria-invalid={soundFileValid === false}
-                    aria-describedby={soundFile.trim() !== "" ? "sound-hint" : undefined}
-                    class="file-input"
-                  />
+                  <span class="label">Agent finished</span>
+                  <span class="select-wrap">
+                    <select
+                      value={store.notifyDelivery}
+                      onchange={onDeliveryChange}
+                      aria-label="Notification delivery"
+                    >
+                      <option value="system">System notification</option>
+                      <option value="inapp">In-app toast</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </span>
                 </label>
-                {#if soundFile.trim() !== ""}
-                  <div class="hint" id="sound-hint">
-                    {#if soundFileChecking}
-                      <span class="checking">Checking file…</span>
-                    {:else if soundFileValid === false}
-                      <span class="error-hint" role="alert">
-                        File not found or not playable audio; default chime is used.
-                      </span>
-                    {:else if soundFileValid === true}
-                      <span class="ok-hint">Custom sound ready.</span>
-                    {/if}
-                  </div>
+                {#if store.notifyDelivery === "inapp"}
+                  <label class="row">
+                    <span class="label">Toast position</span>
+                    <span class="select-wrap">
+                      <select
+                        value={store.toastPosition}
+                        onchange={onToastPositionChange}
+                        aria-label="Toast position"
+                      >
+                        <option value="top-left">Top left</option>
+                        <option value="top-right">Top right</option>
+                        <option value="bottom-left">Bottom left</option>
+                        <option value="bottom-right">Bottom right</option>
+                      </select>
+                    </span>
+                  </label>
                 {/if}
-              {/if}
-              <div class="row">
-                <span class="label">Preview</span>
-                <button class="test-button" onclick={onTestSound}>
-                  <Icon name="play" size={12} />
-                  <span>Play test sound</span>
-                </button>
+                <div class="row">
+                  <span class="label">Test with current settings</span>
+                  <button class="btn" onclick={sendTestNotification}>
+                    <Icon name="bell" size={12} />
+                    <span>Send test notification</span>
+                  </button>
+                </div>
+              </div>
+              <div class="hint">
+                Fires a sample Codex finish through the settings above.
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Sounds</h3>
+              <div class="card">
+                <label class="row switch">
+                  <span class="label">Play sound when an agent finishes</span>
+                  <input
+                    type="checkbox"
+                    checked={store.soundEnabled}
+                    onchange={onSoundEnabledChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
+                  <span class="label">Chime</span>
+                  <span class="select-wrap">
+                    <select
+                      value={store.soundStyle}
+                      onchange={onSoundStyleChange}
+                      aria-label="Notification chime"
+                    >
+                      <option value="default">Default chime</option>
+                      <option value="bright">Bright</option>
+                      <option value="soft">Soft</option>
+                      <option value="pop">Pop</option>
+                      <option value={CUSTOM_CHIME_ID}>
+                        Custom audio file…
+                      </option>
+                    </select>
+                  </span>
+                </label>
+                {#if store.soundStyle === CUSTOM_CHIME_ID}
+                  <label class="row">
+                    <span class="label">Custom sound</span>
+                    <input
+                      type="text"
+                      bind:value={soundFile}
+                      onchange={onSoundFileChange}
+                      placeholder="~/Music/chime.mp3"
+                      aria-label="Custom sound file path"
+                      aria-invalid={soundFileValid === false}
+                      aria-describedby={soundFile.trim() !== ""
+                        ? "sound-hint"
+                        : undefined}
+                      class="file-input"
+                    />
+                  </label>
+                  {#if soundFile.trim() !== ""}
+                    <div class="hint" id="sound-hint">
+                      {#if soundFileChecking}
+                        <span class="checking">Checking file…</span>
+                      {:else if soundFileValid === false}
+                        <span class="error-hint" role="alert">
+                          File not found or not playable audio; default chime
+                          is used.
+                        </span>
+                      {:else if soundFileValid === true}
+                        <span class="ok-hint">Custom sound ready.</span>
+                      {/if}
+                    </div>
+                  {/if}
+                {/if}
+                <div class="row">
+                  <span class="label">Preview</span>
+                  <button class="btn" onclick={onTestSound}>
+                    <Icon name="play" size={12} />
+                    <span>Play test sound</span>
+                  </button>
+                </div>
               </div>
             </div>
           </section>
         {:else if section === "shortcuts"}
           <section aria-label="Shortcuts">
             <h2>Shortcuts</h2>
-            <div class="shortcuts">
-              {#each shortcuts as s}
-                <div class="shortcut">
-                  <span><kbd>{s.keys}</kbd></span>
-                  <span>{s.blurb}</span>
-                </div>
-              {/each}
+            <div class="group">
+              <div class="card">
+                {#each shortcuts as s}
+                  <div class="row">
+                    <span class="label">{s.blurb}</span>
+                    <span><kbd>{s.keys}</kbd></span>
+                  </div>
+                {/each}
+              </div>
             </div>
           </section>
         {:else if section === "app"}
           <section aria-label="App">
             <h2>App</h2>
-            <label class="toggle">
-              <input
-                type="checkbox"
-                checked={autostart}
-                disabled={!autostartLoaded}
-                onchange={onAutostartChange}
-              />
-              <span class="track" aria-hidden="true">
-                <span class="thumb"></span>
-              </span>
-              <span>Launch at login</span>
-            </label>
-            {#if autostartError}
-              <div class="hint error-hint" role="alert">{autostartError}</div>
-            {/if}
-            <div class="subsection">
-              <h3 class="subheading">Onboarding</h3>
-              <div class="row">
-                <span class="label">Set up another project and agent session</span>
-                <button class="test-btn" onclick={() => store.openOnboarding()}>
-                  <Icon name="layers" size={12} />
-                  <span>Run onboarding</span>
-                </button>
+            <div class="group">
+              <h3 class="group-label">General</h3>
+              <div class="card">
+                <label class="row switch">
+                  <span class="label">Launch at login</span>
+                  <input
+                    type="checkbox"
+                    checked={autostart}
+                    disabled={!autostartLoaded}
+                    onchange={onAutostartChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+                {#if autostartError}
+                  <div class="hint error-hint" role="alert">
+                    {autostartError}
+                  </div>
+                {/if}
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Onboarding</h3>
+              <div class="card">
+                <div class="row">
+                  <span class="label">
+                    Set up another project and agent session
+                  </span>
+                  <button class="btn" onclick={() => store.openOnboarding()}>
+                    <Icon name="layers" size={12} />
+                    <span>Run onboarding</span>
+                  </button>
+                </div>
               </div>
               <div class="hint">
-                Completing setup opens a new workspace and keeps your current work.
+                Completing setup opens a new workspace and keeps your current
+                work.
               </div>
             </div>
-            <div class="subsection">
-              <h3 class="subheading">Quit</h3>
-              <div class="row">
-                <span class="label">Quit Ubra and terminate owned pane processes</span>
-                <button class="test-btn" onclick={() => {
-                  invoke("quit_app").catch((error) =>
-                    toasts.push("Quit failed", String(error), "", { kind: "copy" }));
-                }}>Quit Ubra</button>
+            <div class="group">
+              <h3 class="group-label">Quit</h3>
+              <div class="card">
+                <div class="row">
+                  <span class="label">
+                    Quit Ubra and terminate owned pane processes
+                  </span>
+                  <button
+                    class="btn"
+                    onclick={() => {
+                      invoke("quit_app").catch((error) =>
+                        toasts.push("Quit failed", String(error), "", {
+                          kind: "copy",
+                        }),
+                      );
+                    }}
+                  >
+                    Quit Ubra
+                  </button>
+                </div>
               </div>
             </div>
-            <div class="subsection">
-              <h3 class="subheading">About</h3>
+            <div class="group about-block">
+              <img
+                class="about-logo"
+                src="/logo.png"
+                alt="Ubra"
+                width="2172"
+                height="724"
+              />
               <div class="about">
                 {appName}{#if appVersion} v{appVersion}{/if}
               </div>
@@ -554,6 +756,100 @@
               <div class="about-sub">© 2026 Oliver Martinez</div>
             </div>
           </section>
+        {:else if section === "workspace"}
+          <section aria-label="Workspace">
+            <h2>Workspace</h2>
+            {#if store.workspace()}
+              {@const ws = store.workspace()!}
+              <div class="hint intro">
+                Defaults for <strong>{ws.name}</strong> — every new tab and
+                pane in this workspace starts here.
+              </div>
+              <div class="group">
+                <h3 class="group-label">Defaults</h3>
+                <div class="card">
+                  {#if agentClis.clis === null}
+                    <div class="row">
+                      <span class="label">Default agent CLI</span>
+                      <span class="hint">Detecting installed agents…</span>
+                    </div>
+                  {:else}
+                    <label class="row">
+                      <span class="label">Default agent CLI</span>
+                      <span class="select-wrap">
+                        <select
+                          value={cliSelection}
+                          onchange={onDefaultCliSelect}
+                          aria-label="Default agent CLI"
+                        >
+                          <option value="">None (plain shells)</option>
+                          {#each agentClis.clis as entry (entry.cli)}
+                            <option value={entry.cli} title={entry.path}>
+                              {entry.label} · {entry.cli}
+                            </option>
+                          {/each}
+                          <option value={CUSTOM_COMMAND}>
+                            Custom command…
+                          </option>
+                        </select>
+                      </span>
+                    </label>
+                    {#if cliSelection === CUSTOM_COMMAND}
+                      <label class="row">
+                        <span class="label">Custom command</span>
+                        <input
+                          type="text"
+                          value={cliCustom}
+                          oninput={onDefaultCliCustom}
+                          placeholder="my-agent --yes"
+                          autocomplete="off"
+                          autocapitalize="off"
+                          spellcheck="false"
+                          aria-label="Custom default command"
+                          class="file-input"
+                        />
+                      </label>
+                    {/if}
+                  {/if}
+                  <div class="row">
+                    <span class="label">Default folder</span>
+                    <span class="folder-value" title={ws.defaultCwd ?? ""}>
+                      {ws.defaultCwd ?? "Default directory"}
+                    </span>
+                    <button
+                      class="btn"
+                      onclick={pickDefaultFolder}
+                      disabled={folderPicking}
+                    >
+                      {folderPicking ? "Opening…" : "Change…"}
+                    </button>
+                    {#if ws.defaultCwd}
+                      <button
+                        class="btn"
+                        onclick={() =>
+                          store.setWorkspaceDefaultCwd(ws.id, null)}
+                      >
+                        Clear
+                      </button>
+                    {/if}
+                  </div>
+                  {#if folderError}
+                    <div class="hint">
+                      <span class="error-hint" role="alert">
+                        {folderError}
+                      </span>
+                    </div>
+                  {/if}
+                </div>
+                <div class="hint">
+                  The default CLI runs automatically in new tabs and panes.
+                  Applies to new panes only.
+                </div>
+              </div>
+            {:else}
+              <div class="hint">No workspace open.</div>
+            {/if}
+          </section>
         {/if}
       </div>
     </div>
@@ -582,9 +878,9 @@
     flex-direction: column;
     background: var(--app-bg);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 12px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     overflow: hidden;
     outline: none;
@@ -623,11 +919,11 @@
     flex: 1;
   }
   .nav {
-    flex: 0 0 172px;
+    flex: 0 0 184px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 10px 8px;
+    gap: 4px;
+    padding: 12px 10px;
     border-right: 1px solid var(--border);
     background: var(--sidebar-bg);
     overflow-y: auto;
@@ -635,14 +931,14 @@
   .nav-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     background: transparent;
     color: var(--text-muted);
     font: inherit;
     text-align: left;
-    padding: 7px 10px;
+    padding: 8px 10px;
     cursor: pointer;
   }
   .nav-item:hover {
@@ -657,37 +953,49 @@
   .content {
     flex: 1;
     min-width: 0;
-    padding: 14px 18px 18px;
+    padding: 18px 20px 24px;
     overflow-y: auto;
   }
   h2 {
-    font-size: 14px;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.011em;
+    color: var(--text-strong);
+    margin: 2px 0 14px;
+  }
+  /* Grouped card layout in the macOS System Settings idiom: a small label
+     above each card, hairline dividers between rows, helper text below. */
+  .group {
+    margin: 0 0 18px;
+  }
+  .group:last-child {
+    margin-bottom: 0;
+  }
+  .group-label {
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-strong);
-    margin: 0 0 10px;
+    margin: 0 14px 6px;
   }
-  .subheading {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 4px;
+  .card {
+    background: var(--surface-bg);
+    border: 1px solid var(--separator);
+    border-radius: 10px;
+    padding: 4px 14px;
   }
-  .subsection {
-    margin-top: 16px;
-    padding-top: 12px;
+  .card.flush {
+    padding: 8px;
+  }
+  .card > .row + .row,
+  .card > .hint + .row {
     border-top: 1px solid var(--separator);
-  }
-  .field-label {
-    font-size: 12px;
-    color: var(--text);
-    margin: 0 0 8px;
   }
   .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 7px 0;
+    padding: 8px 0;
   }
   label.row {
     cursor: pointer;
@@ -695,21 +1003,14 @@
   .row .label {
     flex: 1;
   }
-  /* Toggle switch: native checkbox, custom track. */
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 7px 0;
-    cursor: pointer;
-  }
-  .toggle input {
+  /* Trailing switch row: native checkbox, custom track on the right. */
+  .switch input {
     position: absolute;
     opacity: 0;
     width: 1px;
     height: 1px;
   }
-  .toggle .track {
+  .switch .track {
     flex: 0 0 auto;
     width: 32px;
     height: 18px;
@@ -719,7 +1020,7 @@
     position: relative;
     transition: background 120ms ease;
   }
-  .toggle .thumb {
+  .switch .thumb {
     position: absolute;
     top: 2px;
     left: 2px;
@@ -731,23 +1032,21 @@
       left 120ms ease,
       background 120ms ease;
   }
-  .toggle input:checked + .track {
+  .switch input:checked + .track {
     background: var(--accent);
     border-color: var(--accent);
   }
-  .toggle input:checked + .track .thumb {
+  .switch input:checked + .track .thumb {
     left: 16px;
     background: #fff;
   }
-  .toggle input:focus-visible + .track {
+  .switch input:focus-visible + .track {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-  .toggle input:disabled ~ span:last-child {
-    opacity: 0.5;
-  }
-  .toggle input:disabled + .track {
-    opacity: 0.5;
+  .switch:has(input:disabled) {
+    opacity: 0.55;
+    cursor: default;
   }
   /* Native select with themed frame and chevron. */
   .select-wrap {
@@ -780,28 +1079,38 @@
   .stepper {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
-  .stepper button {
+  /* Joined -/+ segment. */
+  .seg {
+    display: inline-flex;
+  }
+  .seg button {
     border: 1px solid var(--input-border);
-    border-radius: 6px;
     background: var(--input-bg);
     color: var(--text);
     font: inherit;
-    min-width: 28px;
-    padding: 3px 9px;
+    min-width: 30px;
+    padding: 3px 10px;
     cursor: pointer;
   }
-  .stepper button:hover:not(:disabled) {
+  .seg button:first-child {
+    border-radius: 6px 0 0 6px;
+  }
+  .seg button:last-child {
+    border-radius: 0 6px 6px 0;
+    margin-left: -1px;
+  }
+  .seg button:hover:not(:disabled) {
     background: var(--surface-bg);
     color: var(--text-strong);
   }
-  .stepper button:disabled {
+  .seg button:disabled {
     opacity: 0.4;
     cursor: default;
   }
   .stepper .value {
-    min-width: 40px;
+    min-width: 44px;
     text-align: center;
     color: var(--text-strong);
   }
@@ -810,24 +1119,32 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
-  .test-btn {
+  /* Single button style for every row action. */
+  .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
     background: var(--input-bg);
     color: var(--text);
     font: inherit;
     padding: 4px 12px;
     cursor: pointer;
+    white-space: nowrap;
   }
-  .test-btn:hover {
+  .btn:hover:not(:disabled) {
     background: var(--surface-bg);
     color: var(--text-strong);
   }
-  .stepper .reset {
-    margin-left: 4px;
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .btn-sm {
+    padding: 2px 10px;
+    font-size: 11px;
   }
   .file-input {
     border: 1px solid var(--input-border);
@@ -841,9 +1158,34 @@
   .file-input[aria-invalid="true"] {
     border-color: var(--error-text);
   }
+  .folder-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: right;
+    color: var(--text-muted);
+    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
   .hint {
     font-size: 11px;
+    color: var(--text-muted);
     padding: 2px 0 4px;
+  }
+  .hint.intro {
+    font-size: 12px;
+    color: var(--text);
+    margin: 0 0 12px;
+    padding: 0;
+  }
+  /* Helper text under a card aligns with the card's content. */
+  .card + .hint {
+    margin: 6px 14px 0;
+    padding: 0;
+  }
+  .card > .hint {
+    padding: 4px 0 8px;
   }
   .error-hint {
     color: var(--error-text);
@@ -854,28 +1196,12 @@
   .ok-hint {
     color: var(--success);
   }
-  .test-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border: 1px solid var(--input-border);
-    border-radius: 6px;
-    background: var(--input-bg);
-    color: var(--text);
-    font: inherit;
-    padding: 4px 12px;
-    cursor: pointer;
-  }
-  .test-button:hover {
-    background: var(--surface-bg);
-    color: var(--text-strong);
-  }
   /* Theme swatches. */
   .swatches {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
     gap: 8px;
-    margin-bottom: 8px;
+    margin: 0;
   }
   .swatch {
     display: flex;
@@ -891,7 +1217,7 @@
     color: var(--text-muted);
   }
   .swatch:hover {
-    background: var(--surface-bg);
+    background: var(--surface-active);
     color: var(--text);
   }
   .swatch.selected {
@@ -928,15 +1254,79 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .shortcuts {
+  /* Interface font picker. */
+  .font-search-row {
+    display: flex;
+    gap: 8px;
+    padding: 0 2px 8px;
+  }
+  .font-search {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    padding: 5px 9px;
+    background: var(--input-bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .font-list {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 2px;
+    max-height: 168px;
+    overflow-y: auto;
+    border-top: 1px solid var(--separator);
+    padding: 8px 2px 2px;
+    margin: 0;
   }
-  .shortcut {
+  .font-option {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    align-items: baseline;
+    gap: 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  .font-option:hover {
+    background: var(--surface-active);
+  }
+  .font-option.selected {
+    border-color: var(--accent);
+    color: var(--text-strong);
+  }
+  .font-sample {
+    flex: 0 0 auto;
+    width: 26px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-strong);
+  }
+  .font-name {
+    flex: 1;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .font-category {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .font-option.applying .font-category {
+    color: var(--accent);
+  }
+  .font-empty {
+    padding: 10px;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-align: center;
   }
   kbd {
     display: inline-block;
@@ -951,9 +1341,22 @@
     border-radius: 5px;
     padding: 2px 8px;
   }
+  .about-block {
+    text-align: center;
+    padding-top: 4px;
+  }
   .about {
     color: var(--text-strong);
     font-size: 13px;
+  }
+  .about-logo {
+    display: block;
+    height: 42px;
+    width: auto;
+    margin: 2px auto 10px;
+  }
+  .about-block .links {
+    justify-content: center;
   }
   .about-sub {
     color: var(--text-subtle);

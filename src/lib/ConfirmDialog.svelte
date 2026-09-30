@@ -107,7 +107,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     padding: 16px;
     outline: none;

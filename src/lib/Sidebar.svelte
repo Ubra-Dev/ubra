@@ -3,12 +3,29 @@
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
+  import {
+    MAX_SIDEBAR_WIDTH,
+    MIN_SIDEBAR_WIDTH,
+    effectiveSplitRatio,
+    ratioFromPointer,
+    stepSidebarWidth,
+    stepSplitRatio,
+  } from "./sidebarResize";
   import { store } from "./store.svelte";
+  import { workspaceDir } from "./workspaceGit";
+  import { workspaceGit } from "./workspaceGit.svelte";
 
   let editing = $state<string | null>(null);
   let draft = $state("");
   const agents = $derived(agent.activeAgents());
   const mod = modLabel(isMacPlatform(navigator.platform));
+
+  // Refresh branch subtitles when workspace directories change.
+  $effect(() => {
+    if (!store.layout) return;
+    for (const ws of store.layout.workspaces) workspaceDir(ws);
+    void workspaceGit.refresh();
+  });
 
   function focus(el: HTMLInputElement): void {
     el.focus();
@@ -47,6 +64,94 @@
       store.openSavedSetups(m.id);
     } else if (action === "close") {
       store.requestCloseWorkspace(m.id);
+    }
+  }
+
+  // Sidebar resize: width handle on the outer edge, split divider between
+  // the workspaces and agents panes. Both drag with the pointer and step
+  // with the keyboard; sizes persist in the store.
+  let splitEl = $state<HTMLDivElement | null>(null);
+  let splitHeight = $state(0);
+  const splitRatio = $derived(effectiveSplitRatio(store.sidebarSplit, splitHeight));
+  let splitDrag: { top: number; height: number } | null = null;
+  let widthDrag: { startX: number; startWidth: number } | null = null;
+
+  function primaryButton(e: PointerEvent): boolean {
+    return e.pointerType !== "mouse" || e.button === 0;
+  }
+
+  function startSplitDrag(e: PointerEvent): void {
+    if (!splitEl || !primaryButton(e)) return;
+    const rect = splitEl.getBoundingClientRect();
+    splitDrag = { top: rect.top, height: rect.height };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveSplitDrag(e: PointerEvent): void {
+    if (!splitDrag) return;
+    store.setSidebarSplit(
+      effectiveSplitRatio(
+        ratioFromPointer(e.clientY, splitDrag.top, splitDrag.height),
+        splitDrag.height,
+      ),
+    );
+  }
+
+  function endSplitDrag(): void {
+    splitDrag = null;
+  }
+
+  function onSplitKey(e: KeyboardEvent): void {
+    const height = splitEl?.clientHeight ?? 0;
+    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      store.setSidebarSplit(
+        effectiveSplitRatio(stepSplitRatio(store.sidebarSplit, -1), height),
+      );
+    } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      store.setSidebarSplit(
+        effectiveSplitRatio(stepSplitRatio(store.sidebarSplit, 1), height),
+      );
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      store.setSidebarSplit(effectiveSplitRatio(0, height));
+    } else if (e.key === "End") {
+      e.preventDefault();
+      store.setSidebarSplit(effectiveSplitRatio(1, height));
+    }
+  }
+
+  function startWidthDrag(e: PointerEvent): void {
+    if (!primaryButton(e)) return;
+    widthDrag = { startX: e.clientX, startWidth: store.sidebarWidth };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveWidthDrag(e: PointerEvent): void {
+    if (!widthDrag) return;
+    store.setSidebarWidth(widthDrag.startWidth + (e.clientX - widthDrag.startX));
+  }
+
+  function endWidthDrag(): void {
+    widthDrag = null;
+  }
+
+  function onWidthKey(e: KeyboardEvent): void {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      store.setSidebarWidth(stepSidebarWidth(store.sidebarWidth, -1));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      store.setSidebarWidth(stepSidebarWidth(store.sidebarWidth, 1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      store.setSidebarWidth(MIN_SIDEBAR_WIDTH);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      store.setSidebarWidth(MAX_SIDEBAR_WIDTH);
     }
   }
 
@@ -106,21 +211,14 @@
 </script>
 
 {#if store.layout}
-  <aside class="sidebar">
-    <div class="navigation-scroll">
-    <div class="section"><Icon name="layers" size={12} /> Workspaces</div>
-    {#if agent.attention.length + agent.done.length > 0}
-      {@const reviewCount = agent.attention.length + agent.done.length}
-      <button class="attention" onclick={() => agent.jumpToReview()}>
-        <Icon name="alert" size={12} />
-        <span>
-          {reviewCount}
-          {reviewCount === 1 ? "needs" : "need"} review
-        </span>
-      </button>
-    {/if}
+  <aside class="sidebar" style="width: {store.sidebarWidth}px">
+    <div class="split" bind:this={splitEl} bind:clientHeight={splitHeight}>
+      <section class="pane" aria-label="Workspaces" style:flex-grow={splitRatio}>
+        <div class="section"><Icon name="layers" size={12} /> Workspaces</div>
+        <div class="pane-scroll">
     {#each store.layout.workspaces as ws (ws.id)}
       {@const rollup = agent.workspaceRollup(ws)}
+      {@const branch = workspaceGit.branchFor(ws.id)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="ws"
@@ -149,19 +247,28 @@
         {:else}
           <button
             class="name"
+            title={branch ? `${ws.name} — ${branch}` : ws.name}
             onclick={() => store.switchWorkspace(ws.id)}
             ondblclick={() => {
               editing = ws.id;
               draft = ws.name;
             }}
           >
-            {ws.name}
-            {#if rollup === "done"}
-              <span class="done-check" title="done">
-                <Icon name="check" size={10} />
+            <span class="ws-name">
+              <span class="ws-title">{ws.name}</span>
+              {#if rollup === "done"}
+                <span class="done-check" title="done">
+                  <Icon name="check" size={10} />
+                </span>
+              {:else if rollup !== "idle"}
+                <span class={"dot " + rollup}></span>
+              {/if}
+            </span>
+            {#if branch}
+              <span class="ws-branch">
+                <Icon name="git-branch" size={10} />
+                <span class="ws-branch-name">{branch}</span>
               </span>
-            {:else if rollup !== "idle"}
-              <span class={"dot " + rollup}></span>
             {/if}
           </button>
         {/if}
@@ -174,7 +281,55 @@
         </button>
       </div>
     {/each}
-    <div class="section agents"><Icon name="cpu" size={12} /> Agents</div>
+    <div class="add-workspace">
+      <button
+        class="add"
+        title={`New workspace (${mod}N)`}
+        onclick={() => store.addWorkspace()}
+      >
+        <Icon name="plus" size={12} />
+        <span>New</span>
+      </button>
+      <button
+        class="add-grid"
+        title="New workspace with 4 terminals (2×2)"
+        aria-label="New workspace with 4 terminals in a 2 by 2 grid"
+        onclick={() => store.addWorkspace(true)}
+      >
+        <Icon name="grid" size={14} />
+      </button>
+    </div>
+        </div>
+      </section>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="divider"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize workspaces and agents panes"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(splitRatio * 100)}
+        tabindex="0"
+        onpointerdown={startSplitDrag}
+        onpointermove={moveSplitDrag}
+        onpointerup={endSplitDrag}
+        onpointercancel={endSplitDrag}
+        onkeydown={onSplitKey}
+      ></div>
+      <section class="pane agents" aria-label="Agents" style:flex-grow={1 - splitRatio}>
+        <div class="section agents"><Icon name="cpu" size={12} /> Agents</div>
+        {#if agent.attention.length + agent.done.length > 0}
+          {@const reviewCount = agent.attention.length + agent.done.length}
+          <button class="attention" onclick={() => agent.jumpToReview()}>
+            <Icon name="alert" size={12} />
+            <span>
+              {reviewCount}
+              {reviewCount === 1 ? "needs" : "need"} review
+            </span>
+          </button>
+        {/if}
+        <div class="pane-scroll">
     {#if agents.length === 0}
       <div class="none">No active agents</div>
     {:else}
@@ -219,26 +374,10 @@
         {/each}
       {/each}
     {/if}
+        </div>
+      </section>
     </div>
     <div class="footer">
-    <div class="add-workspace">
-      <button
-        class="add"
-        title={`New workspace (${mod}N)`}
-        onclick={() => store.addWorkspace()}
-      >
-        <Icon name="plus" size={12} />
-        <span>Workspace</span>
-      </button>
-      <button
-        class="add-grid"
-        title="New workspace with 4 terminals (2×2)"
-        aria-label="New workspace with 4 terminals in a 2 by 2 grid"
-        onclick={() => store.addWorkspace(true)}
-      >
-        <Icon name="grid" size={14} />
-      </button>
-    </div>
       <button
         class="settings-btn"
         title={`Settings (${mod},)`}
@@ -269,25 +408,98 @@
         onDismiss={() => (menu = null)}
       />
     {/if}
+    </div>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="resize-x"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar width"
+      aria-valuemin={MIN_SIDEBAR_WIDTH}
+      aria-valuemax={MAX_SIDEBAR_WIDTH}
+      aria-valuenow={store.sidebarWidth}
+      tabindex="0"
+      onpointerdown={startWidthDrag}
+      onpointermove={moveWidthDrag}
+      onpointerup={endWidthDrag}
+      onpointercancel={endWidthDrag}
+      onkeydown={onWidthKey}
+    ></div>
   </aside>
 {/if}
 
 <style>
   .sidebar {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    width: 190px;
-    flex: 0 0 190px;
+    flex: 0 0 auto;
     min-height: 0;
     overflow: hidden;
     background: var(--sidebar-bg);
     padding: 10px 8px;
-    font: 12px system-ui, sans-serif;
+    font: 12px var(--font-ui);
     color: var(--text);
     user-select: none;
   }
-  .navigation-scroll {
+  .split {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pane {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .divider {
+    flex: 0 0 7px;
+    margin: -3px 0;
+    cursor: ns-resize;
+    touch-action: none;
+    position: relative;
+    z-index: 1;
+  }
+  .divider::after {
+    content: "";
+    display: block;
+    height: 1px;
+    margin-top: 3px;
+    background: var(--border);
+  }
+  .divider:hover::after,
+  .divider:focus-visible::after,
+  .divider:active::after {
+    background: var(--accent);
+  }
+  .resize-x {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -3px;
+    width: 8px;
+    cursor: ew-resize;
+    touch-action: none;
+    z-index: 1;
+  }
+  .resize-x::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 1px;
+  }
+  .resize-x:hover::after,
+  .resize-x:focus-visible::after,
+  .resize-x:active::after {
+    background: var(--accent);
+  }
+  .pane-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
@@ -297,6 +509,7 @@
   }
   .section {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     gap: 6px;
     font-size: 11px;
@@ -306,9 +519,7 @@
     padding: 0 6px 6px;
   }
   .section.agents {
-    margin-top: 8px;
     padding-top: 10px;
-    border-top: 1px solid var(--border);
   }
   .ws {
     position: relative;
@@ -342,6 +553,10 @@
   .name {
     flex: 1 1 auto;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1px;
     background: transparent;
     border: none;
     color: inherit;
@@ -350,6 +565,35 @@
     padding: 6px;
     border-radius: 6px;
     cursor: pointer;
+    overflow: hidden;
+  }
+  .ws-name {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .ws-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ws-name .dot,
+  .ws-name .done-check {
+    flex: 0 0 auto;
+  }
+  .ws-branch {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--text-subtle);
+  }
+  .ws-branch-name {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -392,6 +636,7 @@
   }
   .add-workspace {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     gap: 2px;
     margin-top: 6px;
@@ -535,6 +780,7 @@
   }
   .attention {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     gap: 6px;
     background: var(--attention-bg);

@@ -1,0 +1,2 @@
+Yes, and always allow tool 'Edit' in this conversation
+No, and always deny for Edit in this conversation

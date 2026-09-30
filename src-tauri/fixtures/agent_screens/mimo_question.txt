@@ -1,0 +1,5 @@
+Which package manager should I use?
+1. npm
+2. bun
+Type your own answer
+↑↓ select  enter confirm  esc dismiss

@@ -335,6 +335,12 @@ impl AgentStatusService {
                 };
                 let mut tracker = Tracker::default();
                 let started = Instant::now();
+                // TEMP perf instrumentation (removed after the lag audit).
+                let perf_log = matches!(std::env::var("UBRA_PERF_LOG").as_deref(), Ok("1"));
+                let mut perf_ticks: u64 = 0;
+                let mut perf_total = Duration::ZERO;
+                let mut perf_max = Duration::ZERO;
+                let mut perf_publishes: u64 = 0;
                 // A fixed 100ms cadence coalesces bursts without starvation from
                 // continuously arriving output. Process discovery remains 1Hz.
                 loop {
@@ -347,6 +353,7 @@ impl AgentStatusService {
                     if shared.reload.swap(false, Ordering::SeqCst) {
                         watcher.reload_rules();
                     }
+                    let tick_start = if perf_log { Some(Instant::now()) } else { None };
                     let observations = watcher.observe(&manager);
                     let exits = manager.drain_agent_exits();
                     let (states, transitions) =
@@ -367,7 +374,33 @@ impl AgentStatusService {
                         }
                     };
                     if let Some(update) = update {
+                        if perf_log {
+                            eprintln!(
+                                "ubra-perf: publish rev={} states={} transitions={}",
+                                update.revision,
+                                update.states.len(),
+                                update.transitions.len()
+                            );
+                            perf_publishes += 1;
+                        }
                         publish(update);
+                    }
+                    if let Some(start) = tick_start {
+                        let elapsed = start.elapsed();
+                        perf_ticks += 1;
+                        perf_total += elapsed;
+                        if elapsed > perf_max {
+                            perf_max = elapsed;
+                        }
+                        if perf_ticks.is_multiple_of(300) {
+                            eprintln!(
+                                "ubra-perf: {} ticks avg={:.2}ms max={:.2}ms publishes={}",
+                                perf_ticks,
+                                perf_total.as_secs_f64() * 1000.0 / perf_ticks as f64,
+                                perf_max.as_secs_f64() * 1000.0,
+                                perf_publishes
+                            );
+                        }
                     }
                     let deadline = Instant::now() + WORKER_TICK;
                     loop {

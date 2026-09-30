@@ -8,17 +8,25 @@
   import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
-  import RightSidebar from "$lib/RightSidebar.svelte";
+  import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
+  import RightSidebar from "$lib/RightSidebar.svelte";
+  import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
+  import { agentClis } from "$lib/agentClis.svelte";
+  import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
+  import "$lib/uiFontFaces";
+  import { uiFontStyle } from "$lib/uiFonts";
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
     void store.boot();
     agent.start();
+    workspaceGit.start();
+    void agentClis.ensure();
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
@@ -132,7 +140,7 @@
 
 <svelte:window onkeydown={onGlobalKeyDown} />
 
-<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)}`}>
+<div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)};${uiFontStyle(store.uiFontId)}`}>
   {#if !store.loaded}
     <div class="loading">Loading Ubra&hellip;</div>
   {:else if store.recoveryRequired}
@@ -156,30 +164,30 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="app" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
-      <Sidebar />
-      <div class="main">
-        <TabBar />
-        <div class="tabs">
-          {#each store.layout.workspaces as ws (ws.id)}
-            <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
-              {#each ws.tabs as tab (tab.id)}
-                <div class="tab" hidden={tab.id !== ws.activeTabId}>
-                  <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />
-                </div>
-              {/each}
-            </div>
-          {/each}
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
+      <div class="app">
+        <Sidebar />
+        <div class="main">
+          <TabBar />
+          <div class="tabs">
+            {#each store.layout.workspaces as ws (ws.id)}
+              <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
+                {#each ws.tabs as tab (tab.id)}
+                  <div class="tab" hidden={tab.id !== ws.activeTabId}>
+                    <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
         </div>
-        {#if store.saveError}
-          <div class="error" role="alert">Layout save failed: {store.saveError}</div>
-        {/if}
-        {#if store.recoveryBackupPath}
-          <div class="error backup">Original layout preserved at: {store.recoveryBackupPath}</div>
-        {/if}
+        <RightSidebar />
       </div>
-      <RightSidebar />
+      <StatusBar />
     </div>
+    {#if store.layout.workspaces.length === 0 && !store.onboardingOpen}
+      <EmptyWorkspaces />
+    {/if}
     {#if store.onboardingOpen}
       <FirstRun />
     {/if}
@@ -202,6 +210,7 @@
     overflow: hidden;
   }
   .root {
+    --font-ui: system-ui, sans-serif;
     width: 100vw;
     height: 100vh;
     background: var(--app-bg);
@@ -212,7 +221,7 @@
     min-height: 100vh;
     display: grid;
     place-items: center;
-    font: 14px/1.6 system-ui, sans-serif;
+    font: 14px/1.6 var(--font-ui);
     overflow-y: auto;
   }
   .recovery-content {
@@ -239,12 +248,19 @@
     justify-content: center;
     height: 100vh;
     color: var(--text-muted);
-    font: 14px system-ui, sans-serif;
+    font: 14px var(--font-ui);
+  }
+  .shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
   }
   .app {
     display: flex;
-    height: 100vh;
-    width: 100vw;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
   }
   .main {
     flex: 1 1 0;
@@ -264,12 +280,6 @@
   .ws[hidden],
   .tab[hidden] {
     display: none;
-  }
-  .error {
-    padding: 4px 10px;
-    background: var(--error-bg);
-    color: var(--error-text);
-    font: 12px system-ui, sans-serif;
   }
   :global(button:focus-visible, select:focus-visible, input:focus-visible) {
     outline: 2px solid var(--accent);
