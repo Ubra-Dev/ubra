@@ -176,10 +176,7 @@
     {/each}
     <div class="section agents"><Icon name="cpu" size={12} /> Agents</div>
     {#if agents.length === 0}
-      <div class="none">
-        <Icon name="cpu" size={12} />
-        <span>No active agents</span>
-      </div>
+      <div class="none">No active agents</div>
     {:else}
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
@@ -252,11 +249,11 @@
       </button>
       <button
         class="settings-btn"
-        title="Saved setups"
+        title="Saved Setups"
         onclick={() => store.openSavedSetups()}
       >
         <Icon name="layers" size={13} />
-        <span>Saved setups</span>
+        <span>Saved Setups</span>
       </button>
     {#if menu}
       <ContextMenu
@@ -451,10 +448,8 @@
     background: var(--surface-bg);
   }
   .none {
-    display: flex;
-    align-items: center;
-    gap: 6px;
     color: var(--text-subtle);
+    opacity: 0.6;
     padding: 2px 6px;
   }
   .agent-ws {

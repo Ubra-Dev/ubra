@@ -345,15 +345,15 @@
     class="dialog"
     role="dialog"
     aria-modal="true"
-    aria-label="Saved setups"
+    aria-label="Saved Setups"
     tabindex="-1"
     data-keyboard-overlay
     use:overlayFocus
     onkeydown={onDialogKeydown}
   >
     <div class="header">
-      <span>Saved setups</span>
-      <button onclick={close} aria-label="Close saved setups">✕</button>
+      <span>Saved Setups</span>
+      <button onclick={close} aria-label="Close Saved Setups">✕</button>
     </div>
 
     {#if !library && savedSetups.loadError}

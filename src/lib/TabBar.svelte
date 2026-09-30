@@ -116,14 +116,14 @@
           </button>
         </div>
       {/each}
+        <button
+          class="add"
+          title={`New tab (${mod}T)`}
+          onclick={() => store.addTab()}
+        >
+          <Icon name="plus" size={13} />
+        </button>
       </div>
-      <button
-        class="add"
-        title={`New tab (${mod}T)`}
-        onclick={() => store.addTab()}
-      >
-        <Icon name="plus" size={13} />
-      </button>
     </div>
     {#if menu}
       <ContextMenu
