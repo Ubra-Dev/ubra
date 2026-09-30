@@ -6,6 +6,15 @@ on:
   pull_request:
   workflow_call:
 
+permissions:
+  contents: read
+
+# CI and official releases do not initialize analytics. Local development can
+# configure its own .env; consent changes belong to a separate product change.
+env:
+  PUBLIC_POSTHOG_PROJECT_TOKEN: ""
+  PUBLIC_POSTHOG_HOST: ""
+
 jobs:
   build:
     strategy:
@@ -54,8 +63,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Tauri's Rust build script also copies resource files during cargo test.
+      - name: Prepare third-party notices and corresponding source
+        run: npm run licenses
+
       - name: Frontend unit tests
         run: npm run test:unit
+
+      - name: Release tooling tests
+        run: node --test tests/release-tooling.test.mjs
 
       - name: Frontend typecheck
         run: npm run check
@@ -69,6 +85,9 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Daemon launch/quit/reattach smoke
+        run: node scripts/smoke-daemon.mjs
+
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
@@ -79,3 +98,9 @@ jobs:
       # @tauri-apps/cli in devDependencies.
       - name: Tauri build
         run: npm run tauri build
+
+      # Staging check only (debug bins already built by Rust tests): proves
+      # the release sidecar step works on every OS without a second bundle.
+      - name: Sidecar staging check
+        run: STAGE_PROFILE=debug node scripts/stage-bins.mjs
+        shell: bash

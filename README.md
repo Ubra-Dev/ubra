@@ -19,8 +19,15 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 - **Layout persistence and recovery** — window size/position and the full workspace
   layout restore across relaunches. Invalid or unsupported saved layouts enter
   recovery instead of being silently overwritten.
+- **Persistent terminals** — a background daemon owns every PTY, so quitting
+  Ubra only disconnects the UI: reopening reattaches to the same processes and
+  screens. After a daemon or computer restart, panes restore their directories
+  and recent output, and agent conversations resume when their exact session was
+  reported (Settings → Terminal persistence).
 - **Tray behavior** — closing the window hides the app only when the tray is
-  available; otherwise normal close quits. Settings also provides an explicit Quit.
+  available; otherwise normal close quits (terminals keep running either way).
+  Settings and the tray also offer Quit plus a confirmed Stop all terminals
+  and quit.
 - **Agent awareness** — panes running agent CLIs (`claude`, `codex`, `opencode`, …)
   surface working/finished badges in pane headers, tabs, and the sidebar, plus a
   notification and sound when an agent finishes while you're elsewhere.
@@ -33,8 +40,8 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   notification, an in-app toast, or off, with done/needs-attention chimes
   (custom sound file and per-agent muting supported) that play even when the
   window is hidden to the tray.
-- **Headless automation (experimental)** — a separate authenticated local daemon
-  and JSON CLI expose terminal and agent-state operations without a window.
+- **Headless automation (experimental)** — the same authenticated local daemon
+  plus a JSON CLI expose terminal and agent-state operations without a window.
 - **Plan usage** — Settings → Usage lists every detected agent CLI with its
   plan windows (session/weekly with reset countdowns) where the CLI exposes
   them. Codex and Claude read the CLIs' own OAuth logins; other CLIs show an
@@ -50,10 +57,12 @@ Or build from source:
 
 ```sh
 npm ci
-npm run tauri build
+npm run tauri:build
 ```
 
-Bundles land in `src-tauri/target/release/bundle/`.
+Release bundles (with the `ubra-daemon` + `ubra-cli` sidecars) land in
+`src-tauri/target/release/bundle/`. Plain `npm run tauri build` skips the
+sidecars; `tauri dev` builds the bins automatically next to the app binary.
 
 ## Prerequisites
 
@@ -85,8 +94,10 @@ npm run tauri dev
 ## Checks
 
 ```sh
+npm run licenses                 # legal resources required by Rust builds/tests
 npm run check                    # svelte-check
 npm run test:unit                # frontend unit tests (node:test)
+node --test tests/release-tooling.test.mjs # notices and release downloads
 npm run build                    # static frontend
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -137,7 +148,8 @@ job. The `release` environment can additionally require maintainer approval; the
 SHA checks fail closed even if environment reviewers are not configured.
 
 Neither automated bundle creation nor this documentation establishes a successful
-native smoke run. Signing and notarization are outside this remediation's scope.
+native smoke run. Release signing and notarization require the credentials and
+verification described in [the release guide](docs/RELEASING.md).
 
 ### Desktop security and process ownership
 
@@ -209,12 +221,17 @@ Native platform checklist:
    inside overlays and return on dismissal. Check navigation with many tabs,
    workspaces and agent rows.
 6. Hide/show/quit with the tray; on Linux also exercise tray-unavailable close.
-   Quitting must terminate owned sessions.
-7. On Windows, also build the headless executables from the same tagged source
-   (`cargo build --release --manifest-path src-tauri/Cargo.toml --bins`). They are
-   separate from the GUI bundle. Run the daemon/CLI with a fresh `--state-dir`,
-   execute a marker-file command through ConPTY, read output, close the pane and
-   shut down. Check invalid commands return a nonzero exit code on every OS.
+   Quitting must leave sessions running (reopening reattaches); Stop all
+   terminals and quit must terminate them and drop automatic recovery.
+7. Verify the release bundle ships matching daemon/CLI sidecars next to the app
+   binary. On Windows, run the daemon/CLI with a fresh `--state-dir`, execute a
+   marker-file command through ConPTY, read output, close the pane and shut
+   down. Check invalid commands return a nonzero exit code on every OS.
+   Also verify launch/quit/reattach: run a long-lived process, quit the GUI,
+   reopen, and confirm the same session, screen, and continued input — then
+   repeat after closing the terminal that launched the app. Restart the daemon
+   and confirm directories, history, and exact conversation recovery across
+   visible and hidden panes.
 8. Open the right sidebar's Explorer on a scratch folder: browse, reveal, and
    copy paths; click a file to preview it with syntax highlighting (try a
    binary and an oversized file too). In a scratch git repo, verify Source
@@ -224,14 +241,15 @@ Native platform checklist:
 The development checklist below complements, but does not replace, these gates.
 
 - Split panes from the hover toolbar, drag the dividers, add tabs/workspaces,
-  then quit and relaunch: the layout restores.
+  then quit and relaunch: the layout restores and terminals reattach live.
 - Split a pane running a live process (e.g. `sleep 300`): the original pane
   keeps running after the split, and closing one side never kills the other.
   Panes also survive tab/workspace switches untouched.
 - Workspaces can be closed from the sidebar; closing the last one resets fresh.
 - Close the window with a working tray: the app hides and panes keep running.
   Left-click the tray icon to show it again; Quit is available in Settings and
-  the tray menu. Without a working tray, closing the window quits instead.
+  the tray menu. Without a working tray, closing the window quits instead
+  (terminals still keep running; stop them from Settings or the tray).
 - Agent badges use explicit CLI screen evidence: Working means a recognized
   busy indicator, Blocked means an approval/question prompt or a suspended
   process, and Idle means a recognized ready prompt before an observed task.
@@ -287,16 +305,47 @@ The development checklist below complements, but does not replace, these gates.
   previews), notification delivery, sounds and per-agent muting, the
   shortcut reference, and version info.
 
-## Headless daemon + CLI (experimental)
+## Persistent terminals, daemon + CLI
 
-`ubra-daemon` owns PTYs and the agent watcher without a window, serving a
-JSON-lines protocol over loopback TCP. By default Unix runtime files live in
-`<tmp>/ubra-<effective-uid>/`; Windows uses the per-user app data directory.
-`ubra-cli` drives it — all output is pretty-printed JSON, and the CLI starts the
-daemon on demand.
+`ubra-daemon` is the sole owner of PTYs, terminal emulation, agent status, and
+recovery records. The desktop UI is a thin client: quitting it (Settings, tray,
+keyboard shortcut, or closing without a tray) flushes pending layout changes and
+disconnects, leaving every terminal process running. Reopening attaches to the
+same processes and restores their screens — even after closing the terminal that
+launched Ubra. **Stop all terminals and quit** (Settings or tray, confirmed)
+terminates every session and drops automatic recovery records while keeping the
+saved layout.
 
-The macOS GUI bundle includes sibling daemon/CLI executables under
-`Ubra.app/Contents/MacOS/`; they are not automatically added to `PATH`.
+After a daemon or computer restart, saved panes restore their directories and
+recent output. Agent conversations resume only through their exact reported
+session reference; anything else (arbitrary programs, unreported agents)
+returns as a fresh shell with its saved output. Exited commands stay exited:
+reopening never silently reruns them. A pane whose directory or executable is
+gone stays visible with its saved data and a retry action instead of being
+moved elsewhere.
+
+Settings → Terminal persistence controls automatic agent recovery and screen
+history saving (both on by default); turning history off removes persisted
+screen history. Settings → Agent integrations installs the Claude Code session
+hooks that report exact conversations (existing hooks are preserved; removal
+deletes only Ubra entries). Other detected agents report through explicit
+`ubra-cli agent-report` hook commands; without a usable resume integration the
+pane falls back to a shell with **Conversation could not be resumed** and a
+retry action.
+
+Recovery starts fresh shells or native agent resume commands after a reboot:
+it cannot revive arbitrary processes or guarantee continuation of an
+interrupted agent turn.
+
+The daemon serves a JSON-lines protocol over loopback TCP. By default Unix
+runtime files live in `<tmp>/ubra-<effective-uid>/`; Windows uses the per-user
+app data directory. Recovery checkpoints live in the persistent app data dir
+(`UBRA_DATA_DIR` overrides it for GUI, CLI, and daemon alike). `ubra-cli`
+drives the daemon — all output is pretty-printed JSON, and the CLI starts the
+daemon on demand (detached from the launching terminal).
+
+Release bundles include matching daemon/CLI sidecars next to the app binary
+(macOS: `Ubra.app/Contents/MacOS/`); they are not automatically added to `PATH`.
 Other platform packaging must be inspected in its native release gate.
 For standalone source builds use
 `cargo build --release --manifest-path src-tauri/Cargo.toml --bins`; outputs are
@@ -323,12 +372,19 @@ cargo run -q --bin ubra-cli -- send-keys 1 enter
 cargo run -q --bin ubra-cli -- wait-state 1 idle --timeout 120
 cargo run -q --bin ubra-cli -- wait-output 1 "done" --timeout 120
 cargo run -q --bin ubra-cli -- snapshot
+cargo run -q --bin ubra-cli -- close 1
+cargo run -q --bin ubra-cli -- flush
+cargo run -q --bin ubra-cli -- stop-all
+cargo run -q --bin ubra-cli -- integrations status
 cargo run -q --bin ubra-cli -- shutdown
 ```
 
-The GUI does not use the daemon (it keeps its in-process backend). Protocol 2
-uses mutual nonce-bound HMAC-SHA256 authentication before commands or pushed pane
-data; the credential never travels over TCP. Runtime directories/files are
+Protocol 3 uses mutual nonce-bound HMAC-SHA256 authentication before commands or
+pushed pane data; the credential never travels over TCP. Each daemon lifetime
+has a unique runtime epoch and each session a unique incarnation; stale
+operations and events cannot affect replacement processes. When an older daemon
+is already running, clients report the mismatch with restart instructions and
+never stop existing sessions automatically. Runtime directories/files are
 current-user-only (Unix `0700`/`0600`, Windows protected owner-only DACLs).
 Authentication does not isolate clients from processes able to read the same
 user's credential. `daemon.lock` is a persistent OS-locked file: do not delete it
@@ -349,20 +405,38 @@ startup to ten. Agent watch is intentionally streaming but has a 60-second idle
 deadline.
 
 Use `--state-dir <fresh-directory>` for isolated experiments and shut that daemon
-down afterward. The headless interface remains experimental; native Windows ACL,
+down afterward. The persistence model follows
+[Herdr's session-state design](https://github.com/herdrdev/herdr/blob/master/docs/preview/website/src/content/docs/session-state.mdx),
+and detached launching follows
+[Herdr's platform implementation](https://github.com/herdrdev/herdr/blob/master/src/platform/mod.rs)
+(Herdr is Apache-2.0; no Herdr code is vendored here). Native Windows ACL,
 cross-user authentication and ConPTY execution must pass platform release gates
 rather than being inferred from Unix tests.
 
+## Support Ubra
+
+Personal GitHub Sponsors enrollment for [@oliverbytes](https://github.com/oliverbytes)
+is pending. See [sponsorship plans](SPONSORSHIP.md) for how funding will support
+maintenance, desktop compatibility, signing, and documentation. The MIT core
+remains freely available; sponsorship does not purchase roadmap control.
+
 ## Roadmap
 
-- [x] Phase 0: scaffold + verified dev/build loop
-- [x] Phase 1: PTY vertical slice (`portable-pty` + xterm.js pane)
-- [x] Phase 2: multiplexer model, layout persistence, tray behavior
-- [x] Phase 3: agent awareness v1 (process detection + badges)
-- [x] Explicit working/blocked/idle/done/unknown status and completion transitions
-- [x] Experimental local daemon + CLI (separate from the GUI backend)
-- [ ] GUI daemon migration and SSH remotes
-- [ ] Native smoke approval for each release on macOS, Linux, and Windows
+- Improve terminal persistence and recovery reliability across desktop platforms.
+- Complete native verification and signed/notarized releases on macOS and Windows.
+- Improve agent status detection and subscription usage visibility.
+- Explore SSH remote workspaces; headless automation remains experimental.
+- Document and improve privacy controls before distributing analytics-enabled builds.
+
+These are current priorities, not delivery commitments. Propose changes in issues.
+
+## Community and project policies
+
+- [Support and questions](SUPPORT.md)
+- [Maintainers and decisions](GOVERNANCE.md)
+- [Privacy and network behavior](PRIVACY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [Release procedure](docs/RELEASING.md)
 
 ## Contributing
 

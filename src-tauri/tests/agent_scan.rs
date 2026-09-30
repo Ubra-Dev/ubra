@@ -12,8 +12,8 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct Sink;
 impl PtyEventSink for Sink {
-    fn output(&self, _id: PaneId, _data: String, _sequence: u64) {}
-    fn exited(&self, _id: PaneId, _success: bool, _code: Option<i32>) {}
+    fn output(&self, _event: ubra_lib::pty_manager::PtyOutputEvent) {}
+    fn exited(&self, _event: ubra_lib::pty_manager::PtyExitEvent) {}
 }
 
 fn scratch_dir() -> std::path::PathBuf {

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and support
+    url: https://github.com/stackwares/ubra-tauri/discussions
+    about: Ask usage and setup questions; see SUPPORT.md for expectations.
+  - name: Private security report
+    url: https://github.com/stackwares/ubra-tauri/security/advisories/new
+    about: Report vulnerabilities privately, never in public issues.

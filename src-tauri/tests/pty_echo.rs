@@ -15,12 +15,12 @@ struct ChannelSink {
 }
 
 impl PtyEventSink for ChannelSink {
-    fn output(&self, id: PaneId, data: String, _sequence: u64) {
-        let _ = self.tx.send(Event::Output(id, data));
+    fn output(&self, event: ubra_lib::pty_manager::PtyOutputEvent) {
+        let _ = self.tx.send(Event::Output(event.id, event.data));
     }
 
-    fn exited(&self, id: PaneId, success: bool, _code: Option<i32>) {
-        let _ = self.tx.send(Event::Exit(id, success));
+    fn exited(&self, event: ubra_lib::pty_manager::PtyExitEvent) {
+        let _ = self.tx.send(Event::Exit(event.id, event.success));
     }
 }
 
@@ -440,7 +440,9 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
         )
         .unwrap_err();
     assert!(
-        error.to_string().starts_with("Working directory is unavailable:"),
+        error
+            .to_string()
+            .starts_with("Working directory is unavailable:"),
         "unexpected error: {error}"
     );
     let file_cwd = std::env::temp_dir().join(format!("ubra-file-cwd-{}", std::process::id()));
@@ -455,7 +457,9 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
         )
         .unwrap_err();
     assert!(
-        error.to_string().starts_with("Working directory is not a directory:"),
+        error
+            .to_string()
+            .starts_with("Working directory is not a directory:"),
         "unexpected error: {error}"
     );
     let _ = std::fs::remove_file(&file_cwd);
@@ -481,5 +485,8 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
             Err(_) => panic!("timed out waiting for sibling pane; got: {transcript:?}"),
         }
     }
-    assert!(transcript.contains("hello-pty"), "sibling should run, got: {transcript:?}");
+    assert!(
+        transcript.contains("hello-pty"),
+        "sibling should run, got: {transcript:?}"
+    );
 }

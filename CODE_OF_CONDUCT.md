@@ -50,8 +50,8 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening a private security advisory on GitHub or contacting the
-maintainers through the contact listed in [SECURITY.md](SECURITY.md). All
+reported privately by email to `nemoryoliver@gmail.com`. Security advisories are
+reserved for software vulnerabilities. All
 complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution
