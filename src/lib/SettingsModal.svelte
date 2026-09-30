@@ -37,6 +37,7 @@
   } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
+  import { updater } from "./updater.svelte";
 
   type SectionId =
     | "appearance"
@@ -73,6 +74,12 @@
   let soundFileChecking = $state(false);
 
   const shortcuts = cheatSheet(isMacPlatform(navigator.platform));
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const mb = bytes / (1024 * 1024);
+    return mb < 10 ? `${mb.toFixed(1)} MB` : `${Math.round(mb)} MB`;
+  }
 
   function close(): void {
     store.settingsOpen = false;
@@ -675,6 +682,70 @@
                   <div class="hint error-hint" role="alert">
                     {autostartError}
                   </div>
+                {/if}
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Updates</h3>
+              <div class="card">
+                <div class="row">
+                  <span class="label">
+                    {#if updater.phase === "available" && updater.version}
+                      Ubra {updater.version} is available
+                    {:else if updater.phase === "downloading"}
+                      {#if updater.totalBytes}
+                        Downloading… {formatBytes(updater.downloadedBytes)} of
+                        {formatBytes(updater.totalBytes)}
+                      {:else}
+                        Downloading… {formatBytes(updater.downloadedBytes)}
+                      {/if}
+                    {:else if updater.phase === "ready"}
+                      Update installed — relaunch to apply it
+                    {:else if appVersion}
+                      Ubra {appVersion}
+                    {:else}
+                      Check for updates
+                    {/if}
+                  </span>
+                  {#if updater.phase === "ready"}
+                    <button
+                      class="btn"
+                      onclick={() => void updater.relaunchApp()}
+                    >
+                      <Icon name="refresh" size={12} />
+                      <span>Relaunch</span>
+                    </button>
+                  {:else if updater.phase === "available"}
+                    <button
+                      class="btn"
+                      onclick={() => void updater.downloadAndInstall()}
+                    >
+                      Download and install
+                    </button>
+                  {:else}
+                    <button
+                      class="btn"
+                      disabled={updater.phase === "checking" ||
+                        updater.phase === "downloading"}
+                      onclick={() => void updater.checkForUpdates()}
+                    >
+                      <Icon name="refresh" size={12} />
+                      <span>
+                        {updater.phase === "checking"
+                          ? "Checking…"
+                          : "Check for updates"}
+                      </span>
+                    </button>
+                  {/if}
+                </div>
+                {#if updater.phase === "error" && updater.error}
+                  <div class="hint error-hint" role="alert">
+                    {updater.error}
+                  </div>
+                {:else if updater.phase === "idle" && updater.checked}
+                  <div class="hint">You&rsquo;re up to date.</div>
+                {:else if updater.phase === "available" && updater.notes}
+                  <div class="hint">{updater.notes}</div>
                 {/if}
               </div>
             </div>
