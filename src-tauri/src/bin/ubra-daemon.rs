@@ -87,12 +87,15 @@ fn main() {
         eprintln!("ubra-daemon: cannot write port file: {e}");
         std::process::exit(1);
     }
+    let data_dir = std::env::var("UBRA_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| app_data_dir());
     let rules_dir = args
         .rules_dir
-        .unwrap_or_else(|| app_data_dir().join("agent-detection"));
+        .unwrap_or_else(|| data_dir.join("agent-detection"));
     eprintln!("ubra-daemon: listening on 127.0.0.1:{port} (protocol {PROTOCOL_VERSION})");
     serve(
-        DaemonCore::new(Some(rules_dir), state_dir),
+        DaemonCore::new(Some(rules_dir), state_dir, data_dir),
         listener,
         auth_token,
     );

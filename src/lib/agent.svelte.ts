@@ -100,9 +100,28 @@ class AgentStore {
     // Subscribe before fetching: startup snapshots cannot overwrite newer events.
     await listen<AgentUpdate>("agent-state-update", (event) => this.onUpdate(event.payload));
     document.addEventListener("visibilitychange", () => this.acknowledgeFocused());
+    await listen<{ connected: boolean; reconnected?: boolean }>("daemon-status", (event) => {
+      // Numeric pane ids belong to one daemon lifetime; a reconnected
+      // daemon renumbers everything, so drop stale mappings and refetch.
+      if (event.payload.connected && event.payload.reconnected) void this.reset();
+    });
     const snapshot = await invoke<AgentUpdate>("agent_snapshot");
     this.onUpdate({ ...snapshot, transitions: [] });
     this.acknowledgeFocused();
+  }
+
+  /** Drop daemon-lifetime state after a reconnect; panes re-register. */
+  private async reset(): Promise<void> {
+    this.model = emptyAgentModel();
+    this.liveToNode = {};
+    this.pending.clear();
+    this.disposed.clear();
+    try {
+      const snapshot = await invoke<AgentUpdate>("agent_snapshot");
+      this.onUpdate({ ...snapshot, transitions: [] });
+    } catch (error) {
+      console.error("ubra: agent snapshot refetch failed", error);
+    }
   }
   paneState(nodeId: string): AgentStatus | null {
     const live = this.liveForNode(nodeId);

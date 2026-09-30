@@ -59,9 +59,9 @@ jobs:
         run: npm ci
 
       # Direct CLI build (no tauri-action): bundles via the pinned
-      # @tauri-apps/cli in devDependencies.
+      # @tauri-apps/cli in devDependencies, with daemon + CLI sidecars.
       - name: Tauri build
-        run: npm run tauri build
+        run: npm run tauri:build
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4
