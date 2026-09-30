@@ -353,6 +353,7 @@
       items={(agentClis.clis ?? []).map((entry) => ({
         id: entry.cli,
         label: `${entry.label} · ${entry.cli}`,
+        cli: entry.cli,
       }))}
       onPick={onSplitPick}
       onDismiss={dismissSplitMenu}

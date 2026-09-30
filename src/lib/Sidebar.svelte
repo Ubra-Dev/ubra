@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import {
@@ -336,7 +337,7 @@
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
-          <div class="agent-item">
+          <div class="agent-item" class:active={store.focusedPaneId === a.nodeId}>
             <button
               class="agent-row"
               title={a.dirPath
@@ -356,7 +357,10 @@
               {/if}
               <span class="agent-name">{a.dir}</span>
               {#if a.cli}
-                <span class="agent-cli">{a.cli}</span>
+                <span class="agent-cli">
+                  {a.cli}
+                  <AgentCliIcon cli={a.cli} size={14} />
+                </span>
               {/if}
             </button>
             <button
@@ -711,6 +715,12 @@
     min-width: 0;
     border-radius: 6px;
   }
+  .agent-item.active {
+    background: var(--surface-active);
+  }
+  .agent-item.active .agent-name {
+    color: var(--text-strong);
+  }
   .agent-row {
     display: flex;
     align-items: center;
@@ -744,13 +754,17 @@
     text-overflow: ellipsis;
   }
   .agent-cli {
+    display: inline-flex;
     flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
     margin-left: auto;
-    max-width: 96px;
+    max-width: 112px;
     color: var(--text-subtle);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .footer {
     margin-top: auto;

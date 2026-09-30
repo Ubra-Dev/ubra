@@ -3,6 +3,7 @@
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import { store } from "./store.svelte";
 
@@ -13,7 +14,7 @@
   let customCommand = $state("");
   let pickingDirectory = $state(false);
   let errorMessage = $state<string | null>(null);
-  let selectEl = $state<HTMLSelectElement | null>(null);
+  let selectEl = $state<AgentCliSelect | null>(null);
   let customEl = $state<HTMLInputElement | null>(null);
 
   const command = $derived(resolveAgentCommand(selection, customCommand));
@@ -44,8 +45,8 @@
     else if (clis.length === 0) selection = CUSTOM_COMMAND;
   });
 
-  function onSelectChange(e: Event): void {
-    if ((e.target as HTMLSelectElement).value === CUSTOM_COMMAND) {
+  function onSelectChange(picked: string): void {
+    if (picked === CUSTOM_COMMAND) {
       void tick().then(() => customEl?.focus());
     }
   }
@@ -166,21 +167,16 @@
           {#if detected.length > 0}
             <span class="command-field">
               <span class="command-prompt" aria-hidden="true">$</span>
-              <select
+              <AgentCliSelect
                 bind:this={selectEl}
+                entries={detected}
                 bind:value={selection}
-                aria-labelledby="command-label"
-                aria-describedby="command-hint"
-                onchange={onSelectChange}
-              >
-                <option value="" disabled>Choose an agent CLI</option>
-                {#each detected as entry (entry.cli)}
-                  <option value={entry.cli} title={entry.path}>
-                    {entry.label} · {entry.cli}
-                  </option>
-                {/each}
-                <option value={CUSTOM_COMMAND}>Custom command…</option>
-              </select>
+                placeholder="Choose an agent CLI"
+                variant="field"
+                ariaLabel="Agent command"
+                ariaDescribedBy="command-hint"
+                onChange={onSelectChange}
+              />
             </span>
           {/if}
           {#if selection === CUSTOM_COMMAND}
@@ -487,15 +483,6 @@
     background: transparent;
     color: var(--text-strong);
     font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  .command-field select {
-    width: 100%;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    cursor: pointer;
   }
   .detecting {
     color: var(--text-subtle);
