@@ -337,7 +337,7 @@
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
-          <div class="agent-item">
+          <div class="agent-item" class:active={store.focusedPaneId === a.nodeId}>
             <button
               class="agent-row"
               title={a.dirPath
@@ -358,8 +358,8 @@
               <span class="agent-name">{a.dir}</span>
               {#if a.cli}
                 <span class="agent-cli">
-                  <AgentCliIcon cli={a.cli} size={14} />
                   {a.cli}
+                  <AgentCliIcon cli={a.cli} size={14} />
                 </span>
               {/if}
             </button>
@@ -714,6 +714,12 @@
     align-items: center;
     min-width: 0;
     border-radius: 6px;
+  }
+  .agent-item.active {
+    background: var(--surface-active);
+  }
+  .agent-item.active .agent-name {
+    color: var(--text-strong);
   }
   .agent-row {
     display: flex;
