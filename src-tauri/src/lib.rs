@@ -11,6 +11,7 @@ mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
 pub mod sound;
+pub mod telemetry;
 mod terminal_state;
 
 use agent_status::{AgentStatusService, AgentUpdate};
@@ -365,6 +366,12 @@ pub fn run() {
             let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
             app.manage(manager.clone());
             app.manage(ShellState::default());
+            match data_dir(app.handle()) {
+                Ok(dir) => {
+                    telemetry::init_from_disk(&dir);
+                }
+                Err(e) => eprintln!("ubra: telemetry init skipped: {e}"),
+            }
             match build_tray(app.handle()) {
                 Ok(()) => app
                     .state::<ShellState>()
@@ -493,6 +500,11 @@ pub fn run() {
             quit_app,
             autostart_enabled,
             autostart_set,
+            telemetry::telemetry_status,
+            telemetry::telemetry_set_consent,
+            telemetry::telemetry_set_distinct_id,
+            telemetry::telemetry_capture,
+            telemetry::telemetry_flag,
             notify_agent,
             play_sound,
             check_sound_file,
@@ -502,12 +514,15 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(
-                event,
+                &event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 if let Err(error) = app.state::<Arc<PtyManager>>().shutdown() {
                     eprintln!("ubra: shutdown failed: {error}");
                 }
+            }
+            if matches!(&event, tauri::RunEvent::Exit) {
+                telemetry::shutdown_flush();
             }
         });
 }

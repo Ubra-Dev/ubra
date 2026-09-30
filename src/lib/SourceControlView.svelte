@@ -4,6 +4,8 @@
 </script>
 
 <script lang="ts">
+  import { PUBLIC_POSTHOG_HOST, PUBLIC_POSTHOG_PROJECT_TOKEN } from "$env/static/public";
+  import posthog from "posthog-js";
   import { onMount } from "svelte";
   import Icon from "./Icon.svelte";
   import { COPY_TOAST_DISMISS_MS } from "./clipboard";
@@ -178,6 +180,21 @@
     actionError = null;
     try {
       const summary = await action();
+      if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+        if (label === "init") posthog.capture("git_repository_initialized");
+        else if (label === "commit") posthog.capture("git_commit_created");
+        else if (label === "stage" || label === "stage-all") {
+          posthog.capture("git_changes_staged", {
+            scope: label === "stage-all" ? "all" : "single",
+          });
+        } else if (label === "unstage" || label === "unstage-all") {
+          posthog.capture("git_changes_unstaged", {
+            scope: label === "unstage-all" ? "all" : "single",
+          });
+        } else if (label === "pull") posthog.capture("git_pull_completed");
+        else if (label === "push") posthog.capture("git_push_completed");
+        else if (label === "switch") posthog.capture("git_branch_switched");
+      }
       toasts.push(summary, "", "", {
         dismissMs: COPY_TOAST_DISMISS_MS,
         kind: "copy",

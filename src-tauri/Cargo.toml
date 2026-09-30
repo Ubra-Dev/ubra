@@ -43,6 +43,7 @@ hmac = "0.12"
 sha2 = "0.10"
 fs2 = "0.4"
 parking_lot = "0.12"
+posthog-rs = { version = "0.27", default-features = false, features = ["error-tracking"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
