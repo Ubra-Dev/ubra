@@ -8,8 +8,8 @@ use ubra_lib::pty_manager::{PtyEventSink, PtyManager};
 
 struct Sink;
 impl PtyEventSink for Sink {
-    fn output(&self, _: u32, _: String, _: u64) {}
-    fn exited(&self, _: u32, _: bool, _: Option<i32>) {}
+    fn output(&self, _: ubra_lib::pty_manager::PtyOutputEvent) {}
+    fn exited(&self, _: ubra_lib::pty_manager::PtyExitEvent) {}
 }
 struct Fixture {
     dir: std::path::PathBuf,

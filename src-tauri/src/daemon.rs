@@ -1,8 +1,10 @@
-//! Headless agent-runtime daemon (Phase 5a): owns PTYs and the agent
-//! watcher, serving a JSON-lines protocol over loopback TCP.
+//! Ubra background daemon: sole owner of PTYs, terminal emulation, agent
+//! status, and recovery records, serving a JSON-lines protocol over
+//! loopback TCP. Quitting the desktop UI disconnects; reopening attaches
+//! to the same processes and restores their screens.
 //!
 //! Requests carry `op` and a response `id`; authenticated responses echo
-//! the id and carry a boolean `ok`. Protocol 2 uses nonce-bound HMAC-SHA256
+//! the id and carry a boolean `ok`. Protocol 3 uses nonce-bound HMAC-SHA256
 //! proofs in both directions, with distinct server/client roles. The client
 //! proves identity only after verifying the server; credentials never
 //! travel over TCP. Pane state and pushed events require authentication.
@@ -10,9 +12,13 @@
 //! inode serializes startup and remains present after shutdown/crashes.
 //! Connection, pane, frame and outstanding output budgets are bounded.
 //! A lagging consumer is disconnected rather than silently dropping bytes.
+//!
+//! Each daemon lifetime has a unique runtime epoch; each session has a
+//! manager-unique incarnation. Operations and events carry both so stale
+//! requests cannot affect replacement processes.
 
 use crate::agent_status::AgentStatusService;
-use crate::pty_manager::{PaneId, PtyEventSink, PtyManager};
+use crate::pty_manager::{PaneId, PtyEventSink, PtyExitEvent, PtyManager, PtyOutputEvent};
 use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
@@ -25,12 +31,12 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_CLIENTS: usize = 32;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 pub const MAX_PANES: usize = 64;
@@ -43,6 +49,23 @@ pub const PORT_FILE: &str = "daemon.json";
 pub const AUTH_FILE: &str = "daemon.auth";
 pub const LOCK_DIR: &str = "daemon.lock";
 pub const APP_IDENTIFIER: &str = "com.nemoryoliver.ubra";
+
+/// Launch spec for one pane in a bulk `recover` request.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PaneSpec {
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+}
 
 /// Request envelope: flat object, `op` plus per-op arguments.
 #[derive(Debug, serde::Deserialize)]
@@ -76,6 +99,51 @@ pub struct Request {
     pub contains: Option<String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Stable pane key (layout pane id) for attach/close/report/restart.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Expected daemon epoch; mismatches fail as stale.
+    #[serde(default)]
+    pub epoch: Option<u64>,
+    /// Expected session incarnation; mismatches fail as stale.
+    #[serde(default)]
+    pub incarnation: Option<u64>,
+    /// Snapshot page index for `pty_snapshot_page`.
+    #[serde(default)]
+    pub page: Option<usize>,
+    /// A GUI renderer attaches: it owns terminal query responses.
+    #[serde(default)]
+    pub frontend: Option<bool>,
+    /// Bulk attach specs for `recover`.
+    #[serde(default)]
+    pub panes: Option<Vec<PaneSpec>>,
+    /// Agent family for `agent_report`.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Exact conversation reference for `agent_report`.
+    #[serde(default)]
+    pub reference: Option<String>,
+    /// Explicit resume argv for `agent_report`.
+    #[serde(default)]
+    pub resume_argv: Option<Vec<String>>,
+    /// Agent executable for resume template selection.
+    #[serde(default)]
+    pub exe: Option<String>,
+    /// Model to preserve across recovery.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Reporting hook process id (child-session classification).
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// Committed layout document for `layout_commit`.
+    #[serde(default)]
+    pub layout: Option<serde_json::Value>,
+    /// Allow agent conversation resume in attach/recover (default true).
+    #[serde(default)]
+    pub agent_recovery: Option<bool>,
+    /// Persist screen history (default true; `set_options`).
+    #[serde(default)]
+    pub save_history: Option<bool>,
 }
 
 fn respond(id: Option<u64>, mut value: serde_json::Value) -> String {
@@ -787,14 +855,59 @@ pub struct DaemonCore {
     connections: AtomicUsize,
     spawn_guard: Mutex<()>,
     state_dir: PathBuf,
+    /// Persistent app data dir holding recovery checkpoints.
+    data_dir: PathBuf,
+    /// Unique id for this daemon lifetime; operations and events carry it.
+    epoch: u64,
+    /// Exact agent resume references by pane key (main conversations only).
+    agent_refs: Mutex<HashMap<String, crate::recovery::AgentReference>>,
+    /// Last hook-confirmed working directory by pane key.
+    last_cwd: Mutex<HashMap<String, String>>,
+    /// Throttle marks: pane key to (last history flush, flushed sequence).
+    flush_marks: Mutex<HashMap<String, (Instant, u64)>>,
+    /// Retained exits already checkpointed this lifetime.
+    checkpointed_exits: Mutex<std::collections::HashSet<PaneId>>,
+    /// (family, reference, cwd) triples resumed this lifetime; each
+    /// conversation resumes once per recovery cycle.
+    used_resumes: Mutex<std::collections::HashSet<(String, String, String)>>,
+    /// Whether checkpoints persist screen history (default true).
+    save_history: AtomicBool,
+    /// Peers holding a GUI event subscription.
+    gui_peers: Mutex<std::collections::HashSet<u64>>,
+}
+
+/// Largest daemon epoch that survives a JSON round-trip through the Svelte
+/// frontend, which parses numbers as f64 (exact only below 2^53). The
+/// frontend echoes the attach-time epoch back on every guarded call, so any
+/// epoch at or above 2^53 would corrupt in transit and fail every freshness
+/// check as stale. 53 bits remain unique per daemon lifetime in practice.
+const MAX_JS_SAFE_EPOCH: u64 = (1_u64 << 53) - 1;
+
+fn new_epoch() -> u64 {
+    let mut bytes = [0_u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+        return (nanos & MAX_JS_SAFE_EPOCH).max(1);
+    }
+    (u64::from_ne_bytes(bytes) & MAX_JS_SAFE_EPOCH).max(1)
 }
 
 impl DaemonCore {
-    pub fn new(rules_dir: Option<PathBuf>, state_dir: PathBuf) -> Arc<Self> {
+    pub fn new(rules_dir: Option<PathBuf>, state_dir: PathBuf, data_dir: PathBuf) -> Arc<Self> {
+        let epoch = new_epoch();
         let peers = Arc::new(Mutex::new(HashMap::new()));
         let manager = Arc::new(PtyManager::new_headless(Arc::new(DaemonSink {
             peers: peers.clone(),
+            epoch,
         })));
+        manager.set_runtime(
+            epoch,
+            state_dir.to_string_lossy().into_owned(),
+            crate::launch::cli_binary().to_string_lossy().into_owned(),
+        );
         let status_peers = peers.clone();
         let statuses = AgentStatusService::start(&manager, rules_dir, move |update| {
             broadcast(
@@ -810,7 +923,7 @@ impl DaemonCore {
                 .to_string(),
             );
         });
-        Arc::new(Self {
+        let core = Arc::new(Self {
             manager,
             statuses,
             peers,
@@ -818,30 +931,166 @@ impl DaemonCore {
             connections: AtomicUsize::new(0),
             spawn_guard: Mutex::new(()),
             state_dir,
-        })
+            data_dir,
+            epoch,
+            agent_refs: Mutex::new(HashMap::new()),
+            last_cwd: Mutex::new(HashMap::new()),
+            flush_marks: Mutex::new(HashMap::new()),
+            checkpointed_exits: Mutex::new(std::collections::HashSet::new()),
+            used_resumes: Mutex::new(std::collections::HashSet::new()),
+            save_history: AtomicBool::new(true),
+            gui_peers: Mutex::new(std::collections::HashSet::new()),
+        });
+        let flusher = core.clone();
+        if thread::Builder::new()
+            .name("ubra-checkpoint".to_string())
+            .spawn(move || checkpoint_loop(&flusher))
+            .is_err()
+        {
+            eprintln!("ubra-daemon: checkpoint thread failed to start");
+        }
+        core
+    }
+
+    pub fn set_gui_peer(&self, peer: u64, present: bool) {
+        {
+            let mut gui = self.gui_peers.lock();
+            if present {
+                gui.insert(peer);
+            } else {
+                gui.remove(&peer);
+            }
+            self.manager.set_gui_present(!gui.is_empty());
+        }
+    }
+}
+
+/// Minimum interval between history flushes for one pane.
+const HISTORY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+fn checkpoint_loop(core: &DaemonCore) {
+    loop {
+        thread::sleep(Duration::from_millis(500));
+        checkpoint_tick(core);
+    }
+}
+
+fn checkpoint_tick(core: &DaemonCore) {
+    let now = Instant::now();
+    for (id, live) in core.manager.checkpoint_candidates() {
+        let Some(key) = core.manager.key_for(id) else {
+            continue;
+        };
+        if !live {
+            if core.checkpointed_exits.lock().contains(&id) {
+                continue;
+            }
+            checkpoint_session(core, id, &key, false);
+            core.checkpointed_exits.lock().insert(id);
+            continue;
+        }
+        let sequence = core.manager.sequence_of(id).unwrap_or(0);
+        let due = match core.flush_marks.lock().get(&key) {
+            Some((at, seq)) => {
+                *seq != sequence && now.duration_since(*at) >= HISTORY_FLUSH_INTERVAL
+            }
+            None => true,
+        };
+        if due {
+            checkpoint_session(core, id, &key, true);
+            core.flush_marks.lock().insert(key, (now, sequence));
+        }
+    }
+}
+
+/// Persist one pane's checkpoint. Unkeyed (pure CLI) sessions have no
+/// stable identity and are skipped.
+fn checkpoint_session(core: &DaemonCore, id: PaneId, key: &str, live: bool) {
+    let mut record = crate::recovery::RecoveryRecord::new(key.to_string(), 80, 24);
+    if let Some(launch) = core.manager.launch_of(id) {
+        record.shell = launch.shell;
+        record.cwd = launch.cwd;
+        record.args = launch.args;
+    }
+    if let Some((cols, rows)) = core.manager.size_of(id) {
+        record.cols = cols;
+        record.rows = rows;
+    }
+    record.last_cwd = core
+        .last_cwd
+        .lock()
+        .get(key)
+        .cloned()
+        .or_else(|| crate::recovery::load(&core.data_dir, key).and_then(|disk| disk.last_cwd));
+    if live {
+        record.exit = None;
+        if core.save_history.load(Ordering::Acquire) {
+            record.history = core.manager.history(id).unwrap_or_default();
+        }
+    } else if let Some((success, code)) = core.manager.exit_status_of(id) {
+        record.exit = Some(crate::recovery::ExitState { success, code });
+        if core.save_history.load(Ordering::Acquire) {
+            record.history = core.manager.history(id).unwrap_or_default();
+        }
+    }
+    record.agent = core
+        .agent_refs
+        .lock()
+        .get(key)
+        .cloned()
+        .or_else(|| crate::recovery::load(&core.data_dir, key).and_then(|disk| disk.agent));
+    if let Err(error) = crate::recovery::save(&core.data_dir, &record) {
+        eprintln!("ubra-daemon: checkpoint of pane {key} failed: {error}");
+    }
+}
+
+/// Checkpoint every known keyed session (orderly shutdown, explicit flush).
+fn checkpoint_all(core: &DaemonCore) -> usize {
+    let mut count = 0;
+    for (id, live) in core.manager.checkpoint_candidates() {
+        if let Some(key) = core.manager.key_for(id) {
+            checkpoint_session(core, id, &key, live);
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Drop runtime + persisted recovery state for one pane key.
+fn forget_recovery(core: &DaemonCore, key: &str) {
+    core.agent_refs.lock().remove(key);
+    core.last_cwd.lock().remove(key);
+    core.flush_marks.lock().remove(key);
+    if let Err(error) = crate::recovery::remove(&core.data_dir, key) {
+        eprintln!("ubra-daemon: removing recovery for pane {key} failed: {error}");
     }
 }
 
 struct DaemonSink {
     peers: Peers,
+    epoch: u64,
 }
 
 impl PtyEventSink for DaemonSink {
-    fn output(&self, id: PaneId, data: String, sequence: u64) {
+    fn output(&self, event: PtyOutputEvent) {
         broadcast(
             &self.peers,
             serde_json::json!({
-                "event":"pty_output","pane":id,"data":data,"sequence":sequence
+                "event":"pty_output","pane":event.id,"key":event.key,
+                "incarnation":event.incarnation,"epoch":self.epoch,
+                "data":event.data,"sequence":event.sequence
             })
             .to_string(),
         );
     }
 
-    fn exited(&self, id: PaneId, success: bool, code: Option<i32>) {
+    fn exited(&self, event: PtyExitEvent) {
         broadcast(
             &self.peers,
             serde_json::json!({
-                "event":"pty_exit","pane":id,"success":success,"code":code
+                "event":"pty_exit","pane":event.id,"key":event.key,
+                "incarnation":event.incarnation,"epoch":self.epoch,
+                "success":event.success,"code":event.code
             })
             .to_string(),
         );
@@ -915,7 +1164,401 @@ fn wait_timeout(req: &Request) -> Duration {
 
 #[cfg(test)]
 fn dispatch(core: &DaemonCore, req: &Request) -> Action {
-    dispatch_connected(core, req, None)
+    dispatch_connected(core, req, None, 0)
+}
+
+/// Bounded replay head inlined in attach responses; the rest streams via
+/// `pty_replay_page`. Must fit [`MAX_FRAME_BYTES`] with JSON overhead.
+const REPLAY_INLINE_BYTES: usize = 128 * 1024;
+
+fn replay_head(history: &str) -> (String, usize, bool) {
+    let mut head = history.to_string();
+    crate::recovery::truncate_tail(&mut head, REPLAY_INLINE_BYTES);
+    let pages = crate::pty_manager::page_count(history);
+    (head, pages, history.len() > REPLAY_INLINE_BYTES)
+}
+
+fn replay_value(history: &str) -> serde_json::Value {
+    let (replay, pages, truncated) = replay_head(history);
+    serde_json::json!({
+        "replay": replay, "replayPages": pages, "replayTruncated": truncated,
+    })
+}
+
+fn merge_object(mut base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    base
+}
+
+enum ResumeAttempt {
+    Resumed(PaneId, u64),
+    Duplicate,
+    Unavailable(String),
+    NoTemplate,
+}
+
+/// Attempt an exact-conversation resume spawn for a recovery record.
+#[allow(clippy::too_many_arguments)]
+fn resume_spawn(
+    core: &DaemonCore,
+    key: &str,
+    record: &crate::recovery::RecoveryRecord,
+    agent: &crate::recovery::AgentReference,
+    cwd_override: Option<String>,
+    cols: u16,
+    rows: u16,
+    frontend: bool,
+) -> ResumeAttempt {
+    let adapter = match crate::agent_adapters::ADAPTERS
+        .iter()
+        .find(|a| a.family == agent.family)
+        .or_else(|| crate::agent_adapters::find_by_executable(&agent.family))
+    {
+        Some(adapter) => adapter,
+        None => return ResumeAttempt::NoTemplate,
+    };
+    let exe = agent
+        .exe
+        .clone()
+        .unwrap_or_else(|| adapter.family.to_string());
+    if exe.is_empty() || exe.contains('\0') {
+        return ResumeAttempt::NoTemplate;
+    }
+    let argv = match crate::agent_adapters::resume_argv(
+        adapter,
+        &exe,
+        &agent.reference,
+        Some(&agent.resume_argv),
+    ) {
+        Some(argv) if !argv.is_empty() => argv,
+        _ => return ResumeAttempt::NoTemplate,
+    };
+    let cwd = cwd_override
+        .or_else(|| record.last_cwd.clone())
+        .or_else(|| record.cwd.clone());
+    let triple = (
+        agent.family.clone(),
+        agent.reference.clone(),
+        cwd.clone().unwrap_or_default(),
+    );
+    if core.used_resumes.lock().contains(&triple) {
+        return ResumeAttempt::Duplicate;
+    }
+    match core.manager.spawn_keyed(
+        key.to_string(),
+        Some(argv[0].clone()),
+        cwd.clone(),
+        argv[1..].to_vec(),
+        cols,
+        rows,
+    ) {
+        Ok(id) => {
+            core.used_resumes.lock().insert(triple);
+            core.agent_refs
+                .lock()
+                .insert(key.to_string(), agent.clone());
+            if let Some(dir) = cwd {
+                core.last_cwd.lock().insert(key.to_string(), dir);
+            }
+            if frontend {
+                core.manager.set_gui_marked(id, true);
+            }
+            checkpoint_session(core, id, key, true);
+            ResumeAttempt::Resumed(id, core.manager.incarnation_of(id).unwrap_or(0))
+        }
+        Err(error) => ResumeAttempt::Unavailable(format!("Agent resume failed: {error}")),
+    }
+}
+
+/// Shell fallback for recovery: a fresh default shell in the saved
+/// directory. Arbitrary programs are never rerun after a restart.
+#[allow(clippy::too_many_arguments)]
+fn shell_fallback(
+    core: &DaemonCore,
+    key: &str,
+    record: &crate::recovery::RecoveryRecord,
+    cwd_override: Option<String>,
+    cols: u16,
+    rows: u16,
+    frontend: bool,
+    note: Option<&str>,
+) -> serde_json::Value {
+    let cwd = cwd_override
+        .or_else(|| record.last_cwd.clone())
+        .or_else(|| record.cwd.clone());
+    match core
+        .manager
+        .spawn_keyed(key.to_string(), None, cwd, Vec::new(), cols, rows)
+    {
+        Ok(id) => {
+            if frontend {
+                core.manager.set_gui_marked(id, true);
+            }
+            checkpoint_session(core, id, key, true);
+            let mut value = serde_json::json!({
+                "ok": true, "pane": id, "attached": "recovered", "resumed": false,
+                "epoch": core.epoch,
+                "incarnation": core.manager.incarnation_of(id).unwrap_or(0),
+                "key": key,
+            });
+            if let Some(note) = note {
+                value["note"] = note.into();
+            }
+            value
+        }
+        Err(error) => {
+            let value = serde_json::json!({
+                "ok": false, "error": error.to_string(),
+                "attached": "unavailable", "key": key, "epoch": core.epoch,
+            });
+            merge_object(value, replay_value(&record.history))
+        }
+    }
+}
+
+/// Attach-or-create by stable pane key: reuse the live session, report a
+/// retained exit, recover from a checkpoint, or spawn fresh.
+#[allow(clippy::too_many_arguments)]
+fn attach_pane(
+    core: &DaemonCore,
+    key: &str,
+    shell: Option<String>,
+    cwd: Option<String>,
+    args: Vec<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    frontend: bool,
+    agent_recovery: bool,
+) -> serde_json::Value {
+    let _guard = core.spawn_guard.lock();
+    if let Some(id) = core.manager.pane_for_key(key) {
+        if core.manager.is_live(id) {
+            if frontend {
+                core.manager.set_gui_marked(id, true);
+            }
+            return serde_json::json!({
+                "ok": true, "pane": id, "attached": "reused", "resumed": false,
+                "epoch": core.epoch,
+                "incarnation": core.manager.incarnation_of(id).unwrap_or(0),
+                "key": key,
+            });
+        }
+        let (success, code) = core.manager.exit_status_of(id).unwrap_or((false, None));
+        let history = core.manager.history(id).unwrap_or_default();
+        let value = serde_json::json!({
+            "ok": true, "pane": id, "attached": "exited", "resumed": false,
+            "epoch": core.epoch,
+            "incarnation": core.manager.incarnation_of(id).unwrap_or(0),
+            "key": key, "exit": {"success": success, "code": code},
+        });
+        return merge_object(value, replay_value(&history));
+    }
+    if core.manager.pane_roots().len() >= MAX_PANES {
+        return serde_json::json!({"ok": false, "error": "pane limit reached"});
+    }
+    if let Some(record) = crate::recovery::load(&core.data_dir, key) {
+        if let Some(exit) = &record.exit {
+            // Exited in a previous lifetime: show the final screen, never
+            // silently rerun the command.
+            let value = serde_json::json!({
+                "ok": true, "pane": 0, "attached": "exited", "resumed": false,
+                "epoch": core.epoch, "incarnation": 0, "key": key,
+                "exit": {"success": exit.success, "code": exit.code},
+            });
+            return merge_object(value, replay_value(&record.history));
+        }
+        let cols = cols.unwrap_or(record.cols);
+        let rows = rows.unwrap_or(record.rows);
+        if agent_recovery {
+            if let Some(agent) = record.agent.clone() {
+                match resume_spawn(
+                    core,
+                    key,
+                    &record,
+                    &agent,
+                    cwd.clone(),
+                    cols,
+                    rows,
+                    frontend,
+                ) {
+                    ResumeAttempt::Resumed(id, incarnation) => {
+                        return serde_json::json!({
+                            "ok": true, "pane": id, "attached": "recovered",
+                            "resumed": true, "epoch": core.epoch,
+                            "incarnation": incarnation, "key": key,
+                        });
+                    }
+                    ResumeAttempt::Duplicate => {
+                        return shell_fallback(
+                            core,
+                            key,
+                            &record,
+                            cwd,
+                            cols,
+                            rows,
+                            frontend,
+                            Some("Conversation already resumed in another pane."),
+                        );
+                    }
+                    ResumeAttempt::Unavailable(note) => {
+                        return shell_fallback(
+                            core,
+                            key,
+                            &record,
+                            cwd,
+                            cols,
+                            rows,
+                            frontend,
+                            Some(&note),
+                        );
+                    }
+                    ResumeAttempt::NoTemplate => {}
+                }
+            }
+        }
+        let note = record
+            .agent
+            .as_ref()
+            .map(|_| "Conversation could not be resumed.");
+        return shell_fallback(core, key, &record, cwd, cols, rows, frontend, note);
+    }
+    match core.manager.spawn_keyed(
+        key.to_string(),
+        shell,
+        cwd,
+        args,
+        cols.unwrap_or(80),
+        rows.unwrap_or(24),
+    ) {
+        Ok(id) => {
+            if frontend {
+                core.manager.set_gui_marked(id, true);
+            }
+            checkpoint_session(core, id, key, true);
+            serde_json::json!({
+                "ok": true, "pane": id, "attached": "created", "resumed": false,
+                "epoch": core.epoch,
+                "incarnation": core.manager.incarnation_of(id).unwrap_or(0),
+                "key": key,
+            })
+        }
+        Err(error) => serde_json::json!({
+            "ok": false, "error": error.to_string(),
+            "attached": "unavailable", "key": key, "epoch": core.epoch,
+        }),
+    }
+}
+
+/// Handle an integration hook's exact session report. Stale incarnations
+/// are rejected; nested child-agent conversations never replace the pane's
+/// main recovery reference.
+fn agent_report(core: &DaemonCore, req: &Request) -> serde_json::Value {
+    let Some(key) = req.key.clone().filter(|k| !k.is_empty()) else {
+        return serde_json::json!({"ok": false, "error": "missing \"key\""});
+    };
+    let Some(pane) = core.manager.pane_for_key(&key) else {
+        return serde_json::json!({"ok": false, "error": "stale session: unknown pane"});
+    };
+    if !core.manager.is_live(pane) {
+        return serde_json::json!({"ok": false, "error": "stale session: pane is not running"});
+    }
+    let Some(want) = req.incarnation else {
+        return serde_json::json!({"ok": false, "error": "missing \"incarnation\""});
+    };
+    if core.manager.incarnation_of(pane) != Some(want) {
+        return serde_json::json!({"ok": false, "error": "stale session incarnation"});
+    }
+    if let Some(epoch) = req.epoch {
+        if epoch != core.epoch {
+            return serde_json::json!({"ok": false, "error": "stale daemon epoch"});
+        }
+    }
+    let adapter = match req.family.clone().filter(|f| !f.is_empty()) {
+        Some(family) => {
+            match crate::agent_adapters::ADAPTERS
+                .iter()
+                .find(|a| a.family == family)
+                .or_else(|| crate::agent_adapters::find_by_executable(&family))
+            {
+                Some(adapter) => adapter,
+                None => {
+                    return serde_json::json!({"ok": false, "error": "unknown agent family"});
+                }
+            }
+        }
+        None => return serde_json::json!({"ok": false, "error": "missing \"family\""}),
+    };
+    let reference = match req.reference.clone().filter(|r| !r.is_empty()) {
+        Some(reference) if reference.len() <= 4096 && !reference.contains('\0') => reference,
+        _ => return serde_json::json!({"ok": false, "error": "invalid \"reference\""}),
+    };
+    let resume_argv = match req.resume_argv.clone().unwrap_or_default() {
+        argv if argv.len() <= 128 && argv.iter().all(|a| a.len() <= 8192 && !a.contains('\0')) => {
+            argv
+        }
+        _ => return serde_json::json!({"ok": false, "error": "invalid \"resume_argv\""}),
+    };
+    if let Some(exe) = req.exe.clone() {
+        if exe.is_empty() || exe.len() > 512 || exe.contains('\0') {
+            return serde_json::json!({"ok": false, "error": "invalid \"exe\""});
+        }
+    }
+    if let Some(model) = req.model.clone() {
+        if model.len() > 256 || model.contains('\0') {
+            return serde_json::json!({"ok": false, "error": "invalid \"model\""});
+        }
+    }
+    if let Some(pid) = req.pid {
+        let root = core.manager.root_pid_of(pane).unwrap_or(0);
+        if crate::agent_adapters::classify_report_live(pid, root)
+            == crate::agent_adapters::ReportRole::Child
+        {
+            return serde_json::json!({"ok": true, "role": "child"});
+        }
+    }
+    if let Some(cwd) = req.cwd.clone() {
+        if std::fs::metadata(&cwd).is_ok_and(|meta| meta.is_dir()) {
+            core.last_cwd.lock().insert(key.clone(), cwd);
+        }
+    }
+    core.agent_refs.lock().insert(
+        key.clone(),
+        crate::recovery::AgentReference {
+            family: adapter.family.to_string(),
+            reference,
+            resume_argv,
+            exe: req.exe.clone(),
+            model: req.model.clone(),
+        },
+    );
+    checkpoint_session(core, pane, &key, true);
+    serde_json::json!({"ok": true, "role": "main"})
+}
+
+/// Collect layout pane ids from a committed layout document.
+fn collect_layout_panes(value: &serde_json::Value, ids: &mut std::collections::HashSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("kind").and_then(serde_json::Value::as_str) == Some("pane") {
+                if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+            }
+            for child in map.values() {
+                collect_layout_panes(child, ids);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_layout_panes(child, ids);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn client_connected(socket: Option<&TcpStream>) -> bool {
@@ -938,7 +1581,12 @@ fn client_connected(socket: Option<&TcpStream>) -> bool {
     }
 }
 
-fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStream>) -> Action {
+fn dispatch_connected(
+    core: &DaemonCore,
+    req: &Request,
+    socket: Option<&TcpStream>,
+    peer: u64,
+) -> Action {
     let id = req.id;
     let respond = |value: serde_json::Value| Action::Respond(ok(id, value));
     match req.op.as_str() {
@@ -946,6 +1594,7 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             "ok": true,
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": PROTOCOL_VERSION,
+            "epoch": core.epoch,
         })),
         "pty_spawn" => {
             let _guard = core.spawn_guard.lock();
@@ -967,29 +1616,72 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             let (Some(pane), Some(data)) = (req.pane, req.data.clone()) else {
                 return Action::Respond(err(id, "missing \"pane\" or \"data\""));
             };
+            if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                return Action::Respond(err(id, e));
+            }
             match core.manager.write(pane, &data) {
                 Ok(()) => respond(serde_json::json!({"ok": true})),
                 Err(e) => Action::Respond(err(id, e)),
             }
         }
         "pty_resize" => match (req.pane, req.cols, req.rows) {
-            (Some(pane), Some(cols), Some(rows)) => match core.manager.resize(pane, cols, rows) {
-                Ok(()) => respond(serde_json::json!({"ok": true})),
-                Err(e) => Action::Respond(err(id, e)),
-            },
+            (Some(pane), Some(cols), Some(rows)) => {
+                if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                    return Action::Respond(err(id, e));
+                }
+                match core.manager.resize(pane, cols, rows) {
+                    Ok(()) => respond(serde_json::json!({"ok": true})),
+                    Err(e) => Action::Respond(err(id, e)),
+                }
+            }
             _ => Action::Respond(err(id, "missing \"pane\", \"cols\" or \"rows\"")),
         },
-        "pty_kill" => match need_pane(req)
-            .and_then(|pane| core.manager.kill(pane).map_err(|e| e.to_string()))
-        {
-            Ok(()) => respond(serde_json::json!({"ok": true})),
+        "pty_kill" => match need_pane(req) {
+            Ok(pane) => {
+                // Explicit closure also drops retained state + recovery data.
+                if !core.manager.is_live(pane) {
+                    if let Some(want) = req.incarnation {
+                        let current = core.manager.incarnation_of(pane);
+                        if current != Some(want) {
+                            return Action::Respond(err(
+                                id,
+                                format!("stale session incarnation for pane {pane}"),
+                            ));
+                        }
+                    }
+                    let key = core.manager.key_for(pane);
+                    core.manager.drop_retained(pane);
+                    if let Some(key) = key {
+                        forget_recovery(core, &key);
+                    }
+                    return respond(serde_json::json!({"ok": true}));
+                }
+                let key = core.manager.key_for(pane);
+                if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                    return Action::Respond(err(id, e));
+                }
+                match core.manager.kill(pane) {
+                    Ok(()) => {
+                        if let Some(key) = key {
+                            forget_recovery(core, &key);
+                        }
+                        respond(serde_json::json!({"ok": true}))
+                    }
+                    Err(e) => Action::Respond(err(id, e)),
+                }
+            }
             Err(e) => Action::Respond(err(id, e)),
         },
         "pty_read" => match need_pane(req) {
-            Ok(pane) => match core.manager.screen_text(pane) {
-                Some(screen) => respond(serde_json::json!({"ok": true, "screen": screen})),
-                None => Action::Respond(err(id, format!("no such pane: {pane}"))),
-            },
+            Ok(pane) => {
+                if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                    return Action::Respond(err(id, e));
+                }
+                match core.manager.screen_text(pane) {
+                    Some(screen) => respond(serde_json::json!({"ok": true, "screen": screen})),
+                    None => Action::Respond(err(id, format!("no such pane: {pane}"))),
+                }
+            }
             Err(e) => Action::Respond(err(id, e)),
         },
         "panes" => respond(serde_json::json!({"ok": true, "panes": core.manager.pane_roots()})),
@@ -1011,6 +1703,7 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
                 "ok": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol": PROTOCOL_VERSION,
+                "epoch": core.epoch,
                 "panes": core.manager.pane_roots(),
                 "states": states,
                 "revision": snapshot.revision,
@@ -1020,6 +1713,9 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             let (Some(pane), Some(data)) = (req.pane, req.data.clone()) else {
                 return Action::Respond(err(id, "missing \"pane\" or \"data\""));
             };
+            if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                return Action::Respond(err(id, e));
+            }
             // Bracketed paste: the app treats this as one pasted input.
             let pasted = format!("\u{1b}[200~{data}\u{1b}[201~");
             match core.manager.write(pane, &pasted) {
@@ -1038,6 +1734,9 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
                     Err(e) => return Action::Respond(err(id, e)),
                 }
             }
+            if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                return Action::Respond(err(id, e));
+            }
             match core.manager.write(pane, &bytes) {
                 Ok(()) => respond(serde_json::json!({"ok": true})),
                 Err(e) => Action::Respond(err(id, e)),
@@ -1047,6 +1746,9 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             let (Some(pane), Some(data)) = (req.pane, req.data.clone()) else {
                 return Action::Respond(err(id, "missing \"pane\" or \"data\""));
             };
+            if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                return Action::Respond(err(id, e));
+            }
             let submitted = format!("\u{1b}[200~{data}\u{1b}[201~\r");
             match core.manager.write(pane, &submitted) {
                 Ok(()) => respond(serde_json::json!({"ok": true})),
@@ -1115,6 +1817,262 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
                 }
                 thread::sleep(Duration::from_millis(200));
             }
+        }
+        "pty_attach" => {
+            let Some(key) = req.key.clone().filter(|k| !k.is_empty()) else {
+                return Action::Respond(err(id, "missing \"key\""));
+            };
+            respond(attach_pane(
+                core,
+                &key,
+                req.shell.clone(),
+                req.cwd.clone(),
+                req.args.clone().unwrap_or_default(),
+                req.cols,
+                req.rows,
+                req.frontend.unwrap_or(false),
+                req.agent_recovery.unwrap_or(true),
+            ))
+        }
+        "recover" => {
+            let Some(specs) = req.panes.clone() else {
+                return Action::Respond(err(id, "missing \"panes\""));
+            };
+            let frontend = req.frontend.unwrap_or(false);
+            let agent_recovery = req.agent_recovery.unwrap_or(true);
+            let mut results = Vec::with_capacity(specs.len());
+            for spec in &specs {
+                match spec.key.clone().filter(|k| !k.is_empty()) {
+                    Some(key) => results.push(attach_pane(
+                        core,
+                        &key,
+                        spec.shell.clone(),
+                        spec.cwd.clone(),
+                        spec.args.clone().unwrap_or_default(),
+                        spec.cols,
+                        spec.rows,
+                        frontend,
+                        agent_recovery,
+                    )),
+                    None => {
+                        results.push(serde_json::json!({"ok": false, "error": "missing \"key\""}))
+                    }
+                }
+            }
+            respond(serde_json::json!({
+                "ok": true, "epoch": core.epoch, "results": results,
+            }))
+        }
+        "pty_snapshot" => match need_pane(req) {
+            Ok(pane) => {
+                if let Err(e) = core
+                    .manager
+                    .check_fresh_any(pane, req.epoch, req.incarnation)
+                {
+                    return Action::Respond(err(id, e));
+                }
+                match core.manager.snapshot_paged(pane) {
+                    Ok(head) => respond(serde_json::json!({
+                        "ok": true, "pane": head.id, "page": head.page,
+                        "pages": head.pages, "data": head.data,
+                        "sequence": head.sequence,
+                        "incarnation": head.incarnation, "epoch": core.epoch,
+                        "cols": head.cols, "rows": head.rows,
+                    })),
+                    Err(e) => Action::Respond(err(id, e)),
+                }
+            }
+            Err(e) => Action::Respond(err(id, e)),
+        },
+        "pty_snapshot_page" => match (need_pane(req), req.page) {
+            (Ok(pane), Some(page)) => {
+                if let Err(e) = core
+                    .manager
+                    .check_fresh_any(pane, req.epoch, req.incarnation)
+                {
+                    return Action::Respond(err(id, e));
+                }
+                match core.manager.snapshot_page(pane, page) {
+                    Ok(head) => respond(serde_json::json!({
+                        "ok": true, "pane": head.id, "page": head.page,
+                        "pages": head.pages, "data": head.data,
+                        "sequence": head.sequence,
+                        "incarnation": head.incarnation, "epoch": core.epoch,
+                    })),
+                    Err(e) => Action::Respond(err(id, e)),
+                }
+            }
+            _ => Action::Respond(err(id, "missing \"pane\" or \"page\"")),
+        },
+        "pty_replay_page" => match (req.key.clone(), req.page) {
+            (Some(key), Some(page)) => match crate::recovery::load(&core.data_dir, &key) {
+                Some(record) => {
+                    let pages = crate::pty_manager::page_count(&record.history);
+                    if page >= pages {
+                        return Action::Respond(err(
+                            id,
+                            format!("replay page {page} out of range ({pages})"),
+                        ));
+                    }
+                    respond(serde_json::json!({
+                        "ok": true, "key": key, "page": page, "pages": pages,
+                        "data": crate::pty_manager::page_slice(&record.history, page),
+                        "epoch": core.epoch,
+                    }))
+                }
+                None => Action::Respond(err(id, format!("no recovery record for {key}"))),
+            },
+            _ => Action::Respond(err(id, "missing \"key\" or \"page\"")),
+        },
+        "pty_close" => {
+            let resolved = match (req.pane, req.key.clone()) {
+                (Some(pane), _) => Some((pane, core.manager.key_for(pane))),
+                (None, Some(key)) => {
+                    Some((core.manager.pane_for_key(&key).unwrap_or(0), Some(key)))
+                }
+                (None, None) => None,
+            };
+            let Some((pane, key)) = resolved else {
+                return Action::Respond(err(id, "missing \"pane\" or \"key\""));
+            };
+            let mut closed = false;
+            if pane != 0 && core.manager.is_live(pane) {
+                if let Err(e) = core.manager.check_fresh(pane, req.epoch, req.incarnation) {
+                    return Action::Respond(err(id, e));
+                }
+                if let Err(e) = core.manager.kill(pane) {
+                    return Action::Respond(err(id, e));
+                }
+                closed = true;
+            } else if pane != 0 {
+                core.manager.drop_retained(pane);
+            }
+            if let Some(key) = key {
+                forget_recovery(core, &key);
+            }
+            respond(serde_json::json!({"ok": true, "closed": closed}))
+        }
+        "pty_restart" => {
+            let Some(key) = req.key.clone().filter(|k| !k.is_empty()) else {
+                return Action::Respond(err(id, "missing \"key\""));
+            };
+            let _guard = core.spawn_guard.lock();
+            let previous = core.manager.pane_for_key(&key).and_then(|pane| {
+                core.manager
+                    .launch_of(pane)
+                    .map(|launch| (launch, core.manager.size_of(pane)))
+            });
+            let _ = core.manager.kill_by_key(&key);
+            forget_recovery(core, &key);
+            if core.manager.pane_roots().len() >= MAX_PANES {
+                return Action::Respond(err(id, "pane limit reached"));
+            }
+            let (shell, cwd, args, cols, rows) = match previous {
+                Some((launch, size)) => (
+                    req.shell.clone().or(launch.shell),
+                    req.cwd.clone().or(launch.cwd),
+                    req.args.clone().unwrap_or(launch.args),
+                    req.cols.or_else(|| size.map(|(c, _)| c)).unwrap_or(80),
+                    req.rows.or_else(|| size.map(|(_, r)| r)).unwrap_or(24),
+                ),
+                None => (
+                    req.shell.clone(),
+                    req.cwd.clone(),
+                    req.args.clone().unwrap_or_default(),
+                    req.cols.unwrap_or(80),
+                    req.rows.unwrap_or(24),
+                ),
+            };
+            // Explicit restarts run the requested command, never an agent resume.
+            match core
+                .manager
+                .spawn_keyed(key.clone(), shell, cwd, args, cols, rows)
+            {
+                Ok(pane) => {
+                    if req.frontend.unwrap_or(false) {
+                        core.manager.set_gui_marked(pane, true);
+                    }
+                    checkpoint_session(core, pane, &key, true);
+                    respond(serde_json::json!({
+                        "ok": true, "pane": pane, "attached": "created",
+                        "resumed": false, "epoch": core.epoch,
+                        "incarnation": core.manager.incarnation_of(pane).unwrap_or(0),
+                        "key": key,
+                    }))
+                }
+                Err(e) => Action::Respond(err(id, e)),
+            }
+        }
+        "agent_report" => respond(agent_report(core, req)),
+        "layout_commit" => {
+            let Some(layout) = req.layout.clone() else {
+                return Action::Respond(err(id, "missing \"layout\""));
+            };
+            if layout
+                .get("workspaces")
+                .and_then(|w| w.as_array())
+                .is_none()
+            {
+                return Action::Respond(err(id, "invalid layout document"));
+            }
+            let mut ids = std::collections::HashSet::new();
+            collect_layout_panes(&layout, &mut ids);
+            let mut closed = Vec::new();
+            for key in core.manager.all_keys() {
+                if !ids.contains(&key) {
+                    match core.manager.kill_by_key(&key) {
+                        Ok(_) => {
+                            forget_recovery(core, &key);
+                            closed.push(key);
+                        }
+                        Err(e) => {
+                            return Action::Respond(err(
+                                id,
+                                format!("closing removed pane failed: {e}"),
+                            ));
+                        }
+                    }
+                }
+            }
+            respond(serde_json::json!({"ok": true, "closed": closed}))
+        }
+        "stop_all" => match core.manager.stop_all() {
+            Ok(stopped) => {
+                core.agent_refs.lock().clear();
+                core.last_cwd.lock().clear();
+                core.flush_marks.lock().clear();
+                core.checkpointed_exits.lock().clear();
+                core.used_resumes.lock().clear();
+                crate::recovery::remove_all(&core.data_dir);
+                respond(serde_json::json!({"ok": true, "stopped": stopped}))
+            }
+            Err(e) => Action::Respond(err(id, e)),
+        },
+        "flush" => respond(serde_json::json!({
+            "ok": true, "panes": checkpoint_all(core),
+        })),
+        "set_options" => {
+            if let Some(save) = req.save_history {
+                core.save_history.store(save, Ordering::Release);
+                if !save {
+                    // Disabling history saving removes persisted screen history.
+                    let (records, _) = crate::recovery::load_all(&core.data_dir);
+                    for mut record in records {
+                        record.history.clear();
+                        if let Err(e) = crate::recovery::save(&core.data_dir, &record) {
+                            eprintln!("ubra-daemon: purging history failed: {e}");
+                        }
+                    }
+                }
+            }
+            respond(serde_json::json!({
+                "ok": true,
+                "saveHistory": core.save_history.load(Ordering::Acquire),
+            }))
+        }
+        "gui_subscribe" => {
+            core.set_gui_peer(peer, true);
+            respond(serde_json::json!({"ok": true, "epoch": core.epoch}))
         }
         "shutdown" => Action::Shutdown(ok(id, serde_json::json!({"ok":true,"shutdown":true}))),
         op => Action::Respond(err(id, format!("unknown op: {op}"))),
@@ -1291,7 +2249,7 @@ fn handle_conn(core: Arc<DaemonCore>, stream: TcpStream, id: u64, auth_token: Ar
                 continue;
             }
         };
-        match dispatch_connected(&core, &req, Some(&socket)) {
+        match dispatch_connected(&core, &req, Some(&socket), id) {
             Action::Respond(message) => {
                 if !peer.send(message.into(), None) {
                     break;
@@ -1306,6 +2264,7 @@ fn handle_conn(core: Arc<DaemonCore>, stream: TcpStream, id: u64, auth_token: Ar
             }
         }
     }
+    core.set_gui_peer(id, false);
     core.peers.lock().remove(&id);
     let _ = socket.shutdown(std::net::Shutdown::Both);
     drop(peer);
@@ -1313,6 +2272,7 @@ fn handle_conn(core: Arc<DaemonCore>, stream: TcpStream, id: u64, auth_token: Ar
 }
 
 fn shutdown_now(core: &DaemonCore) -> ! {
+    checkpoint_all(core);
     if let Err(error) = core.manager.shutdown() {
         eprintln!("ubra-daemon: pane cleanup failed: {error}");
         remove_runtime_files(&core.state_dir);
@@ -1383,7 +2343,7 @@ mod tests {
     }
 
     fn core() -> Arc<DaemonCore> {
-        DaemonCore::new(None, scratch_dir())
+        DaemonCore::new(None, scratch_dir(), scratch_dir())
     }
 
     fn req(op: &str) -> Request {
@@ -1658,5 +2618,192 @@ mod tests {
             serde_json::from_str("{\"op\":\"wait_output\",\"contains\":\"x\"}").unwrap();
         out.pane = Some(424242);
         assert_eq!(responded(dispatch(&core, &out))["ok"], false);
+    }
+
+    fn attach_req(key: &str) -> Request {
+        serde_json::from_str(&format!(
+            "{{\"op\":\"pty_attach\",\"key\":\"{key}\",\"frontend\":true}}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn epoch_survives_frontend_number_round_trip() {
+        for _ in 0..64 {
+            let epoch = new_epoch();
+            assert!((1..=MAX_JS_SAFE_EPOCH).contains(&epoch));
+            assert_eq!((epoch as f64) as u64, epoch);
+        }
+    }
+
+    #[test]
+    fn attach_creates_reuses_and_rejects_stale() {
+        let core = core();
+        let created = responded(dispatch(&core, &attach_req("pane-a1")));
+        assert_eq!(created["attached"], "created");
+        let pane = created["pane"].as_u64().unwrap() as PaneId;
+        let incarnation = created["incarnation"].as_u64().unwrap();
+        assert_eq!(created["epoch"], core.epoch);
+
+        let reused = responded(dispatch(&core, &attach_req("pane-a1")));
+        assert_eq!(reused["attached"], "reused");
+        assert_eq!(reused["pane"].as_u64().unwrap() as PaneId, pane);
+
+        let mut write: Request =
+            serde_json::from_str("{\"op\":\"pty_write\",\"data\":\"x\"}").unwrap();
+        write.pane = Some(pane);
+        write.epoch = Some(core.epoch + 1);
+        write.incarnation = Some(incarnation);
+        let stale = responded(dispatch(&core, &write));
+        assert_eq!(stale["ok"], false);
+        assert!(stale["error"].as_str().unwrap().contains("stale"));
+
+        write.epoch = Some(core.epoch);
+        write.incarnation = Some(incarnation + 1000);
+        let stale = responded(dispatch(&core, &write));
+        assert_eq!(stale["ok"], false);
+        assert!(stale["error"].as_str().unwrap().contains("stale"));
+
+        write.incarnation = Some(incarnation);
+        assert_eq!(responded(dispatch(&core, &write))["ok"], true);
+    }
+
+    #[test]
+    fn attach_unavailable_never_moves_panes() {
+        let core = core();
+        let mut req = attach_req("pane-a2");
+        req.cwd = Some("/definitely/not/a/ubra/dir".to_string());
+        let v = responded(dispatch(&core, &req));
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["attached"], "unavailable");
+        assert!(v["error"].as_str().unwrap().contains("unavailable"));
+        assert!(core.manager.pane_for_key("pane-a2").is_none());
+    }
+
+    #[test]
+    fn natural_exit_retains_screen_and_never_reruns() {
+        let core = core();
+        let created = responded(dispatch(&core, &attach_req("pane-a3")));
+        let pane = created["pane"].as_u64().unwrap() as PaneId;
+        let mut write: Request =
+            serde_json::from_str("{\"op\":\"pty_write\",\"data\":\"echo done-a3\\nexit\\n\"}")
+                .unwrap();
+        write.pane = Some(pane);
+        assert_eq!(responded(dispatch(&core, &write))["ok"], true);
+        // Wait for the retained exit.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if !core.manager.is_live(pane) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "pane never exited");
+            thread::sleep(Duration::from_millis(50));
+        }
+        let again = responded(dispatch(&core, &attach_req("pane-a3")));
+        assert_eq!(again["attached"], "exited");
+        assert!(again["replay"].as_str().unwrap().contains("done-a3"));
+        // Snapshot serves the retained final screen.
+        let mut snap = req("pty_snapshot");
+        snap.pane = Some(pane);
+        assert_eq!(responded(dispatch(&core, &snap))["ok"], true);
+    }
+
+    #[test]
+    fn explicit_resume_argv_recovers_and_dedups() {
+        let core = core();
+        // Seed a recovery record as if a hook reported an exact session.
+        let mut record = crate::recovery::RecoveryRecord::new("pane-a4".to_string(), 80, 24);
+        record.agent = Some(crate::recovery::AgentReference {
+            family: "claude".to_string(),
+            reference: "sess-dedup".to_string(),
+            resume_argv: vec!["echo".to_string(), "resumed-a4".to_string()],
+            exe: Some("echo".to_string()),
+            model: None,
+        });
+        crate::recovery::save(&core.data_dir, &record).unwrap();
+        let mut twin = record.clone();
+        twin.key = "pane-a5".to_string();
+        crate::recovery::save(&core.data_dir, &twin).unwrap();
+
+        let first = responded(dispatch(&core, &attach_req("pane-a4")));
+        assert_eq!(first["attached"], "recovered");
+        assert_eq!(first["resumed"], true);
+        let second = responded(dispatch(&core, &attach_req("pane-a5")));
+        assert_eq!(second["attached"], "recovered");
+        assert_eq!(second["resumed"], false);
+        assert!(second["note"].as_str().unwrap().contains("already resumed"));
+    }
+
+    #[test]
+    fn agent_report_stores_main_and_rejects_stale() {
+        let core = core();
+        let created = responded(dispatch(&core, &attach_req("pane-a6")));
+        let incarnation = created["incarnation"].as_u64().unwrap();
+        let mut report: Request = serde_json::from_str(
+            "{\"op\":\"agent_report\",\"key\":\"pane-a6\",\"family\":\"claude\",\"reference\":\"s1\"}",
+        )
+        .unwrap();
+        // Missing incarnation.
+        assert_eq!(responded(dispatch(&core, &report))["ok"], false);
+        report.incarnation = Some(incarnation + 7);
+        let stale = responded(dispatch(&core, &report));
+        assert_eq!(stale["ok"], false);
+        assert!(stale["error"].as_str().unwrap().contains("stale"));
+        report.incarnation = Some(incarnation);
+        let main = responded(dispatch(&core, &report));
+        assert_eq!(main["ok"], true);
+        assert_eq!(main["role"], "main");
+        let stored = crate::recovery::load(&core.data_dir, "pane-a6").unwrap();
+        assert_eq!(stored.agent.unwrap().reference, "s1");
+    }
+
+    #[test]
+    fn layout_commit_closes_removed_keys_everywhere() {
+        let core = core();
+        assert_eq!(
+            responded(dispatch(&core, &attach_req("pane-keep")))["attached"],
+            "created"
+        );
+        assert_eq!(
+            responded(dispatch(&core, &attach_req("pane-drop")))["attached"],
+            "created"
+        );
+        let mut commit = req("layout_commit");
+        commit.layout = Some(serde_json::json!({
+            "version": 2,
+            "workspaces": [{ "tabs": [{ "root": { "kind": "pane", "id": "pane-keep" } }] }],
+        }));
+        let v = responded(dispatch(&core, &commit));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["closed"], serde_json::json!(["pane-drop"]));
+        assert!(core.manager.pane_for_key("pane-drop").is_none());
+        assert!(core.manager.pane_for_key("pane-keep").is_some());
+        assert!(crate::recovery::load(&core.data_dir, "pane-drop").is_none());
+        // Garbage layouts never nuke sessions.
+        let mut bad = req("layout_commit");
+        bad.layout = Some(serde_json::json!({"version": 2}));
+        assert_eq!(responded(dispatch(&core, &bad))["ok"], false);
+        assert!(core.manager.pane_for_key("pane-keep").is_some());
+    }
+
+    #[test]
+    fn close_by_key_forgets_record_only_keys() {
+        let core = core();
+        let mut record = crate::recovery::RecoveryRecord::new("pane-ghost".to_string(), 80, 24);
+        record.exit = Some(crate::recovery::ExitState {
+            success: true,
+            code: Some(0),
+        });
+        crate::recovery::save(&core.data_dir, &record).unwrap();
+        let exited = responded(dispatch(&core, &attach_req("pane-ghost")));
+        assert_eq!(exited["attached"], "exited");
+        let close: Request =
+            serde_json::from_str("{\"op\":\"pty_close\",\"key\":\"pane-ghost\"}").unwrap();
+        let v = responded(dispatch(&core, &close));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["closed"], false);
+        assert!(crate::recovery::load(&core.data_dir, "pane-ghost").is_none());
+        let fresh = responded(dispatch(&core, &attach_req("pane-ghost")));
+        assert_eq!(fresh["attached"], "created");
     }
 }

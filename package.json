@@ -9,12 +9,17 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "build:desktop": "npm run licenses && npm run build && npm run bundle:bins",
+    "bundle:bins": "node scripts/stage-bins.mjs",
+    "dev:bins": "cargo build --manifest-path src-tauri/Cargo.toml --bins",
+    "tauri:build": "tauri build --config src-tauri/tauri.release.conf.json",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test:unit": "node --test \"tests/**/*.test.ts\"",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "licenses": "node scripts/collect-licenses.mjs"
   },
   "license": "MIT",
   "repository": {

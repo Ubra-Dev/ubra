@@ -170,11 +170,16 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
-  function onTerminalSpawn(id: number): void {
-    agent.register(id, node.id);
+  function onTerminalSpawn(live: { id: number; epoch: number; incarnation: number }): void {
+    agent.register(live.id, node.id);
     const command = store.takePendingTerminalCommand(node.id);
     if (!command) return;
-    invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
+    invoke("pty_write", {
+      id: live.id,
+      data: `${command}\r`,
+      epoch: live.epoch,
+      incarnation: live.incarnation,
+    }).catch((error) => {
       console.error("ubra: failed to start onboarding command", error);
       toasts.push(
         "Couldn't send the agent command",
@@ -314,9 +319,15 @@
       <button
         class="respawn"
         onclick={() => {
-          store.authorizePaneCommand(node.id);
-          exited = false;
-          runId += 1;
+          // Close retained state first so the remount spawns fresh instead
+          // of re-rendering the retained exit.
+          invoke("pty_close", { key: node.id })
+            .catch((error) => console.error(error))
+            .finally(() => {
+              store.authorizePaneCommand(node.id);
+              exited = false;
+              runId += 1;
+            });
         }}
       >
         <Icon name="refresh" size={12} />

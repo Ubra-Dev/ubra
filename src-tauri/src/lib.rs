@@ -1,22 +1,26 @@
+pub mod agent_adapters;
 pub mod agent_clis;
 pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
 pub mod daemon;
+pub mod daemon_link;
 pub mod files;
 pub mod git;
 pub mod git_branch;
+pub mod launch;
 pub mod layout_store;
 mod process_tree;
 pub mod pty_manager;
+pub mod recovery;
 pub mod screen_rules;
 pub mod sound;
 mod terminal_state;
 pub mod usage;
 
-use agent_status::{AgentStatusService, AgentUpdate};
+use daemon_link::DaemonLink;
 use layout_store::{data_dir, load_layout_from, save_layout_to};
-use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySnapshot};
+use pty_manager::PaneId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -26,60 +30,281 @@ use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 
-struct TauriSink(AppHandle);
+/// Attach-or-create result from the daemon. `ok: false` carries the
+/// `unavailable` outcome (saved data + retry) rather than a transport error.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AttachResult {
+    pub ok: bool,
+    pub pane: PaneId,
+    pub attached: String,
+    pub resumed: bool,
+    pub epoch: u64,
+    pub incarnation: u64,
+    pub note: Option<String>,
+    pub error: Option<String>,
+    pub exit: Option<ExitInfo>,
+    pub replay: Option<String>,
+    pub replay_pages: Option<usize>,
+    pub replay_truncated: Option<bool>,
+}
 
-impl PtyEventSink for TauriSink {
-    fn output(&self, id: PaneId, data: String, sequence: u64) {
-        let _ = self.0.emit("pty-output", PtyOutput { id, data, sequence });
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExitInfo {
+    pub success: bool,
+    pub code: Option<i32>,
+}
 
-    fn exited(&self, id: PaneId, success: bool, code: Option<i32>) {
-        let _ = self.0.emit("pty-exit", PtyExit { id, success, code });
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotResult {
+    pub pane: PaneId,
+    pub page: usize,
+    pub pages: usize,
+    pub data: String,
+    pub sequence: u64,
+    pub incarnation: u64,
+    pub epoch: u64,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayResult {
+    pub key: String,
+    pub page: usize,
+    pub pages: usize,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonStatusInfo {
+    pub connected: bool,
+    pub epoch: Option<u64>,
+}
+
+fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|e| format!("bad daemon reply: {e}"))
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn pty_spawn(
-    manager: State<'_, Arc<PtyManager>>,
+    link: State<'_, Arc<DaemonLink>>,
+    key: Option<String>,
     shell: Option<String>,
     cwd: Option<String>,
     args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
-) -> Result<PaneId, String> {
-    manager
-        .spawn(shell, cwd, args.unwrap_or_default(), cols, rows)
-        .map_err(|e| e.to_string())
+    agent_recovery: Option<bool>,
+) -> Result<AttachResult, String> {
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return Err("missing pane key".to_string());
+    };
+    let value = link.request_raw(
+        "pty_attach",
+        serde_json::json!({
+            "key": key, "shell": shell, "cwd": cwd,
+            "args": args.unwrap_or_default(),
+            "cols": cols, "rows": rows,
+            "frontend": true, "agent_recovery": agent_recovery,
+        }),
+    )?;
+    decode(value)
 }
 
 #[tauri::command]
-fn pty_write(manager: State<'_, Arc<PtyManager>>, id: PaneId, data: String) -> Result<(), String> {
-    manager.write(id, &data).map_err(|e| e.to_string())
+fn pty_write(
+    link: State<'_, Arc<DaemonLink>>,
+    id: PaneId,
+    data: String,
+    epoch: Option<u64>,
+    incarnation: Option<u64>,
+) -> Result<(), String> {
+    link.request(
+        "pty_write",
+        serde_json::json!({
+            "pane": id, "data": data, "epoch": epoch, "incarnation": incarnation,
+        }),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
 fn pty_resize(
-    manager: State<'_, Arc<PtyManager>>,
+    link: State<'_, Arc<DaemonLink>>,
     id: PaneId,
     cols: u16,
     rows: u16,
+    epoch: Option<u64>,
+    incarnation: Option<u64>,
 ) -> Result<(), String> {
-    manager.resize(id, cols, rows).map_err(|e| e.to_string())
+    link.request(
+        "pty_resize",
+        serde_json::json!({
+            "pane": id, "cols": cols, "rows": rows,
+            "epoch": epoch, "incarnation": incarnation,
+        }),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
-fn pty_kill(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<(), String> {
-    manager.kill(id).map_err(|e| e.to_string())
+fn pty_kill(
+    link: State<'_, Arc<DaemonLink>>,
+    id: PaneId,
+    epoch: Option<u64>,
+    incarnation: Option<u64>,
+) -> Result<(), String> {
+    link.request(
+        "pty_kill",
+        serde_json::json!({"pane": id, "epoch": epoch, "incarnation": incarnation}),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
-fn pty_snapshot(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<PtySnapshot, String> {
-    manager.snapshot(id).map_err(|e| e.to_string())
+fn pty_close(
+    link: State<'_, Arc<DaemonLink>>,
+    id: Option<PaneId>,
+    key: Option<String>,
+) -> Result<bool, String> {
+    let value = link.request("pty_close", serde_json::json!({"pane": id, "key": key}))?;
+    Ok(value["closed"].as_bool().unwrap_or(false))
 }
 
 #[tauri::command]
-fn agent_snapshot(service: State<'_, AgentStatusService>) -> AgentUpdate {
-    service.snapshot()
+fn pty_restart(
+    link: State<'_, Arc<DaemonLink>>,
+    key: String,
+    shell: Option<String>,
+    cwd: Option<String>,
+    args: Option<Vec<String>>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<AttachResult, String> {
+    let value = link.request_raw(
+        "pty_restart",
+        serde_json::json!({
+            "key": key, "shell": shell, "cwd": cwd,
+            "args": args, "cols": cols, "rows": rows, "frontend": true,
+        }),
+    )?;
+    decode(value)
+}
+
+#[tauri::command]
+fn pty_snapshot(
+    link: State<'_, Arc<DaemonLink>>,
+    id: PaneId,
+    epoch: Option<u64>,
+    incarnation: Option<u64>,
+) -> Result<SnapshotResult, String> {
+    let value = link.request(
+        "pty_snapshot",
+        serde_json::json!({"pane": id, "epoch": epoch, "incarnation": incarnation}),
+    )?;
+    decode(value)
+}
+
+#[tauri::command]
+fn pty_snapshot_page(
+    link: State<'_, Arc<DaemonLink>>,
+    id: PaneId,
+    page: usize,
+    epoch: Option<u64>,
+    incarnation: Option<u64>,
+) -> Result<SnapshotResult, String> {
+    let value = link.request(
+        "pty_snapshot_page",
+        serde_json::json!({
+            "pane": id, "page": page, "epoch": epoch, "incarnation": incarnation,
+        }),
+    )?;
+    decode(value)
+}
+
+#[tauri::command]
+fn pty_replay_page(
+    link: State<'_, Arc<DaemonLink>>,
+    key: String,
+    page: usize,
+) -> Result<ReplayResult, String> {
+    let value = link.request(
+        "pty_replay_page",
+        serde_json::json!({"key": key, "page": page}),
+    )?;
+    decode(value)
+}
+
+#[tauri::command]
+fn daemon_status(link: State<'_, Arc<DaemonLink>>) -> DaemonStatusInfo {
+    match link.request_existing("ping", serde_json::json!({})) {
+        Ok(value) => DaemonStatusInfo {
+            connected: true,
+            epoch: value["epoch"].as_u64().or_else(|| link.epoch()),
+        },
+        Err(_) => DaemonStatusInfo {
+            connected: false,
+            epoch: link.epoch(),
+        },
+    }
+}
+
+#[tauri::command]
+fn daemon_set_options(
+    link: State<'_, Arc<DaemonLink>>,
+    save_history: bool,
+) -> Result<bool, String> {
+    let value = link.request(
+        "set_options",
+        serde_json::json!({"save_history": save_history}),
+    )?;
+    Ok(value["saveHistory"].as_bool().unwrap_or(save_history))
+}
+
+#[tauri::command]
+fn agent_snapshot(link: State<'_, Arc<DaemonLink>>) -> Result<serde_json::Value, String> {
+    let mut value = link.request("agent_states", serde_json::json!({}))?;
+    value["transitions"] = serde_json::json!([]);
+    Ok(value)
+}
+
+fn cli_home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
+#[tauri::command]
+fn integrations_status() -> Vec<agent_adapters::IntegrationStatus> {
+    agent_adapters::integration_status(&cli_home_dir())
+}
+
+#[tauri::command]
+fn integrations_install(family: Option<String>) -> Result<bool, String> {
+    if let Some(family) = &family {
+        if family != "claude" {
+            return Err(format!("no verified hook mechanism for family: {family}"));
+        }
+    }
+    let cli = crate::launch::cli_binary().to_string_lossy().into_owned();
+    agent_adapters::install_claude_hooks(&cli_home_dir(), &cli).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn integrations_remove(family: Option<String>) -> Result<bool, String> {
+    if let Some(family) = &family {
+        if family != "claude" {
+            return Err(format!("no verified hook mechanism for family: {family}"));
+        }
+    }
+    agent_adapters::remove_claude_hooks(&cli_home_dir()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -109,7 +334,18 @@ fn load_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-fn save_layout(app: AppHandle, layout: serde_json::Value) -> Result<(), String> {
+fn save_layout(
+    app: AppHandle,
+    link: State<'_, Arc<DaemonLink>>,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    // Route layout commits through the daemon so removals close their
+    // runtime sessions and recovery records, including in hidden tabs.
+    // The local write stays authoritative; a failed forward only defers
+    // runtime cleanup to the next commit.
+    if let Err(error) = link.request("layout_commit", serde_json::json!({"layout": layout})) {
+        eprintln!("ubra: layout_commit failed ({error}); runtime cleanup deferred");
+    }
     let dir = data_dir(&app).map_err(|e| e.to_string())?;
     save_layout_to(&dir, &layout).map_err(|e| e.to_string())
 }
@@ -205,12 +441,43 @@ fn git_init(root: String) -> Result<String, String> {
     git::init(&root)
 }
 
-#[tauri::command]
-fn quit_app(app: AppHandle, manager: State<'_, Arc<PtyManager>>) -> Result<(), String> {
-    manager.shutdown().map_err(|e| e.to_string())?;
+fn begin_quit(app: &AppHandle) {
     app.state::<ShellState>()
         .quitting
         .store(true, Ordering::SeqCst);
+    app.state::<Arc<DaemonLink>>().stop();
+}
+
+/// Quit the desktop UI, leaving terminal processes running in the
+/// background daemon. The frontend flushes pending layout changes first.
+#[tauri::command]
+fn quit_app(app: AppHandle, link: State<'_, Arc<DaemonLink>>) -> Result<(), String> {
+    // Best-effort final checkpoint; never start a daemon just to quit.
+    let _ = link.request_existing("flush", serde_json::json!({}));
+    begin_quit(&app);
+    app.exit(0);
+    Ok(())
+}
+
+/// Confirmed destructive quit: terminate every terminal session, drop
+/// automatic recovery records, then quit. The saved layout is retained.
+#[tauri::command]
+fn stop_all_terminals_and_quit(
+    app: AppHandle,
+    link: State<'_, Arc<DaemonLink>>,
+) -> Result<(), String> {
+    match link.request_existing("stop_all", serde_json::json!({})) {
+        Ok(_) => {}
+        Err(error) => {
+            // No daemon means nothing to stop; anything else is reported.
+            if !error.contains("missing or unsafe daemon port file")
+                && !error.contains("Connection refused")
+            {
+                return Err(format!("could not stop terminals: {error}"));
+            }
+        }
+    }
+    begin_quit(&app);
     app.exit(0);
     Ok(())
 }
@@ -297,9 +564,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     }
     let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
+    let stop_quit = MenuItem::with_id(
+        app,
+        "stop-quit",
+        "Stop all terminals and quit",
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::new(app)?;
     menu.append(&show)?;
     menu.append(&quit)?;
+    menu.append(&stop_quit)?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
@@ -307,11 +582,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),
+            // The frontend flushes pending layout changes, then quits.
             "quit" => {
-                app.state::<ShellState>()
-                    .quitting
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
+                let _ = app.emit("request-quit", ());
+            }
+            // The frontend confirms, then stops terminals and quits.
+            "stop-quit" => {
+                show_main(app);
+                let _ = app.emit("request-stop-all-quit", ());
             }
             _ => {}
         })
@@ -361,8 +639,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
-            let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
-            app.manage(manager.clone());
+            let state_dir = std::env::var_os("UBRA_STATE_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(daemon::default_state_dir);
+            app.manage(DaemonLink::start(app.handle().clone(), state_dir));
             app.manage(ShellState::default());
             match build_tray(app.handle()) {
                 Ok(()) => app
@@ -372,24 +652,12 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("ubra: tray unavailable; closing quits: {e}");
                     app.dialog()
-                        .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
+                        .message("The system tray is unavailable. Closing this window will quit Ubra; terminals keep running in the background. Stop them from Settings.")
                         .title("Tray unavailable")
                         .kind(MessageDialogKind::Warning)
                         .show(|_| {});
                 }
             }
-            let poll_app = app.handle().clone();
-            let rules_dir = match data_dir(app.handle()) {
-                Ok(dir) => Some(dir.join("agent-detection")),
-                Err(e) => {
-                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
-                    None
-                }
-            };
-            let service = AgentStatusService::start(&manager, rules_dir, move |update| {
-                let _ = poll_app.emit("agent-state-update", &update);
-            });
-            app.manage(service);
             app.manage(usage::UsageCache::new());
             Ok(())
         })
@@ -412,7 +680,7 @@ pub fn run() {
                                 .builder()
                                 .title("Ubra keeps running")
                                 .body(
-                                    "Agents continue in the tray. Quit from the tray or Settings.",
+                                    "Terminals keep running in the tray. Quitting also leaves them running.",
                                 )
                                 .show();
                             return;
@@ -423,41 +691,24 @@ pub fn run() {
                             shell.close_warning_pending.store(true, Ordering::SeqCst);
                             let app = window.app_handle().clone();
                             app.dialog()
-                                .message("Ubra could not hide its window. Closing will quit the app and stop its terminals.")
+                                .message("Ubra could not hide its window. Closing will quit Ubra; terminals keep running in the background.")
                                 .title("Unable to hide Ubra")
                                 .kind(MessageDialogKind::Warning)
                                 .show(move |_| {
                                     app.state::<ShellState>()
                                         .close_warning_pending
                                         .store(false, Ordering::SeqCst);
-                                    if let Err(error) =
-                                        quit_app(app.clone(), app.state::<Arc<PtyManager>>())
-                                    {
-                                        eprintln!("ubra: close failed: {error}");
-                                        app.dialog()
-                                            .message(error)
-                                            .title("Unable to close Ubra")
-                                            .kind(MessageDialogKind::Error)
-                                            .show(|_| {});
-                                    }
+                                    // The frontend flushes layout changes, then quits.
+                                    let _ = app.emit("request-quit", ());
                                 });
                             return;
                         }
                     }
                 }
-                if let Err(error) = window.state::<Arc<PtyManager>>().shutdown() {
-                    api.prevent_close();
-                    eprintln!("ubra: close failed: {error}");
-                    let _ = window
-                        .notification()
-                        .builder()
-                        .title("Unable to close Ubra")
-                        .body(error.to_string())
-                        .show();
-                    return;
-                }
-                shell.quitting.store(true, Ordering::SeqCst);
-                window.app_handle().exit(0);
+                // No tray: ask the frontend to flush layout changes, then quit.
+                // Terminals keep running in the background daemon.
+                api.prevent_close();
+                let _ = window.app_handle().emit("request-quit", ());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -465,8 +716,17 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            pty_close,
+            pty_restart,
             pty_snapshot,
+            pty_snapshot_page,
+            pty_replay_page,
+            daemon_status,
+            daemon_set_options,
             agent_snapshot,
+            integrations_status,
+            integrations_install,
+            integrations_remove,
             detect_agent_clis,
             cli_usage,
             git_branch,
@@ -490,6 +750,7 @@ pub fn run() {
             git_switch,
             git_init,
             quit_app,
+            stop_all_terminals_and_quit,
             autostart_enabled,
             autostart_set,
             notify_agent,
@@ -500,12 +761,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                if let Err(error) = app.state::<Arc<PtyManager>>().shutdown() {
-                    eprintln!("ubra: shutdown failed: {error}");
+            // Quitting disconnects the UI; terminals keep running in the
+            // daemon. Route through the frontend so pending layout changes
+            // flush first. An in-progress quit is never intercepted.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !app
+                    .state::<ShellState>()
+                    .quitting
+                    .load(Ordering::SeqCst)
+                {
+                    api.prevent_exit();
+                    let _ = app.emit("request-quit", ());
                 }
             }
         });

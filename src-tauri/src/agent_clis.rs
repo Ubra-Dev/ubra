@@ -28,10 +28,38 @@ pub struct DetectedCli {
 #[cfg(unix)]
 const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Installed agent CLIs in [`AGENT_TABLE`] order. Never fails; an empty
-/// result means nothing was found (or the scan itself failed).
+/// Ordered scan stems: [`AGENT_TABLE`] families plus official adapter
+/// aliases (e.g. `kiro-cli`) that users may have installed instead.
+fn scan_stems() -> Vec<&'static str> {
+    let mut stems: Vec<&'static str> = AGENT_TABLE.iter().map(|(stem, _)| *stem).collect();
+    for adapter in crate::agent_adapters::ADAPTERS {
+        for exe in adapter.executables {
+            if !stems.contains(exe) {
+                stems.push(exe);
+            }
+        }
+    }
+    stems
+}
+
+fn label_for(stem: &str) -> &'static str {
+    if let Some(label) = AGENT_TABLE
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|(_, label)| *label)
+    {
+        return label;
+    }
+    crate::agent_adapters::find_by_executable(stem)
+        .map(|adapter| adapter.label)
+        .unwrap_or("Agent CLI")
+}
+
+/// Installed agent CLIs in [`AGENT_TABLE`] order (aliases appended). Never
+/// fails; an empty result means nothing was found (or the scan itself
+/// failed). `cli` is the actual installed binary name.
 pub fn detect() -> Vec<DetectedCli> {
-    let stems: Vec<&str> = AGENT_TABLE.iter().map(|(stem, _)| *stem).collect();
+    let stems: Vec<&str> = scan_stems();
     let found = scan_path_env(&stems);
     #[cfg(unix)]
     let found = {
@@ -48,12 +76,12 @@ pub fn detect() -> Vec<DetectedCli> {
         }
         found
     };
-    AGENT_TABLE
+    stems
         .iter()
-        .filter_map(|(stem, label)| {
+        .filter_map(|stem| {
             found.get(*stem).map(|path| DetectedCli {
                 cli: (*stem).to_string(),
-                label: (*label).to_string(),
+                label: label_for(stem).to_string(),
                 path: path.to_string_lossy().into_owned(),
             })
         })
