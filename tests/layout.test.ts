@@ -26,6 +26,7 @@ import {
   MAX_LAYOUT_DEPTH,
   MAX_LAYOUT_ENTITIES,
   newId,
+  paneDisplayTitle,
   sanitizeLayout,
   swapPanesInTab,
   setZoomedPane,
@@ -759,5 +760,26 @@ describe("explicit launch policy", () => {
     raw.workspaces[0].tabs[0].root.cmdOnRestore = "never";
     assert.throws(() => sanitizeLayout(raw), /restore policy/);
     assert.throws(() => sanitizeLayout({ ...defaultLayout(), version: 3 }), /Unsupported/);
+  });
+});
+
+describe("paneDisplayTitle", () => {
+  it("prefers the explicit title", () => {
+    assert.equal(
+      paneDisplayTitle({ kind: "pane", id: "p", title: "api", cwd: "/repo/web" }),
+      "api",
+    );
+  });
+
+  it("falls back to the cwd's last segment", () => {
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "/repo/web" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "/repo/web/" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", cwd: "C:\\repo\\web" }), "web");
+  });
+
+  it("falls back to Terminal without a title or usable cwd", () => {
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p" }), "Terminal");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "/repo/web" }), "web");
+    assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "" }), "Terminal");
   });
 });

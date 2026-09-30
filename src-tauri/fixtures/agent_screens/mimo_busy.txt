@@ -1,0 +1,3 @@
+Type your message... (type / for commands)
+example-model · Build
+esc interrupt  tab switch mode  ctrl+p settings

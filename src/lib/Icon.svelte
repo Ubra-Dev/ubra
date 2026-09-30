@@ -25,7 +25,8 @@
     | "rows"
     | "external"
     | "chevron-up"
-    | "chevron-down";
+    | "chevron-down"
+    | "git-branch";
 
   interface Props {
     name: IconName;
@@ -128,6 +129,11 @@
       '<line x1="10" y1="14" x2="21" y2="3"/>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"/>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
+    "git-branch":
+      '<line x1="6" y1="3" x2="6" y2="15"/>' +
+      '<circle cx="18" cy="6" r="3"/>' +
+      '<circle cx="6" cy="18" r="3"/>' +
+      '<path d="M18 9a9 9 0 0 1-9 9"/>',
   };
 </script>
 

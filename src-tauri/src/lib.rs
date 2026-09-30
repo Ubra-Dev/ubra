@@ -2,6 +2,7 @@ pub mod agent_status;
 pub mod agent_watch;
 pub mod cli;
 pub mod daemon;
+pub mod git_branch;
 pub mod layout_store;
 mod process_tree;
 pub mod pty_manager;
@@ -75,6 +76,11 @@ fn pty_snapshot(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<PtySn
 #[tauri::command]
 fn agent_snapshot(service: State<'_, AgentStatusService>) -> AgentUpdate {
     service.snapshot()
+}
+
+#[tauri::command]
+fn git_branch(path: String) -> Option<String> {
+    git_branch::branch_for(std::path::Path::new(&path))
 }
 
 #[tauri::command]
@@ -387,6 +393,7 @@ pub fn run() {
             pty_kill,
             pty_snapshot,
             agent_snapshot,
+            git_branch,
             load_layout,
             save_layout,
             export_layout,

@@ -9,15 +9,18 @@
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
+  import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
+  import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
     void store.boot();
     agent.start();
+    workspaceGit.start();
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
@@ -155,28 +158,25 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="app" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
-      <Sidebar />
-      <div class="main">
-        <TabBar />
-        <div class="tabs">
-          {#each store.layout.workspaces as ws (ws.id)}
-            <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
-              {#each ws.tabs as tab (tab.id)}
-                <div class="tab" hidden={tab.id !== ws.activeTabId}>
-                  <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />
-                </div>
-              {/each}
-            </div>
-          {/each}
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
+      <div class="app">
+        <Sidebar />
+        <div class="main">
+          <TabBar />
+          <div class="tabs">
+            {#each store.layout.workspaces as ws (ws.id)}
+              <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
+                {#each ws.tabs as tab (tab.id)}
+                  <div class="tab" hidden={tab.id !== ws.activeTabId}>
+                    <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
         </div>
-        {#if store.saveError}
-          <div class="error" role="alert">Layout save failed: {store.saveError}</div>
-        {/if}
-        {#if store.recoveryBackupPath}
-          <div class="error backup">Original layout preserved at: {store.recoveryBackupPath}</div>
-        {/if}
       </div>
+      <StatusBar />
     </div>
     {#if store.onboardingOpen}
       <FirstRun />
@@ -239,10 +239,17 @@
     color: var(--text-muted);
     font: 14px system-ui, sans-serif;
   }
-  .app {
+  .shell {
     display: flex;
+    flex-direction: column;
     height: 100vh;
     width: 100vw;
+  }
+  .app {
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
   }
   .main {
     flex: 1 1 0;
@@ -262,12 +269,6 @@
   .ws[hidden],
   .tab[hidden] {
     display: none;
-  }
-  .error {
-    padding: 4px 10px;
-    background: var(--error-bg);
-    color: var(--error-text);
-    font: 12px system-ui, sans-serif;
   }
   :global(button:focus-visible, select:focus-visible, input:focus-visible) {
     outline: 2px solid var(--accent);

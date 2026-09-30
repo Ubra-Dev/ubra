@@ -14,6 +14,9 @@ Inspected on 2026-09-30:
 | Claude | 2.1.284 | JavaScript embedded in installed executable: confirmation renderer `_q` (question, selected options, escape cancel), `zMt` (interrupt footer), composer shortcut footer | Standard proceed approval, busy interrupt footer, ready composer with shortcut footer |
 | Gemini | 0.57.0 | Installed npm bundle `interactiveCli-5O6FZS57.js`: `LoadingIndicator`, `ToolConfirmationMessage`, `InputPrompt`, `AskUserDialog`, `TextQuestionView`, `ReviewScreen`; `DialogFooter` in dependency chunk | Responding indicator, execution/edit/info approvals, empty composer, text question and answer review |
 | OpenCode | 1.18.30 | Primary tagged `packages/tui/src/component/prompt/index.tsx` renderer; upstream `packages/tui/src/routes/session/permission.tsx` renderer (approval source not version pinned) | Busy interrupt footer, empty composer with commands footer, permission option group with selection/confirmation footer |
+| MiMoCode | 0.1.15 | JavaScript embedded in installed executable (Bun bundle): permission renderer (titled dialog, once/always/reject options), session footer (spinner row with `esc interrupt` / `esc again to interrupt`), prompt hints (idle-only `@`/`$`/`/` labels) | Busy interrupt footer, empty composer with idle hints, permission option group with selection/confirmation footer, text question |
+| Antigravity (`agy`) | 1.2.13 | Go binary literals: generating footer, conversation-scoped permission option labels | Busy generating footer, permission allow/deny options (partial: no composer rule, so no working→idle completion yet) |
+| Cursor Agent CLI | 2026.09.28-64d2043 | Bundled JS (`6949.index.js`): per-tool approval questions and single-key option hints | Permission option hints incl. delete confirm (partial: no busy/composer rules yet) |
 
 Codex primary sources:
 
@@ -31,10 +34,10 @@ text were also checked against that executable. OpenCode primary sources:
 The OpenCode approval case is backed by upstream source, not verified against a
 real 1.18.30 terminal; version differences can therefore yield Unknown.
 
-Custom keybindings, brief modes,
-other approval/question variants, narrow truncation, unsupported versions, and
-CLIs without a validated profile can yield Unknown. A changed screen never
-supplies evidence by itself.
+Custom keybindings, brief modes, alternate composer modes (MiMoCode shell
+mode uses a different placeholder), other approval/question variants, narrow
+truncation, unsupported versions, and CLIs without a validated profile can
+yield Unknown. A changed screen never supplies evidence by itself.
 
 Bundled rules use a small bottom window, supporting markers, and a footer anchor
 where available. Trailing empty VT rows are ignored. Case and whitespace at word

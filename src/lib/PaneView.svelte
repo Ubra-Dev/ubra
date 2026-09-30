@@ -7,7 +7,7 @@
   import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
-  import type { PaneNode } from "./layout";
+  import { paneDisplayTitle, type PaneNode } from "./layout";
   import { toasts } from "./toasts.svelte.ts";
 
   let {
@@ -58,9 +58,7 @@
     }
   });
 
-  const title = $derived(
-    node.title ?? node.cwd?.split("/").filter(Boolean).pop() ?? "Terminal",
-  );
+  const title = $derived(paneDisplayTitle(node));
 
   function focus(el: HTMLInputElement): void {
     el.focus();

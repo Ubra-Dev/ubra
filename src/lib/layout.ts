@@ -520,6 +520,16 @@ export function baseName(path: string): string {
   return parts[parts.length - 1];
 }
 
+/** Pane header/context title: explicit title, else the cwd's last segment. */
+export function paneDisplayTitle(node: PaneNode): string {
+  if (node.title) return node.title;
+  if (node.cwd) {
+    const base = baseName(node.cwd);
+    if (base) return base;
+  }
+  return "Terminal";
+}
+
 /**
  * Move a workspace to before/after another workspace, in place.
  * Returns false for unknown ids, self-drops, or no-op adjacent moves.

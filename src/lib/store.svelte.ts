@@ -46,6 +46,12 @@ import {
   type ThemeId,
 } from "./themes";
 import { DEFAULT_UI_SCALE, UI_SCALE_STEP, clampUiScale } from "./uiScale";
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  DEFAULT_SPLIT_RATIO,
+  clampSidebarWidth,
+  clampSplitRatio,
+} from "./sidebarResize";
 
 export type CloseKind = "workspace" | "tab" | "pane";
 
@@ -75,6 +81,8 @@ class AppStore {
   onboardingOpen = $state(false);
   loadError = $state<string | null>(null);
   saveError = $state<string | null>(null);
+  /** True while a layout save is scheduled or in flight. */
+  saving = $state(false);
   recoveryRequired = $state(false);
   recoveryBusy = $state(false);
   recoveryError = $state<string | null>(null);
@@ -82,6 +90,9 @@ class AppStore {
   themeId = $state<ThemeId>(DEFAULT_THEME_ID);
   termFontSize = $state<number>(DEFAULT_TERM_FONT_SIZE);
   uiScale = $state<number>(DEFAULT_UI_SCALE);
+  sidebarWidth = $state<number>(DEFAULT_SIDEBAR_WIDTH);
+  /** Fraction of sidebar split height given to workspaces (rest to agents). */
+  sidebarSplit = $state<number>(DEFAULT_SPLIT_RATIO);
   termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
   termOpacity = $state<number>(DEFAULT_TERM_OPACITY);
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
@@ -133,6 +144,12 @@ class AppStore {
       if (savedFont !== null) this.termFontSize = this.clampFontSize(Number(savedFont));
       const savedUiScale = window.localStorage.getItem("ubra.uiScale");
       if (savedUiScale !== null) this.uiScale = clampUiScale(Number(savedUiScale));
+      const savedSidebarWidth = window.localStorage.getItem("ubra.sidebarWidth");
+      if (savedSidebarWidth !== null)
+        this.sidebarWidth = clampSidebarWidth(Number(savedSidebarWidth));
+      const savedSidebarSplit = window.localStorage.getItem("ubra.sidebarSplit");
+      if (savedSidebarSplit !== null)
+        this.sidebarSplit = clampSplitRatio(Number(savedSidebarSplit));
       const savedScrollback = window.localStorage.getItem("ubra.termScrollback");
       if (
         savedScrollback !== null &&
@@ -185,6 +202,7 @@ class AppStore {
     this.recoveryError = null;
     clearTimeout(this.saveTimer ?? undefined);
     this.saveTimer = null;
+    this.saving = false;
     try {
       const raw = await invoke<unknown>("load_layout");
       this.layout = raw == null ? defaultLayout() : sanitizeLayout(raw);
@@ -291,6 +309,28 @@ class AppStore {
     this.setUiScale(DEFAULT_UI_SCALE);
   }
 
+  setSidebarWidth(px: number): void {
+    const clamped = clampSidebarWidth(px);
+    if (clamped === this.sidebarWidth) return;
+    this.sidebarWidth = clamped;
+    try {
+      window.localStorage.setItem("ubra.sidebarWidth", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save sidebar width", e);
+    }
+  }
+
+  setSidebarSplit(ratio: number): void {
+    const clamped = clampSplitRatio(ratio);
+    if (clamped === this.sidebarSplit) return;
+    this.sidebarSplit = clamped;
+    try {
+      window.localStorage.setItem("ubra.sidebarSplit", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save sidebar split", e);
+    }
+  }
+
   setTermScrollback(lines: number): void {
     if (!SCROLLBACK_OPTIONS.includes(lines) || lines === this.termScrollback)
       return;
@@ -379,6 +419,7 @@ class AppStore {
     clearTimeout(this.saveTimer ?? undefined);
     this.saveTimer = null;
     if (!this.loaded || this.recoveryRequired || this.recoveryBusy || !this.layout) return;
+    this.saving = true;
     if (immediate) {
       void this.flush();
       return;
@@ -390,13 +431,18 @@ class AppStore {
   }
 
   private async flush(): Promise<void> {
-    if (!this.layout || !this.loaded || this.recoveryRequired || this.recoveryBusy) return;
+    if (!this.layout || !this.loaded || this.recoveryRequired || this.recoveryBusy) {
+      this.saving = false;
+      return;
+    }
     try {
       const layout = sanitizeLayout($state.snapshot(this.layout));
       await invoke("save_layout", { layout });
       this.saveError = null;
     } catch (e) {
       this.saveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.saving = false;
     }
   }
 
