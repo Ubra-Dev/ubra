@@ -6,11 +6,18 @@
 
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 /// Largest single listing; larger directories set `truncated`.
 pub const MAX_DIR_ENTRIES: usize = 5000;
+
+/// Largest file preview; larger files set `truncated`.
+pub const MAX_FILE_BYTES: usize = 512 * 1024;
+
+/// Leading bytes sniffed for NUL to detect binary files.
+const BINARY_SNIFF_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,9 +36,18 @@ pub struct DirListing {
     pub truncated: bool,
 }
 
-/// List one directory level under `root`. `rel_path` is "" for the root
-/// itself; relative paths use "/" separators on every platform.
-pub fn list_dir(root: &str, rel_path: &str) -> Result<DirListing, String> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContent {
+    pub content: String,
+    pub truncated: bool,
+    pub binary: bool,
+    pub size: u64,
+}
+
+/// Canonicalize `rel_path` under `root`, rejecting `..` and symlink escapes.
+/// `rel_path` is "" for the root itself; callers decide whether that is valid.
+fn resolve_under_root(root: &str, rel_path: &str) -> Result<std::path::PathBuf, String> {
     if root.contains('\0') || rel_path.contains('\0') {
         return Err("Path must not contain NUL bytes.".to_string());
     }
@@ -46,10 +62,17 @@ pub fn list_dir(root: &str, rel_path: &str) -> Result<DirListing, String> {
         canonical_root.join(rel_path)
     };
     let canonical_target =
-        fs::canonicalize(&joined).map_err(|_| "Cannot open folder.".to_string())?;
+        fs::canonicalize(&joined).map_err(|_| "Cannot open path.".to_string())?;
     if !canonical_target.starts_with(&canonical_root) {
-        return Err("Folder is outside the workspace.".to_string());
+        return Err("Path is outside the workspace.".to_string());
     }
+    Ok(canonical_target)
+}
+
+/// List one directory level under `root`. `rel_path` is "" for the root
+/// itself; relative paths use "/" separators on every platform.
+pub fn list_dir(root: &str, rel_path: &str) -> Result<DirListing, String> {
+    let canonical_target = resolve_under_root(root, rel_path)?;
     let read = fs::read_dir(&canonical_target).map_err(|_| "Cannot read folder.".to_string())?;
     let mut entries = Vec::new();
     let mut truncated = false;
@@ -91,6 +114,45 @@ pub fn list_dir(root: &str, rel_path: &str) -> Result<DirListing, String> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(DirListing { entries, truncated })
+}
+
+/// Read a file under `root` for the preview dialog. Directories, escapes,
+/// and binary files are refused or flagged rather than read blindly.
+pub fn read_file(root: &str, rel_path: &str) -> Result<FileContent, String> {
+    if rel_path.is_empty() || rel_path == "." {
+        return Err("Path must name a file.".to_string());
+    }
+    let canonical_target = resolve_under_root(root, rel_path)?;
+    let meta = fs::metadata(&canonical_target).map_err(|_| "Cannot open path.".to_string())?;
+    if !meta.is_file() {
+        return Err("Path is not a file.".to_string());
+    }
+    let size = meta.len();
+    let file = fs::File::open(&canonical_target).map_err(|_| "Cannot open path.".to_string())?;
+    let mut buf = Vec::new();
+    // Read one byte past the cap: any growth beyond it means truncation.
+    file.take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|_| "Cannot read file.".to_string())?;
+    let truncated = buf.len() > MAX_FILE_BYTES;
+    if truncated {
+        buf.truncate(MAX_FILE_BYTES);
+    }
+    let sniff_end = buf.len().min(BINARY_SNIFF_BYTES);
+    if buf[..sniff_end].contains(&0) {
+        return Ok(FileContent {
+            content: String::new(),
+            truncated: false,
+            binary: true,
+            size,
+        });
+    }
+    Ok(FileContent {
+        content: String::from_utf8_lossy(&buf).into_owned(),
+        truncated,
+        binary: false,
+        size,
+    })
 }
 
 #[cfg(test)]
@@ -220,5 +282,87 @@ mod tests {
 
         remove_dir(&dir);
         remove_dir(&outside);
+    }
+
+    #[test]
+    fn reads_text_files_with_size() {
+        let dir = test_dir("read");
+        remove_dir(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/a.txt"), "hello\n").unwrap();
+        fs::write(dir.join("empty.txt"), "").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+
+        let file = read_file(&root, "sub/a.txt").unwrap();
+        assert_eq!(file.content, "hello\n");
+        assert_eq!(file.size, 6);
+        assert!(!file.truncated);
+        assert!(!file.binary);
+
+        let empty = read_file(&root, "empty.txt").unwrap();
+        assert_eq!(empty.content, "");
+        assert_eq!(empty.size, 0);
+        assert!(!empty.binary);
+
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_refuses_directories_missing_and_escapes() {
+        let dir = test_dir("read-refuse");
+        remove_dir(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+
+        assert!(read_file(&root, "")
+            .unwrap_err()
+            .contains("must name a file"));
+        assert!(read_file(&root, ".")
+            .unwrap_err()
+            .contains("must name a file"));
+        assert!(read_file(&root, "sub").unwrap_err().contains("not a file"));
+        assert!(read_file(&root, "nope.txt").is_err());
+        assert!(read_file(&root, "..").unwrap_err().contains("outside"));
+        assert!(read_file(&root, "/etc/hosts")
+            .unwrap_err()
+            .contains("relative"));
+
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_truncates_large_files() {
+        let dir = test_dir("read-truncate");
+        remove_dir(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let big = "x".repeat(MAX_FILE_BYTES + 100);
+        fs::write(dir.join("big.txt"), &big).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+
+        let file = read_file(&root, "big.txt").unwrap();
+        assert!(file.truncated);
+        assert!(!file.binary);
+        assert_eq!(file.content.len(), MAX_FILE_BYTES);
+        assert_eq!(file.size, MAX_FILE_BYTES as u64 + 100);
+
+        remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_flags_binary_files() {
+        let dir = test_dir("read-binary");
+        remove_dir(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x00, 0x01, 0x02];
+        bytes.extend_from_slice(&[0xabu8; 100]);
+        fs::write(dir.join("img.png"), &bytes).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+
+        let file = read_file(&root, "img.png").unwrap();
+        assert!(file.binary);
+        assert_eq!(file.content, "");
+        assert_eq!(file.size, bytes.len() as u64);
+
+        remove_dir(&dir);
     }
 }
