@@ -12,6 +12,7 @@ pub mod pty_manager;
 pub mod screen_rules;
 pub mod sound;
 mod terminal_state;
+pub mod usage;
 
 use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
@@ -89,6 +90,16 @@ fn git_branch(path: String) -> Option<String> {
 #[tauri::command]
 fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
     agent_clis::detect()
+}
+
+#[tauri::command]
+async fn cli_usage(
+    cache: State<'_, usage::UsageCache>,
+    cli: String,
+    force: bool,
+) -> Result<usage::CliUsage, String> {
+    // Infallible by design: every failure mode is a CliUsage status.
+    Ok(cache.usage(&cli, force).await)
 }
 
 #[tauri::command]
@@ -379,6 +390,7 @@ pub fn run() {
                 let _ = poll_app.emit("agent-state-update", &update);
             });
             app.manage(service);
+            app.manage(usage::UsageCache::new());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -456,6 +468,7 @@ pub fn run() {
             pty_snapshot,
             agent_snapshot,
             detect_agent_clis,
+            cli_usage,
             git_branch,
             load_layout,
             save_layout,

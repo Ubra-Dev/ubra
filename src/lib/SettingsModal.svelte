@@ -37,13 +37,16 @@
   } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
+  import { formatResetCountdown, formatUpdatedAgo } from "./usage";
+  import { usage } from "./usage.svelte";
 
   type SectionId =
     | "appearance"
     | "alerts"
     | "shortcuts"
     | "app"
-    | "workspace";
+    | "workspace"
+    | "usage";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
@@ -51,6 +54,7 @@
     { id: "shortcuts", label: "Shortcuts", icon: "command" },
     { id: "app", label: "App", icon: "info" },
     { id: "workspace", label: "Workspace", icon: "layers" },
+    { id: "usage", label: "Usage", icon: "activity" },
   ];
 
   let section = $state<SectionId>("app");
@@ -119,6 +123,14 @@
       cliCustom = current;
     }
     cliDraftReady = true;
+  });
+
+  // Load plan usage when the section opens; the store skips fresh entries.
+  $effect(() => {
+    if (section !== "usage") return;
+    const detected = agentClis.clis;
+    if (!detected) return;
+    usage.refreshAll(detected.map((entry) => entry.cli));
   });
 
 
@@ -850,6 +862,75 @@
               <div class="hint">No workspace open.</div>
             {/if}
           </section>
+        {:else if section === "usage"}
+          <section aria-label="Usage">
+            <h2>Usage</h2>
+            {#if agentClis.clis === null}
+              <div class="hint">Detecting installed agents…</div>
+            {:else if agentClis.clis.length === 0}
+              <div class="hint">No agent CLIs detected.</div>
+            {:else}
+              {#each agentClis.clis as entry (entry.cli)}
+                {@const snap = usage.entries[entry.cli]}
+                {@const busy = usage.loading[entry.cli] === true}
+                <div class="group">
+                  <h3 class="group-label">{entry.label}</h3>
+                  <div class="card" aria-busy={busy}>
+                    <div class="row">
+                      <span class="folder-value" title={entry.path}>
+                        {entry.path}
+                      </span>
+                      <button
+                        class="btn btn-sm"
+                        onclick={() => usage.refresh(entry.cli)}
+                        disabled={busy}
+                      >
+                        <Icon name="refresh" size={12} />
+                        <span>{busy ? "Loading…" : "Refresh"}</span>
+                      </button>
+                    </div>
+                    {#if !snap}
+                      <div class="hint">Loading usage…</div>
+                    {:else if snap.status === "ready" && snap.snapshot}
+                      {@const shot = snap.snapshot}
+                      {#each shot.windows as window (window.label)}
+                        <div class="usage-window">
+                          <div class="usage-head">
+                            <span class="label">{window.label}</span>
+                            <span class="usage-value">
+                              {#if window.percentUsed !== undefined}{window.percentUsed.toFixed(0)}% used{/if}{#if window.percentUsed !== undefined && window.resetsAt !== undefined} · {/if}{#if window.resetsAt !== undefined}resets {formatResetCountdown(window.resetsAt)}{/if}
+                            </span>
+                          </div>
+                          {#if window.percentUsed !== undefined}
+                            <div
+                              class="usage-bar"
+                              role="progressbar"
+                              aria-label={window.label}
+                              aria-valuenow={Math.round(window.percentUsed)}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                            >
+                              <span
+                                style={`width:${Math.min(100, window.percentUsed)}%`}
+                              ></span>
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                      <div class="hint">
+                        {shot.source}{#if shot.plan} · {shot.plan}{/if} · Updated
+                        {formatUpdatedAgo(shot.fetchedAt)}
+                      </div>
+                    {:else}
+                      <div class="hint">
+                        {snap.message ?? "Usage unavailable."}
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </section>
         {/if}
       </div>
     </div>
@@ -989,6 +1070,40 @@
   .card > .row + .row,
   .card > .hint + .row {
     border-top: 1px solid var(--separator);
+  }
+  .card > .row + .usage-window,
+  .card > .usage-window + .usage-window {
+    border-top: 1px solid var(--separator);
+  }
+  .usage-window {
+    padding: 8px 0;
+  }
+  .usage-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .usage-head .label {
+    flex: 1;
+  }
+  .usage-value {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .usage-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-active);
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .usage-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
   }
   .row {
     display: flex;
