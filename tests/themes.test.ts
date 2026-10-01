@@ -30,10 +30,10 @@ const builtInThemeIds = [
 ] as const;
 
 describe("theme catalog", () => {
-  it("includes every built-in theme and keeps VS Code Dark+ as default", () => {
+  it("includes every built-in theme and keeps Vesper as default", () => {
     for (const id of builtInThemeIds) assert.ok(isThemeId(id), `${id} is missing`);
-    assert.equal(DEFAULT_THEME_ID, "vscode-dark");
-    assert.equal(THEMES[DEFAULT_THEME_ID].name, "VS Code Dark+");
+    assert.equal(DEFAULT_THEME_ID, "vesper");
+    assert.equal(THEMES[DEFAULT_THEME_ID].name, "Vesper");
   });
 
   it("provides complete UI and xterm colors for every theme", () => {
@@ -73,10 +73,12 @@ describe("withAlpha", () => {
   it("themeStyle applies alpha only to the background stack", () => {
     const theme = THEMES[DEFAULT_THEME_ID];
     const styled = themeStyle(theme, 0.8);
-    assert.ok(styled.includes(`--app-bg:rgba(30, 30, 30, 0.8)`));
-    assert.ok(styled.includes(`--pane-bg:rgba(30, 30, 30, 0.8)`));
+    assert.ok(styled.includes(`--app-bg:${withAlpha(theme.ui.appBg, 0.8)}`));
+    assert.ok(styled.includes(`--pane-bg:${withAlpha(theme.ui.paneBg, 0.8)}`));
     assert.ok(
-      styled.includes(`--terminal-background:rgba(30, 30, 30, 0.8)`),
+      styled.includes(
+        `--terminal-background:${withAlpha(theme.terminal.background, 0.8)}`,
+      ),
     );
     assert.ok(styled.includes(`--sidebar-bg:${theme.ui.sidebarBg}`));
     assert.equal(themeStyle(theme), themeStyle(theme, 1));
