@@ -457,17 +457,6 @@
     store.setTrayMenuListEnabled((e.target as HTMLInputElement).checked);
   }
 
-  function quitActionLabel(): string {
-    // Null until the backend answers; assume survival, matching backends
-    // that predate the `pty_backend` command.
-    const survival = store.survivalEnabled ?? true;
-    if (store.quitAction === "keep") {
-      return survival ? "Always quit and keep running" : "Always quit";
-    }
-    if (store.quitAction === "stop") return "Always stop agents and quit";
-    return "Ask each time";
-  }
-
   function onTestSound(): void {
     invoke("play_sound", playbackPayload("done"))
       .catch((e) => console.error("ubra: test sound failed", e));
@@ -908,20 +897,6 @@
                     <span class="thumb"></span>
                   </span>
                 </label>
-                <div class="row">
-                  <span class="label">Quit confirmation</span>
-                  <span class="quit-choice">
-                    <span class="hint">{quitActionLabel()}</span>
-                    {#if store.quitAction !== "ask"}
-                      <button
-                        class="btn"
-                        onclick={() => store.setQuitAction("ask")}
-                      >
-                        <span>Ask each time</span>
-                      </button>
-                    {/if}
-                  </span>
-                </div>
                 <div class="row">
                   <span class="label">Setup walkthrough</span>
                   <button class="btn" onclick={openOnboarding}>
@@ -1894,15 +1869,6 @@
     display: flex;
     gap: 8px;
     flex: 0 0 auto;
-  }
-  .quit-choice {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 0 0 auto;
-  }
-  .quit-choice .hint {
-    padding: 0;
   }
   .folder-path,
   .usage-path {
