@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { agentClis } from "./agentClis.svelte";
+import { evictDeadSessions, evictSessions } from "./ptySessions";
 import {
   activeTab,
   activeWorkspace,
@@ -27,6 +29,7 @@ import {
   setZoomedPane,
   splitPaneInTab,
   stampPaneAgentCli,
+  stampPaneAgentSession,
   swapPanesInTab,
   type Direction,
   type Layout,
@@ -35,6 +38,7 @@ import {
   type Workspace,
 } from "./layout";
 import { implicitLaunchCommand } from "./agentLaunch";
+import { restoreCommandFor } from "./agentResume";
 import { PendingCommands } from "./pendingCommands";
 import type { PtySessionInfo } from "./terminalLifecycle";
 import { toasts } from "./toasts.svelte.ts";
@@ -139,6 +143,12 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
+  /** Agent runtime link: null until the first backend status arrives. */
+  daemonConnected = $state<boolean | null>(null);
+  /** Last daemon error, shown in the disconnected banner. */
+  daemonError = $state<string | null>(null);
+  /** Bumped on every (re)connect so terminals adopt or respawn. */
+  daemonEpoch = $state(0);
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
@@ -222,7 +232,38 @@ class AppStore {
       // The app can still start with its defaults if storage is unavailable.
     }
 
+    void this.watchDaemon();
     await this.retryLayout();
+  }
+
+  /**
+   * Track the agent runtime link. Every (re)connect remounts terminals:
+   * a first connect retries failed boot spawns, a reconnect readopts
+   * surviving sessions (or respawns when the daemon restarted). Healthy
+   * mounts readopt their own lease, so the remount is a cheap repaint.
+   */
+  private async watchDaemon(): Promise<void> {
+    try {
+      await listen<{ connected: boolean; error: string | null }>(
+        "daemon-status",
+        (event) => {
+          const was = this.daemonConnected;
+          this.daemonConnected = event.payload.connected;
+          this.daemonError = event.payload.error;
+          if (!event.payload.connected || was === true) return;
+          if (this.layout) {
+            const placed = this.layout.workspaces.flatMap((ws) =>
+              ws.tabs.flatMap((tab) => collectPaneIds(tab.root)),
+            );
+            if (was === false) evictSessions(placed);
+            else evictDeadSessions(placed);
+          }
+          this.daemonEpoch += 1;
+        },
+      );
+    } catch (e) {
+      console.error("ubra: daemon status subscription failed", e);
+    }
   }
 
   /** A failed load never installs a renderable/default layout or enables autosave. */
@@ -1029,7 +1070,7 @@ class AppStore {
     const found = findTabByPane(this.layout, paneId);
     const node = found ? findPane(found.tab.root, paneId) : null;
     const cli = node?.agentCli?.trim();
-    if (cli) this.queueAgentCommand(paneId, cli);
+    if (cli && node) this.queueAgentCommand(paneId, restoreCommandFor(cli, node.agentSession));
   }
 
   takeRestoreAgent(paneId: string): string | null {
@@ -1037,7 +1078,15 @@ class AppStore {
     const found = findTabByPane(this.layout, paneId);
     const node = found ? findPane(found.tab.root, paneId) : null;
     const cli = node?.agentCli?.trim();
-    return cli ? cli : null;
+    return cli && node ? restoreCommandFor(cli, node.agentSession) : null;
+  }
+
+  /**
+   * Stamp an observed agent session for resume-after-restart. True when
+   * the layout changes; callers save.
+   */
+  stampPaneAgentSession(paneId: string, cli: string, value: string): boolean {
+    return !!this.layout && stampPaneAgentSession(this.layout, paneId, cli, value);
   }
 
   /**

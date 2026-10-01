@@ -1,10 +1,12 @@
-# Headless daemon + CLI (experimental)
+# Agent runtime daemon + GUI + CLI
 
-`ubra-daemon` owns PTYs and the agent watcher without a window, serving a
-JSON-lines protocol over loopback TCP. By default Unix runtime files live in
+`ubra-daemon` owns PTYs and the agent watcher, serving a JSON-lines protocol
+over loopback TCP. By default Unix runtime files live in
 `<tmp>/ubra-<effective-uid>/`; Windows uses the per-user app data directory.
 `ubra-cli` drives it — all output is pretty-printed JSON, and the CLI starts the
-daemon on demand.
+daemon on demand. The desktop GUI is also a daemon client: it owns no PTYs
+itself, so quitting the app detaches without stopping any agent (Herdr-style
+persistence); only an explicit stop ends the agents.
 
 The macOS GUI bundle includes sibling daemon/CLI executables under
 `Ubra.app/Contents/MacOS/`; they are not automatically added to `PATH`.
@@ -37,7 +39,7 @@ cargo run -q --bin ubra-cli -- snapshot
 cargo run -q --bin ubra-cli -- shutdown
 ```
 
-The GUI does not use the daemon (it keeps its in-process backend). Protocol 2
+Protocol 2
 uses mutual nonce-bound HMAC-SHA256 authentication before commands or pushed pane
 data; the credential never travels over TCP. Runtime directories/files are
 current-user-only (Unix `0700`/`0600`, Windows protected owner-only DACLs).
@@ -63,3 +65,61 @@ Use `--state-dir <fresh-directory>` for isolated experiments and shut that daemo
 down afterward. The headless interface remains experimental; native Windows ACL,
 cross-user authentication and ConPTY execution must pass platform release gates
 rather than being inferred from Unix tests.
+
+## GUI runtime
+
+On startup the GUI probes the daemon port file and spawns a detached daemon
+(own session/process group, stdio closed) when none answers, then connects
+over the same authenticated protocol. A supervisor thread forwards `pty_*`
+and `agent-state-update` events to the frontend and retries across
+disconnects; every `pty_*` Tauri command is a daemon round trip.
+
+- `Quit Ubra` detaches: the daemon keeps every agent running and reopening
+  readopts the same sessions by pane key.
+- `Stop Agents and Quit` (menus, tray) shuts the daemon down first. It
+  never spawns a daemon to stop one.
+- While disconnected the GUI shows a reconnecting banner; on reconnect it
+  remounts every terminal (adopt live, else fresh spawn).
+- GUI panes spawn keyed (`pane-<uuid>`) with the query responder off so
+  xterm answers device queries alone. `pty_list`/`pty_snapshot` serve
+  adoption; orphan sweeps still apply.
+
+## Screen history
+
+The daemon persists per-key screen snapshots to
+`<app-data>/terminal-history/<key>.json` (0600/0700 on Unix, pruned past
+30 days): every 30s, on every pane exit, and synchronously on shutdown.
+`pty_history` serves the last snapshot for a key (null when absent).
+Fresh mounts repaint it beneath the live screen so terminals feel
+continuous across daemon restarts; corrupt, oversize, or foreign files
+read as absent. `ubra-daemon --history-dir DIR` (`UBRA_HISTORY_DIR`)
+overrides the location.
+
+## Agent resume
+
+After a daemon or machine restart the original processes are gone; panes
+restore via agent-native resume (gated by the auto-launch setting; the
+respawn button always resumes explicitly):
+
+| CLI    | Strategy (verified against real installs)                |
+| ------ | -------------------------------------------------------- |
+| claude | `claude --continue` (cwd-scoped, needs no capture)       |
+| codex  | newest `~/.codex/sessions` rollout for the pane cwd → `codex resume <id>` |
+| else   | bare-command retype (previous behavior)                  |
+
+Session ids are discovered in the status service (60s TTL per pane,
+re-resolved on identity change) and ride along on `AgentStatus.sessionRef`
+(`{kind: "id", value}`), persisting to `layout.json` (`agentSession`)
+only on change. Resume argv are validated before use (plain command,
+no control bytes or apostrophes, size caps); edited layouts fall back
+to the original command. To add a CLI: verify its flags against a real
+install, add capture in `src-tauri/src/agent_session.rs` when an id is
+needed, and add a row to `src/lib/agentResume.ts`.
+
+## Manual QA
+
+1. Launch, start agents in two panes, Quit, relaunch: same live sessions.
+2. `Stop Agents and Quit`: processes end (`ps` shows no agents).
+3. Kill the daemon process: banner appears; GUI respawns it; panes show
+   history prelude and resumed agents (claude/codex) or fresh shells.
+4. `ubra-cli snapshot` during all of the above: consistent pane list.

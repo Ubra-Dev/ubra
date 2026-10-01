@@ -3,7 +3,7 @@
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager, PtySessionInfo};
+use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager, PtySessionInfo, SpawnOptions};
 
 enum Event {
     Output(PaneId, String),
@@ -69,7 +69,15 @@ fn pty_spawns_and_captures_output() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let (shell, args) = echo_command();
-    let id = manager.spawn(shell, None, args, 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = String::new();
@@ -132,7 +140,15 @@ fn pty_spawn_advertises_color_capable_terminal() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let (shell, args) = env_command();
-    let id = manager.spawn(shell, None, args, 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     match saved_term {
         Some(v) => std::env::set_var("TERM", v),
@@ -191,7 +207,13 @@ fn pty_kill_terminates_live_pane() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     // Bare interactive shell blocks on input until killed.
-    let id = manager.spawn(None, None, Vec::new(), 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     // Drain startup output (answering the ConPTY handshake on Windows) so the
     // child is actually running — not blocked on an unanswered cursor query —
     // when killed. Must happen before kill: kill drops the session, and with
@@ -236,14 +258,12 @@ fn pty_kill_terminates_live_pane() {
 fn spawn_failure_returns_error_and_leaks_no_session() {
     let (tx, _rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
-    let result = manager.spawn(
-        Some("ubra-no-such-binary-xyz".to_string()),
-        None,
-        Vec::new(),
-        80,
-        24,
-        None,
-    );
+    let result = manager.spawn(SpawnOptions {
+        shell: Some("ubra-no-such-binary-xyz".to_string()),
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    });
     assert!(result.is_err(), "bogus shell must fail to spawn");
     assert!(
         manager.pane_roots().is_empty(),
@@ -266,7 +286,13 @@ fn snapshot_repaints_live_pane_and_fails_after_kill() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     // Bare interactive shell stays alive so the snapshot has a live screen.
-    let id = manager.spawn(None, None, Vec::new(), 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let mut handshake = Handshake::new();
     let mut transcript = String::new();
     // Warm up (answering the ConPTY handshake on Windows), then run echo.
@@ -335,7 +361,12 @@ fn keyed_sessions_list_and_reattach_after_frontend_restart() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let id = manager
-        .spawn(None, None, Vec::new(), 80, 24, Some("pane-aaa".to_string()))
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            key: Some("pane-aaa".to_string()),
+            ..Default::default()
+        })
         .unwrap();
     // Warm up, then produce output the reattach must recover.
     let mut handshake = Handshake::new();
@@ -394,9 +425,20 @@ fn keyed_sessions_list_and_reattach_after_frontend_restart() {
 
     // Keyed and unkeyed (daemon-style) sessions coexist in one listing.
     let id2 = manager
-        .spawn(None, None, Vec::new(), 80, 24, Some("pane-bbb".into()))
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            key: Some("pane-bbb".into()),
+            ..Default::default()
+        })
         .unwrap();
-    let id3 = manager.spawn(None, None, Vec::new(), 80, 24, None).unwrap();
+    let id3 = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(
         manager.list(),
         vec![
@@ -437,7 +479,7 @@ fn keyed_sessions_list_and_reattach_after_frontend_restart() {
 #[test]
 fn invalid_geometry_preserves_a_usable_session() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     for (cols, rows) in [
         (0, 24),
         (1, 24),
@@ -446,10 +488,22 @@ fn invalid_geometry_preserves_a_usable_session() {
         (1000, 1000),
         (u16::MAX, u16::MAX),
     ] {
-        assert!(manager.spawn(None, None, vec![], cols, rows, None).is_err());
+        assert!(manager
+            .spawn(SpawnOptions {
+                cols,
+                rows,
+                ..Default::default()
+            })
+            .is_err());
     }
     assert!(manager.pane_roots().is_empty());
-    let id = manager.spawn(None, None, vec![], 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     for (cols, rows) in [(0, 24), (1, 24), (80, 0), (1000, 1000)] {
         assert!(manager.resize(id, cols, rows).is_err());
         let snapshot = manager.snapshot(id).unwrap();
@@ -477,28 +531,53 @@ fn invalid_geometry_preserves_a_usable_session() {
 #[test]
 fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     #[cfg(unix)]
     let sibling = manager
-        .spawn(Some("sh".into()), None, vec![], 80, 24, None)
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     #[cfg(windows)]
     let sibling = manager
-        .spawn(
-            Some("powershell.exe".into()),
-            None,
-            vec!["-NoProfile".into()],
-            80,
-            24,
-            None,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("powershell.exe".into()),
+            args: vec!["-NoProfile".into()],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     #[cfg(unix)]
-    let parent = manager.spawn(Some("sh".into()), None, vec!["-c".into(),
-        "trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; echo CHILD:$$; while :; do sleep 1; done' & wait".into()], 80, 24, None).unwrap();
+    let parent = manager
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            args: vec![
+                "-c".into(),
+                "trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; echo CHILD:$$; while :; do sleep 1; done' & wait".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     #[cfg(windows)]
-    let parent = manager.spawn(Some("powershell.exe".into()), None, vec!["-NoProfile".into(), "-Command".into(),
-        "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; Write-Output ('CHILD:' + $p.Id); Start-Sleep 300".into()], 80, 24, None).unwrap();
+    let parent = manager
+        .spawn(SpawnOptions {
+            shell: Some("powershell.exe".into()),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; Write-Output ('CHILD:' + $p.Id); Start-Sleep 300".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
     let child = loop {
@@ -554,16 +633,34 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
 #[test]
 fn shutdown_terminates_live_sessions_and_refuses_late_spawns() {
     let (tx, _rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
-    manager.spawn(None, None, vec![], 80, 24, None).unwrap();
-    manager.spawn(None, None, vec![], 80, 24, None).unwrap();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+    manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     manager.shutdown().unwrap();
     assert!(
         manager.pane_roots().is_empty(),
         "live sessions escaped shutdown"
     );
     assert!(
-        manager.spawn(None, None, vec![], 80, 24, None).is_err(),
+        manager
+            .spawn(SpawnOptions {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            })
+            .is_err(),
         "closed manager admitted another process"
     );
 }
@@ -572,7 +669,7 @@ fn shutdown_terminates_live_sessions_and_refuses_late_spawns() {
 #[test]
 fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let mut nonce = [0u8; 8];
     getrandom::fill(&mut nonce).unwrap();
     let path = std::env::temp_dir().join(format!(
@@ -585,14 +682,13 @@ fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles(
         path.display(), path.display(), path.display()
     );
     let id = manager
-        .spawn(
-            Some("sh".into()),
-            None,
-            vec!["-c".into(), script],
-            80,
-            24,
-            None,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            args: vec!["-c".into(), script],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
@@ -636,14 +732,13 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
             .as_nanos()
     ));
     let error = manager
-        .spawn(
-            Some("sh".to_string()),
-            Some(missing.to_string_lossy().into_owned()),
-            Vec::new(),
-            80,
-            24,
-            None,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("sh".to_string()),
+            cwd: Some(missing.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap_err();
     assert!(
         error
@@ -654,14 +749,13 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
     let file_cwd = std::env::temp_dir().join(format!("ubra-file-cwd-{}", std::process::id()));
     std::fs::write(&file_cwd, b"not a directory").unwrap();
     let error = manager
-        .spawn(
-            Some("sh".to_string()),
-            Some(file_cwd.to_string_lossy().into_owned()),
-            Vec::new(),
-            80,
-            24,
-            None,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("sh".to_string()),
+            cwd: Some(file_cwd.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap_err();
     assert!(
         error
@@ -672,7 +766,15 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
     let _ = std::fs::remove_file(&file_cwd);
     assert!(manager.pane_roots().is_empty());
     let (shell, args) = echo_command();
-    let id = manager.spawn(shell, None, args, 80, 24, None).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = String::new();
     let mut handshake = Handshake::new();

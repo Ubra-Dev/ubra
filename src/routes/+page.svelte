@@ -115,6 +115,12 @@
       <FirstRun />
     {/if}
   {/if}
+  {#if store.daemonConnected === false}
+    <div class="daemon-banner" role="alert">
+      <span>Agent runtime disconnected — reconnecting…</span>
+      {#if store.daemonError}<span class="daemon-error">{store.daemonError}</span>{/if}
+    </div>
+  {/if}
   {#if store.settingsOpen}
     <SettingsModal />
   {/if}
@@ -172,6 +178,29 @@
     height: 100vh;
     color: var(--text-muted);
     font: 14px var(--font-ui);
+  }
+  .daemon-banner {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    background: var(--surface-bg);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    font: 12px var(--font-ui);
+  }
+  .daemon-error {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 60vw;
   }
   .shell {
     display: flex;

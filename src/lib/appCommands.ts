@@ -3,7 +3,7 @@ import { SHORTCUTS, type KeyShape, type ShortcutAction, type ShortcutMatch } fro
 export type AppCommand = ShortcutAction | "open-project" | "new-empty-workspace" |
   "close-workspace" | "restart-terminal" |
   "undo" | "redo" | "cut" | "copy" | "paste" | "select-all" |
-  "fullscreen" | "minimize" | "keyboard-shortcuts" | "documentation" | "report-issue" | "quit";
+  "fullscreen" | "minimize" | "keyboard-shortcuts" | "documentation" | "report-issue" | "quit" | "quit-stop-agents";
 
 export type CommandRequest = Omit<ShortcutMatch, "action"> & {
   action: AppCommand | "switch-workspace";
@@ -32,7 +32,7 @@ export interface CommandContext {
 
 export function canDispatch(request: CommandRequest, ctx: CommandContext): boolean {
   const action = request.action;
-  if (["quit", "minimize", "fullscreen", "documentation", "report-issue"].includes(action)) return true;
+  if (["quit", "quit-stop-agents", "minimize", "fullscreen", "documentation", "report-issue"].includes(action)) return true;
   if (action === "open-settings" || action === "keyboard-shortcuts") return !ctx.blocked || ctx.settingsOpen;
   if (["undo", "redo", "cut", "copy", "paste", "select-all"].includes(action)) {
     if (ctx.textFocus) {
@@ -89,17 +89,18 @@ const entry = (action: AppCommand, label: string, checked?: boolean): MenuEntry 
 export function menuGroups(isMac: boolean): MenuGroup[] {
   const settings = entry("open-settings", "Settings…");
   const quit = entry("quit", "Quit Ubra");
-  const about: MenuEntry = { id: "about", label: "About Ubra", system: "About" };
+  const quitStop = entry("quit-stop-agents", "Stop Agents and Quit");
+  const about: MenuEntry = { id: "about", label: "About Ubra", system: "About" as const };
   return [
     ...(isMac ? [{ label: "Ubra", items: [about, settings, null,
       { id: "services", label: "Services", system: "Services" as const }, null,
       { id: "hide", label: "Hide Ubra", system: "Hide" as const },
       { id: "hide-others", label: "Hide Others", system: "HideOthers" as const },
-      { id: "show-all", label: "Show All", system: "ShowAll" as const }, null, quit] }] : []),
+      { id: "show-all", label: "Show All", system: "ShowAll" as const }, null, quit, quitStop] }] : []),
     { label: "File", items: [entry("open-project", "Open Project Folder…"),
       entry("new-empty-workspace", "New Empty Workspace"), entry("new-tab", "New Tab"), null,
       entry("close-pane-or-tab", "Close Pane/Tab"), entry("close-workspace", "Close Workspace"),
-      ...(!isMac ? [null, settings, quit] : [])] },
+      ...(!isMac ? [null, settings, quit, quitStop] : [])] },
     { label: "Edit", items: [entry("undo", "Undo"), entry("redo", "Redo"), null,
       entry("cut", "Cut"), entry("copy", "Copy"), entry("paste", "Paste"), entry("select-all", "Select All"),
       null, entry("find-in-pane", "Find in Terminal…")] },

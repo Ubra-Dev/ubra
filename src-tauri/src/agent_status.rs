@@ -1,4 +1,5 @@
 //! One owner for status history. Client queries only read cached snapshots.
+use crate::agent_session::AgentSessionRef;
 use crate::agent_watch::{Observation, PaneAgent, Watcher};
 use crate::pty_manager::{AgentExit, PaneId, PtyManager};
 use std::collections::{BTreeMap, HashMap};
@@ -20,6 +21,10 @@ pub struct AgentStatus {
     pub agent_instance_id: Option<String>,
     pub reason: String,
     pub source: String,
+    /// Resumable session for restore-after-restart, when the CLI has
+    /// verified capture. Absent for the bare-command fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<AgentSessionRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -50,11 +55,49 @@ struct History {
     completed: bool,
 }
 
+/// Discovery slower than the 100ms tick: session files change rarely.
+const SESSION_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct SessionCacheEntry {
+    cli: String,
+    cwd: String,
+    found: Option<AgentSessionRef>,
+    checked: Duration,
+}
+
 #[derive(Default)]
 struct Tracker {
     histories: HashMap<PaneId, History>,
     disappearing: HashMap<PaneId, (History, Duration)>,
     event_sequence: u64,
+    session_home: Option<PathBuf>,
+    sessions: HashMap<PaneId, SessionCacheEntry>,
+}
+
+impl Tracker {
+    /// Cached session for an agent state: re-resolved when the identity
+    /// changes or the TTL lapses. `None` without a home dir (tests) or
+    /// for CLIs without verified capture.
+    fn session_ref(
+        &mut self,
+        id: PaneId,
+        agent: &PaneAgent,
+        now: Duration,
+    ) -> Option<AgentSessionRef> {
+        let (_, cli, cwd) = agent.identity()?;
+        let cwd = cwd?;
+        let home = self.session_home.as_ref()?;
+        let entry = self.sessions.entry(id).or_default();
+        if entry.cli != cli || entry.cwd != cwd || now.saturating_sub(entry.checked) >= SESSION_TTL
+        {
+            entry.cli = cli.into();
+            entry.cwd = cwd.into();
+            entry.found = crate::agent_session::discover_session(home, &entry.cli, &entry.cwd);
+            entry.checked = now;
+        }
+        entry.found.clone()
+    }
 }
 
 impl Tracker {
@@ -274,6 +317,12 @@ impl Tracker {
                 self.histories.insert(id, h);
             }
         }
+        // Cached session discovery rides along; a new ref publishes an
+        // update through the usual states comparison.
+        for (id, state) in states.iter_mut() {
+            state.session_ref = self.session_ref(*id, &state.state, now);
+        }
+        self.sessions.retain(|id, _| states.contains_key(id));
         (states, transitions)
     }
 }
@@ -291,6 +340,8 @@ fn status(o: &Observation, state: PaneAgent, reason: &str) -> AgentStatus {
             "unknown"
         }
         .into(),
+        // Enriched with cached discovery at the end of the tick.
+        session_ref: None,
     }
 }
 
@@ -333,7 +384,10 @@ impl AgentStatusService {
                     Some(dir) => Watcher::with_dir(dir),
                     None => Watcher::bundled(),
                 };
-                let mut tracker = Tracker::default();
+                let mut tracker = Tracker {
+                    session_home: Some(crate::daemon::home_dir()),
+                    ..Default::default()
+                };
                 let started = Instant::now();
                 // TEMP perf instrumentation (removed after the lag audit).
                 let perf_log = matches!(std::env::var("UBRA_PERF_LOG").as_deref(), Ok("1"));
@@ -510,6 +564,74 @@ mod tests {
             assert_eq!(states[&1].state.state_key(), "done");
             assert!(events.is_empty());
         }
+    }
+
+    #[test]
+    fn codex_states_carry_cached_session_refs() {
+        let home =
+            std::env::temp_dir().join(format!("ubra-tracker-session-{}", std::process::id()));
+        let dir = home.join(".codex").join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("rollout-1.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"id-1\",\"cwd\":\"/work/a\"}}\n",
+        )
+        .unwrap();
+        let codex = || Observation {
+            reason: "screen:working".into(),
+            state: PaneAgent::Working {
+                agent: "Codex".into(),
+                cli: "codex".into(),
+                cwd: Some("/work/a".into()),
+            },
+            instance_id: Some("instance-a".into()),
+            root_pid: 10,
+            matched_pid: Some(11),
+        };
+        let mut t = Tracker {
+            session_home: Some(home.clone()),
+            ..Default::default()
+        };
+        let (states, _) = t.update(
+            BTreeMap::from([(1, codex())]),
+            vec![],
+            Duration::from_millis(0),
+        );
+        let status = &states[&1];
+        assert_eq!(status.session_ref.as_ref().unwrap().value, "id-1");
+        // Wire shape the frontend parses.
+        let wire = serde_json::to_value(status).unwrap();
+        assert_eq!(wire["sessionRef"]["kind"], "id");
+        assert_eq!(wire["sessionRef"]["value"], "id-1");
+
+        // Identity change re-resolves; unknown CLIs read as absent.
+        let mut other = codex();
+        other.state = PaneAgent::Working {
+            agent: "Droid".into(),
+            cli: "droid".into(),
+            cwd: Some("/work/a".into()),
+        };
+        let (states, _) = t.update(
+            BTreeMap::from([(1, other)]),
+            vec![],
+            Duration::from_millis(1000),
+        );
+        assert!(states[&1].session_ref.is_none());
+
+        // No home dir (unit-test trackers) disables discovery entirely.
+        let mut bare = Tracker::default();
+        let (states, _) = bare.update(
+            BTreeMap::from([(1, codex())]),
+            vec![],
+            Duration::from_millis(0),
+        );
+        assert!(states[&1].session_ref.is_none());
+        assert!(!serde_json::to_value(&states[&1])
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("sessionRef"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

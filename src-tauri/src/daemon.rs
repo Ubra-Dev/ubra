@@ -12,7 +12,7 @@
 //! A lagging consumer is disconnected rather than silently dropping bytes.
 
 use crate::agent_status::AgentStatusService;
-use crate::pty_manager::{PaneId, PtyEventSink, PtyManager};
+use crate::pty_manager::{PaneId, PtyEventSink, PtyManager, SpawnOptions};
 use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
@@ -38,6 +38,7 @@ pub const MAX_QUEUE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUE_MESSAGES: usize = 256;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 pub const PORT_FILE: &str = "daemon.json";
 pub const AUTH_FILE: &str = "daemon.auth";
@@ -56,6 +57,13 @@ pub struct Request {
     pub proof: Option<String>,
     #[serde(default)]
     pub pane: Option<PaneId>,
+    /// Stable caller identity for later reattach (GUI pane node id).
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Terminal query responder. Defaults to true; the GUI passes false so
+    /// its renderer answers device queries without competition.
+    #[serde(default)]
+    pub headless: Option<bool>,
     #[serde(default)]
     pub data: Option<String>,
     #[serde(default)]
@@ -782,7 +790,7 @@ pub fn app_data_dir() -> PathBuf {
     )
 }
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
@@ -881,7 +889,7 @@ pub struct DaemonCore {
 impl DaemonCore {
     pub fn new(rules_dir: Option<PathBuf>, state_dir: PathBuf) -> Arc<Self> {
         let peers = Arc::new(Mutex::new(HashMap::new()));
-        let manager = Arc::new(PtyManager::new_headless(Arc::new(DaemonSink {
+        let manager = Arc::new(PtyManager::new(Arc::new(DaemonSink {
             peers: peers.clone(),
         })));
         let status_peers = peers.clone();
@@ -899,7 +907,7 @@ impl DaemonCore {
                 .to_string(),
             );
         });
-        Arc::new(Self {
+        let core = Arc::new(Self {
             manager,
             statuses,
             peers,
@@ -907,7 +915,20 @@ impl DaemonCore {
             connections: AtomicUsize::new(0),
             spawn_guard: Mutex::new(()),
             state_dir,
-        })
+        });
+        // Periodic history writer; exit and shutdown saves cover the gaps.
+        // Sleeps forever when no history dir is set (tests, CLI-only use).
+        let history_manager = Arc::clone(&core.manager);
+        thread::spawn(move || loop {
+            thread::sleep(HISTORY_SAVE_INTERVAL);
+            history_manager.save_history();
+        });
+        core
+    }
+
+    /// Durable per-key screen history for GUI reattach after restarts.
+    pub fn set_history_dir(&self, dir: PathBuf) {
+        self.manager.set_history_dir(dir);
     }
 }
 
@@ -1041,14 +1062,15 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             if core.manager.pane_roots().len() >= MAX_PANES {
                 return Action::Respond(err(id, "pane limit reached"));
             }
-            match core.manager.spawn(
-                req.shell.clone(),
-                req.cwd.clone(),
-                req.args.clone().unwrap_or_default(),
-                req.cols.unwrap_or(80),
-                req.rows.unwrap_or(24),
-                None,
-            ) {
+            match core.manager.spawn(SpawnOptions {
+                shell: req.shell.clone(),
+                cwd: req.cwd.clone(),
+                args: req.args.clone().unwrap_or_default(),
+                cols: req.cols.unwrap_or(80),
+                rows: req.rows.unwrap_or(24),
+                key: req.key.clone(),
+                headless: req.headless.unwrap_or(true),
+            }) {
                 Ok(pane) => respond(serde_json::json!({"ok":true,"pane":pane})),
                 Err(e) => Action::Respond(err(id, e)),
             }
@@ -1083,6 +1105,22 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
             Err(e) => Action::Respond(err(id, e)),
         },
         "panes" => respond(serde_json::json!({"ok": true, "panes": core.manager.pane_roots()})),
+        "pty_list" => respond(serde_json::json!({"ok": true, "sessions": core.manager.list()})),
+        "pty_snapshot" => match need_pane(req)
+            .and_then(|pane| core.manager.snapshot(pane).map_err(|e| e.to_string()))
+        {
+            Ok(snapshot) => respond(serde_json::json!({"ok": true, "snapshot": snapshot})),
+            Err(e) => Action::Respond(err(id, e)),
+        },
+        "pty_history" => match req.key.clone() {
+            Some(key) => match crate::pty_manager::validate_session_key(&key) {
+                Ok(()) => respond(
+                    serde_json::json!({"ok": true, "history": core.manager.load_history(&key)}),
+                ),
+                Err(e) => Action::Respond(err(id, e)),
+            },
+            None => Action::Respond(err(id, "missing \"key\"")),
+        },
         "agent_states" => {
             let snapshot = core.statuses.snapshot();
             let states = snapshot.states;
@@ -1417,6 +1455,7 @@ fn shutdown_now(core: &DaemonCore) -> ! {
 pub struct DaemonArgs {
     pub state_dir: Option<PathBuf>,
     pub rules_dir: Option<PathBuf>,
+    pub history_dir: Option<PathBuf>,
     pub port: u16,
 }
 
@@ -1424,6 +1463,7 @@ pub fn parse_daemon_args(args: &[String]) -> Result<DaemonArgs, String> {
     let mut out = DaemonArgs {
         state_dir: None,
         rules_dir: None,
+        history_dir: None,
         port: 0,
     };
     let mut i = 0;
@@ -1439,6 +1479,12 @@ pub fn parse_daemon_args(args: &[String]) -> Result<DaemonArgs, String> {
                 i += 1;
                 out.rules_dir = Some(PathBuf::from(
                     args.get(i).ok_or("missing value for --rules-dir")?,
+                ));
+            }
+            "--history-dir" => {
+                i += 1;
+                out.history_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("missing value for --history-dir")?,
                 ));
             }
             "--port" => {
@@ -1458,7 +1504,7 @@ pub fn parse_daemon_args(args: &[String]) -> Result<DaemonArgs, String> {
 }
 
 pub const DAEMON_USAGE: &str =
-    "usage: ubra-daemon [--state-dir DIR] [--rules-dir DIR] [--port PORT]";
+    "usage: ubra-daemon [--state-dir DIR] [--rules-dir DIR] [--port PORT] [--history-dir DIR]";
 
 #[cfg(test)]
 mod tests {
@@ -1571,6 +1617,251 @@ mod tests {
     }
 
     #[test]
+    fn keyed_spawn_lists_with_key_and_snapshot_repaints() {
+        let core = core();
+        let spawn: Request = serde_json::from_str(
+            "{\"op\":\"pty_spawn\",\"key\":\"pane-gui-1\",\"headless\":false}",
+        )
+        .unwrap();
+        let v = responded(dispatch(&core, &spawn));
+        assert_eq!(v["ok"], true);
+        let pane = v["pane"].as_u64().unwrap() as PaneId;
+        assert_eq!(core.manager.session_headless(pane), Some(false));
+
+        let sessions = responded(dispatch(&core, &req("pty_list")))["sessions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["id"], pane);
+        assert_eq!(sessions[0]["key"], "pane-gui-1");
+
+        let mut snap = req("pty_snapshot");
+        snap.pane = Some(pane);
+        let shot = responded(dispatch(&core, &snap));
+        assert_eq!(shot["ok"], true);
+        assert!(shot["snapshot"]["data"].is_string());
+        assert!(shot["snapshot"]["sequence"].as_u64().is_some());
+        assert_eq!(shot["snapshot"]["cols"], 80);
+        assert_eq!(shot["snapshot"]["rows"], 24);
+    }
+
+    #[test]
+    fn unkeyed_spawn_defaults_to_headless_without_key() {
+        let core = core();
+        let v = responded(dispatch(&core, &req("pty_spawn")));
+        assert_eq!(v["ok"], true);
+        let pane = v["pane"].as_u64().unwrap() as PaneId;
+        assert_eq!(core.manager.session_headless(pane), Some(true));
+        let sessions = responded(dispatch(&core, &req("pty_list")))["sessions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0]["key"].is_null());
+    }
+
+    #[test]
+    fn spawn_rejects_bad_keys_and_snapshot_rejects_dead_panes() {
+        let core = core();
+        for key in ["", "has space", "has/slash", "semi;colon", &"k".repeat(129)] {
+            let spawn: Request =
+                serde_json::from_str(&format!("{{\"op\":\"pty_spawn\",\"key\":\"{key}\"}}"))
+                    .unwrap();
+            let v = responded(dispatch(&core, &spawn));
+            assert_eq!(v["ok"], false, "key {key:?} must be rejected");
+        }
+        // Rejected spawns leave no sessions behind.
+        let sessions = responded(dispatch(&core, &req("pty_list")))["sessions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(sessions.is_empty());
+
+        let mut snap = req("pty_snapshot");
+        snap.pane = Some(424242);
+        assert_eq!(responded(dispatch(&core, &snap))["ok"], false);
+        assert_eq!(
+            responded(dispatch(&core, &req("pty_snapshot")))["ok"],
+            false
+        );
+    }
+
+    fn history_core() -> (Arc<DaemonCore>, PathBuf, PathBuf) {
+        let scratch = scratch_dir();
+        let dir = scratch.join("history");
+        let core = core();
+        core.set_history_dir(dir.clone());
+        (core, dir, scratch)
+    }
+
+    fn screen_until(core: &DaemonCore, pane: PaneId, needle: &str) {
+        let mut read = req("pty_read");
+        read.pane = Some(pane);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let screen = responded(dispatch(core, &read))["screen"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            if screen.contains(needle) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "screen never showed {needle:?}: {screen:?}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn spawn_keyed(core: &DaemonCore, key: &str) -> PaneId {
+        let spawn: Request =
+            serde_json::from_str(&format!("{{\"op\":\"pty_spawn\",\"key\":\"{key}\"}}")).unwrap();
+        let v = responded(dispatch(core, &spawn));
+        assert_eq!(v["ok"], true);
+        v["pane"].as_u64().unwrap() as PaneId
+    }
+
+    fn write_text(core: &DaemonCore, pane: PaneId, data: &str) {
+        let mut write = req("pty_write");
+        write.pane = Some(pane);
+        write.data = Some(data.to_string());
+        assert_eq!(responded(dispatch(core, &write))["ok"], true);
+    }
+
+    #[test]
+    fn history_saves_keyed_screens_and_serves_them() {
+        let (core, dir, scratch) = history_core();
+        let pane = spawn_keyed(&core, "pane-hist-1");
+        write_text(&core, pane, "echo marker-hist-1\n");
+        screen_until(&core, pane, "marker-hist-1");
+        core.manager.save_history();
+
+        let snap = core
+            .manager
+            .load_history("pane-hist-1")
+            .expect("history saved");
+        assert!(snap.data.contains("marker-hist-1"), "got: {:?}", snap.data);
+        assert!(dir.join("pane-hist-1.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(dir.join("pane-hist-1.json"))
+                    .unwrap()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        }
+
+        let hist: Request =
+            serde_json::from_str("{\"op\":\"pty_history\",\"key\":\"pane-hist-1\"}").unwrap();
+        let served = responded(dispatch(&core, &hist));
+        assert_eq!(served["ok"], true);
+        assert!(served["history"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("marker-hist-1"));
+
+        let missing: Request =
+            serde_json::from_str("{\"op\":\"pty_history\",\"key\":\"pane-nope\"}").unwrap();
+        let v = responded(dispatch(&core, &missing));
+        assert_eq!(v["ok"], true);
+        assert!(v["history"].is_null());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn history_kill_and_shutdown_persist_without_a_save_tick() {
+        let (core, _dir, scratch) = history_core();
+        let pane = spawn_keyed(&core, "pane-hist-exit");
+        write_text(&core, pane, "echo marker-hist-exit\n");
+        screen_until(&core, pane, "marker-hist-exit");
+
+        let mut kill = req("pty_kill");
+        kill.pane = Some(pane);
+        assert_eq!(responded(dispatch(&core, &kill))["ok"], true);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match core.manager.load_history("pane-hist-exit") {
+                Some(snap) if snap.data.contains("marker-hist-exit") => break,
+                _ if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("exit never saved history: {other:?}"),
+            }
+        }
+
+        let pane2 = spawn_keyed(&core, "pane-hist-shutdown");
+        write_text(&core, pane2, "echo marker-hist-shutdown\n");
+        screen_until(&core, pane2, "marker-hist-shutdown");
+        core.manager.shutdown().unwrap();
+        let snap = core.manager.load_history("pane-hist-shutdown").unwrap();
+        assert!(snap.data.contains("marker-hist-shutdown"));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn history_absent_without_dir_and_rejects_bad_reads() {
+        let core = core();
+        let pane = spawn_keyed(&core, "pane-hist-off");
+        core.manager.save_history();
+        assert!(core.manager.load_history("pane-hist-off").is_none());
+        let hist: Request =
+            serde_json::from_str("{\"op\":\"pty_history\",\"key\":\"pane-hist-off\"}").unwrap();
+        let v = responded(dispatch(&core, &hist));
+        assert_eq!(v["ok"], true);
+        assert!(v["history"].is_null());
+
+        assert_eq!(responded(dispatch(&core, &req("pty_history")))["ok"], false);
+        let bad: Request =
+            serde_json::from_str("{\"op\":\"pty_history\",\"key\":\"../escape\"}").unwrap();
+        assert_eq!(responded(dispatch(&core, &bad))["ok"], false);
+        assert!(core.manager.load_history("../escape").is_none());
+        let mut kill = req("pty_kill");
+        kill.pane = Some(pane);
+        let _ = responded(dispatch(&core, &kill));
+    }
+
+    #[test]
+    fn history_load_tolerates_corrupt_and_oversize_files() {
+        let (_core, dir, scratch) = history_core();
+        // Reach the loader through a second manager on the same dir, as a
+        // restarted daemon would.
+        let core = core();
+        core.set_history_dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pane-bad.json"), b"{not json").unwrap();
+        assert!(core.manager.load_history("pane-bad").is_none());
+        std::fs::write(dir.join("pane-big.json"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+        assert!(core.manager.load_history("pane-big").is_none());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn history_prune_keeps_fresh_and_ignores_foreign_files() {
+        use crate::pty_manager::prune_history_older_than;
+
+        let (core, dir, scratch) = history_core();
+        let pane = spawn_keyed(&core, "pane-hist-fresh");
+        core.manager.save_history();
+        prune_history_older_than(&dir, Duration::from_secs(30 * 24 * 60 * 60));
+        assert!(dir.join("pane-hist-fresh.json").is_file());
+        // Foreign files are never history, however stale.
+        std::fs::write(dir.join("notes.txt"), b"keep me").unwrap();
+        prune_history_older_than(&dir, Duration::ZERO);
+        assert!(dir.join("notes.txt").is_file());
+        assert!(!dir.join("pane-hist-fresh.json").exists());
+        let mut kill = req("pty_kill");
+        kill.pane = Some(pane);
+        let _ = responded(dispatch(&core, &kill));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
     fn shutdown_action_carries_ok() {
         match dispatch(&core(), &req("shutdown")) {
             Action::Shutdown(line) => {
@@ -1613,6 +1904,8 @@ mod tests {
             "/tmp/s",
             "--rules-dir",
             "/tmp/r",
+            "--history-dir",
+            "/tmp/h",
             "--port",
             "1234",
         ]
@@ -1624,6 +1917,7 @@ mod tests {
             DaemonArgs {
                 state_dir: Some(PathBuf::from("/tmp/s")),
                 rules_dir: Some(PathBuf::from("/tmp/r")),
+                history_dir: Some(PathBuf::from("/tmp/h")),
                 port: 1234,
             }
         );
@@ -1632,11 +1926,13 @@ mod tests {
             DaemonArgs {
                 state_dir: None,
                 rules_dir: None,
+                history_dir: None,
                 port: 0,
             }
         );
         assert!(parse_daemon_args(&["--port".to_string()]).is_err());
         assert!(parse_daemon_args(&["--port".to_string(), "x".to_string()]).is_err());
+        assert!(parse_daemon_args(&["--history-dir".to_string()]).is_err());
         assert!(parse_daemon_args(&["--bogus".to_string()]).is_err());
     }
 

@@ -2,6 +2,7 @@
 //! agent watcher; see [`ubra_lib::daemon`] for the wire protocol.
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::time::Duration;
 use ubra_lib::daemon::{
     acquire_startup_lock, app_data_dir, connect_authenticated, default_state_dir, new_auth_token,
@@ -90,10 +91,15 @@ fn main() {
     let rules_dir = args
         .rules_dir
         .unwrap_or_else(|| app_data_dir().join("agent-detection"));
+    // Durable screen history for GUI reattach; flag, env (tests), else app data.
+    let history_dir = args.history_dir.or_else(|| {
+        std::env::var("UBRA_HISTORY_DIR")
+            .ok()
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    });
+    let core = DaemonCore::new(Some(rules_dir), state_dir);
+    core.set_history_dir(history_dir.unwrap_or_else(|| app_data_dir().join("terminal-history")));
     eprintln!("ubra-daemon: listening on 127.0.0.1:{port} (protocol {PROTOCOL_VERSION})");
-    serve(
-        DaemonCore::new(Some(rules_dir), state_dir),
-        listener,
-        auth_token,
-    );
+    serve(core, listener, auth_token);
 }

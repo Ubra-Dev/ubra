@@ -237,6 +237,15 @@ class AgentStore {
       this.lastAgent[node] = {
         agent: state.agent, cli: state.cli, cwd: state.cwd ?? this.lastAgent[node]?.cwd,
       };
+      // Persist captured sessions for resume-after-restart; the stamp
+      // reports changes so idle updates never dirty the layout.
+      const ref = state.sessionRef;
+      if (
+        state.cli && ref?.value &&
+        store.stampPaneAgentSession(node, state.cli, ref.value)
+      ) {
+        store.saveSoon();
+      }
     }
   }
   /** Emit an agent-ended event when a session start was observed. */

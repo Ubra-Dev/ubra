@@ -28,6 +28,15 @@
 
   let runId = $state(0);
   let exited = $state(false);
+  // Daemon (re)connects remount every terminal; a stale exit overlay must
+  // not cover the readopted session.
+  let seenEpoch = 0;
+  $effect(() => {
+    if (store.daemonEpoch !== seenEpoch) {
+      seenEpoch = store.daemonEpoch;
+      exited = false;
+    }
+  });
   let editing = $state(false);
   let draft = $state("");
   let menu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
@@ -332,7 +341,7 @@
     </span>
   </div>
   <div class="term-wrap">
-    {#key runId}
+    {#key `${runId}:${store.daemonEpoch}`}
       <TerminalPane
         sessionKey={node.id}
         cwd={node.cwd}

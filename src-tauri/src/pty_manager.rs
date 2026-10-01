@@ -9,10 +9,17 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
+
+/// Keyed screen snapshots older than this are pruned. Liveness never
+/// prunes: history exists precisely for sessions that are gone.
+const HISTORY_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// History files are small emulator dumps; anything larger is not ours.
+const HISTORY_FILE_LIMIT: u64 = 2 * 1024 * 1024 + 1;
 
 /// Opaque pane identifier handed to the frontend.
 pub type PaneId = u32;
@@ -35,7 +42,7 @@ pub struct PtyExit {
     pub code: Option<i32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtySnapshot {
     pub data: String,
@@ -45,7 +52,7 @@ pub struct PtySnapshot {
 }
 
 /// Live session identity for frontend reattach and orphan sweeps.
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PtySessionInfo {
     pub id: PaneId,
@@ -70,12 +77,41 @@ pub fn validate_dimensions(cols: u16, rows: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Session keys double as history filenames, so the charset is restricted
+/// to filename-safe characters. GUI pane ids (`pane-<uuid>`) comply.
+pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !key.is_empty()
+            && key.len() <= 128
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
+        "session key must be 1..=128 ASCII letters, digits, '-' or '_'"
+    );
+    Ok(())
+}
+
+/// Parameters for [`PtyManager::spawn`]. `cols`/`rows` are required and
+/// validated; everything else defaults to an unkeyed attached shell pane.
+/// The daemon passes its own explicit `headless` per request.
+#[derive(Debug, Default)]
+pub struct SpawnOptions {
+    pub shell: Option<String>,
+    pub cwd: Option<String>,
+    pub args: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub key: Option<String>,
+    pub headless: bool,
+}
+
 struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PID of the process spawned directly in the PTY (0 when unknown).
     root_pid: u32,
+    history_dir: Option<PathBuf>,
     /// In-memory emulation of the pane's screen, fed every output chunk.
     /// Backs agent detection snapshots; rendering stays in the frontend.
     screen: Mutex<ScreenState>,
@@ -106,26 +142,16 @@ pub struct PtyManager {
     activity: mpsc::SyncSender<()>,
     activity_rx: Mutex<Option<mpsc::Receiver<()>>>,
     exits: Arc<Mutex<VecDeque<AgentExit>>>,
-    headless: bool,
     lifecycle: Mutex<()>,
     closing: AtomicBool,
+    history_dir: Mutex<Option<PathBuf>>,
 }
 
 impl PtyManager {
     pub fn new(sink: Arc<dyn PtyEventSink>) -> Self {
-        Self::with_headless(sink, false)
-    }
-
-    /// A headless pane has one query responder, never competing with xterm.
-    pub fn new_headless(sink: Arc<dyn PtyEventSink>) -> Self {
-        Self::with_headless(sink, true)
-    }
-
-    fn with_headless(sink: Arc<dyn PtyEventSink>, headless: bool) -> Self {
         let (activity, activity_rx) = mpsc::sync_channel(1);
         Self {
             sink,
-            headless,
             lifecycle: Mutex::new(()),
             closing: AtomicBool::new(false),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -133,7 +159,52 @@ impl PtyManager {
             activity,
             activity_rx: Mutex::new(Some(activity_rx)),
             exits: Arc::new(Mutex::new(VecDeque::new())),
+            history_dir: Mutex::new(None),
         }
+    }
+
+    /// Durable per-key screen history. Unset disables persistence: the GUI
+    /// test manager and any future ephemeral managers keep no history.
+    pub fn set_history_dir(&self, dir: PathBuf) {
+        *self.history_dir.lock() = Some(dir);
+    }
+
+    /// Snapshot every keyed session to the history dir and prune stale
+    /// files. Best-effort throughout: history must never fail a pane.
+    pub fn save_history(&self) {
+        let Some(dir) = self.history_dir.lock().clone() else {
+            return;
+        };
+        let live: Vec<(String, PtySnapshot)> = self
+            .sessions
+            .lock()
+            .values()
+            .filter_map(|session| {
+                let key = session.key.clone()?;
+                let snapshot = session.screen.lock().snapshot();
+                Some((key, snapshot))
+            })
+            .collect();
+        for (key, snapshot) in live {
+            save_history_file(&dir, &key, &snapshot);
+        }
+        prune_history_older_than(&dir, HISTORY_MAX_AGE);
+    }
+
+    /// Last saved snapshot for `key`, if any. Missing, corrupt, oversize,
+    /// or misplaced history reads as absent: the pane simply starts blank.
+    pub fn load_history(&self, key: &str) -> Option<PtySnapshot> {
+        if validate_session_key(key).is_err() {
+            return None;
+        }
+        let dir = self.history_dir.lock().clone()?;
+        let file = std::fs::File::open(dir.join(format!("{key}.json"))).ok()?;
+        let mut bytes = Vec::new();
+        file.take(HISTORY_FILE_LIMIT).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 >= HISTORY_FILE_LIMIT {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
     }
 
     pub fn take_activity_receiver(&self) -> Option<mpsc::Receiver<()>> {
@@ -155,16 +226,24 @@ impl PtyManager {
     /// duplicate key spawns a second session rather than killing the first,
     /// since killing on collision could destroy a live agent during a
     /// double-mount race. Reattach picks the lowest id for a key.
-    pub fn spawn(
-        &self,
-        shell: Option<String>,
-        cwd: Option<String>,
-        args: Vec<String>,
-        cols: u16,
-        rows: u16,
-        key: Option<String>,
-    ) -> anyhow::Result<PaneId> {
+    ///
+    /// `headless` selects the terminal query responder: a headless pane has
+    /// one responder (never competing with xterm), while an attached pane
+    /// leaves device queries to its renderer.
+    pub fn spawn(&self, options: SpawnOptions) -> anyhow::Result<PaneId> {
+        let SpawnOptions {
+            shell,
+            cwd,
+            args,
+            cols,
+            rows,
+            key,
+            headless,
+        } = options;
         validate_dimensions(cols, rows)?;
+        if let Some(key) = &key {
+            validate_session_key(key)?;
+        }
         if let Some(cwd) = &cwd {
             match std::fs::metadata(cwd) {
                 Ok(metadata) => {
@@ -224,8 +303,9 @@ impl PtyManager {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             root_pid,
+            history_dir: self.history_dir.lock().clone(),
             owner,
-            headless: self.headless,
+            headless,
             screen: Mutex::new(ScreenState::new(rows, cols)),
             size: Mutex::new((cols, rows)),
             deliberate_close: AtomicBool::new(false),
@@ -351,6 +431,11 @@ impl PtyManager {
         sessions
     }
 
+    #[cfg(test)]
+    pub(crate) fn session_headless(&self, id: PaneId) -> Option<bool> {
+        self.sessions.lock().get(&id).map(|s| s.headless)
+    }
+
     /// Snapshot of live panes and their root PIDs for the agent watcher.
     pub fn pane_roots(&self) -> Vec<crate::agent_watch::PaneRoots> {
         self.sessions
@@ -386,6 +471,8 @@ impl PtyManager {
     /// Called before native application exit, which may bypass Rust drops.
     pub fn shutdown(&self) -> anyhow::Result<()> {
         let _lifecycle = self.lifecycle.lock();
+        // Screens are still live: readers may not run before process exit.
+        self.save_history();
         self.closing.store(true, Ordering::Release);
         let sessions: Vec<_> = self
             .sessions
@@ -421,6 +508,81 @@ impl Drop for PtyManager {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
             eprintln!("ubra: pane cleanup on drop failed: {error}");
+        }
+    }
+}
+
+fn save_history_file(dir: &std::path::Path, key: &str, snapshot: &PtySnapshot) {
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let Ok(bytes) = serde_json::to_vec(snapshot) else {
+        return;
+    };
+    // Terminal output can carry secrets: current-user-only dir and files
+    // on Unix (Windows inherits the user-profile ACL). Best-effort like
+    // everything else here; a failure simply skips this save.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .is_err()
+        {
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    let tmp = dir.join(format!(
+        ".{key}.{}.{}.tmp",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let done = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?
+                .write_all(&bytes)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, &bytes)?;
+        }
+        std::fs::rename(&tmp, dir.join(format!("{key}.json")))
+    })();
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+pub(crate) fn prune_history_older_than(dir: &std::path::Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_history = entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("tmp"));
+        if !is_history {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|mtime| mtime.elapsed().is_ok_and(|age| age > max_age));
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -530,6 +692,9 @@ fn reader_loop(
                 deliberate: false,
             },
         );
+    }
+    if let (Some(dir), Some(key)) = (session.history_dir.clone(), session.key.clone()) {
+        save_history_file(&dir, &key, &session.screen.lock().snapshot());
     }
     let _ = activity.try_send(());
     sink.exited(id, success, code);
