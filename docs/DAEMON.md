@@ -66,6 +66,15 @@ down afterward. The headless interface remains experimental; native Windows ACL,
 cross-user authentication and ConPTY execution must pass platform release gates
 rather than being inferred from Unix tests.
 
+Two checkouts (or a fork sharing the `ubra-daemon` binary name and default
+state dir) cannot run daemons concurrently: the second daemon exits with
+`already running`, and a GUI on a different protocol version reports the
+daemon unavailable instead of adopting the foreign one. Run one side with a
+fresh `UBRA_STATE_DIR` (honored by the GUI and `ubra-cli`; the daemon itself
+takes `--state-dir`). In dev, `tauri dev` builds the `ubra-daemon`/`ubra-cli`
+sidecars first via `beforeDevCommand`; the GUI spawns the daemon sibling from
+`src-tauri/target/debug/`.
+
 ## GUI runtime
 
 On startup the GUI probes the daemon port file and spawns a detached daemon
