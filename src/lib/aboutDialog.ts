@@ -4,7 +4,7 @@ import type { AboutMetadata } from "@tauri-apps/api/menu";
 export const ABOUT_COPYRIGHT = "© 2026 Ubra";
 export const ABOUT_BLURB = "Agent runtime desktop app";
 export const ABOUT_LICENSE = "MIT";
-export const ABOUT_WEBSITE = "https://github.com/stackwares/ubra-tauri";
+export const ABOUT_WEBSITE = "https://github.com/Ubra-Dev/ubra";
 export const ABOUT_WEBSITE_LABEL = "GitHub";
 
 /**

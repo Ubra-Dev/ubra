@@ -19,11 +19,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/stackwares/ubra-tauri.git"
+    "url": "git+https://github.com/Ubra-Dev/ubra.git"
   },
-  "homepage": "https://github.com/stackwares/ubra-tauri",
+  "homepage": "https://github.com/Ubra-Dev/ubra",
   "bugs": {
-    "url": "https://github.com/stackwares/ubra-tauri/issues"
+    "url": "https://github.com/Ubra-Dev/ubra/issues"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

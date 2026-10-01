@@ -9,7 +9,7 @@
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Instead, open a
-[private security advisory](https://github.com/stackwares/ubra-tauri/security/advisories/new)
+[private security advisory](https://github.com/Ubra-Dev/ubra/security/advisories/new)
 or email `dev@stackwares.com`.
 
 Include: what you did, what you expected, what happened, and the OS / app

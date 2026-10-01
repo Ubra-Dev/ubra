@@ -1,7 +1,7 @@
 # Releasing Ubra
 
 Maintainer guide for cutting a signed, smoke-tested release. End users:
-see the [README](../README.md) and [Releases](https://github.com/stackwares/ubra-tauri/releases).
+see the [README](../README.md) and [Releases](https://github.com/Ubra-Dev/ubra/releases).
 
 ## Release gates and native smoke
 

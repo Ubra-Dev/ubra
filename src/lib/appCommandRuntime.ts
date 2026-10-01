@@ -9,7 +9,7 @@ import { store } from "./store.svelte";
 import { terminalCommands } from "./terminalCommands";
 import { toasts } from "./toasts.svelte.ts";
 
-const REPO_URL = "https://github.com/stackwares/ubra-tauri";
+const REPO_URL = "https://github.com/Ubra-Dev/ubra";
 
 function focusedElement(): HTMLElement | null {
   const el = document.activeElement;

@@ -406,7 +406,7 @@
       .catch((e) => console.error("ubra: test sound failed", e));
   }
 
-  const REPO_URL = "https://github.com/stackwares/ubra-tauri";
+  const REPO_URL = "https://github.com/Ubra-Dev/ubra";
 
   function openOnboarding(): void {
     store.settingsOpen = false;

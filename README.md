@@ -1,8 +1,10 @@
 # Ubra
 
-[![CI](https://github.com/stackwares/ubra-tauri/actions/workflows/ci.yml/badge.svg)](https://github.com/stackwares/ubra-tauri/actions/workflows/ci.yml)
+<img src="static/logo.png" width="600" alt="Ubra logo">
+
+[![CI](https://github.com/Ubra-Dev/ubra/actions/workflows/ci.yml/badge.svg)](https://github.com/Ubra-Dev/ubra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/stackwares/ubra-tauri/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/Ubra-Dev/ubra/releases)
 [![Tauri](https://img.shields.io/badge/desktop-Tauri%20v2-ffc131.svg)](https://v2.tauri.app/)
 [![Svelte](https://img.shields.io/badge/web-Svelte%205-ff3e00.svg)](https://svelte.dev/)
 
@@ -40,7 +42,7 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 ## Install
 
 Download the latest bundle for your OS from
-[Releases](https://github.com/stackwares/ubra-tauri/releases).
+[Releases](https://github.com/Ubra-Dev/ubra/releases).
 
 Or build from source:
 

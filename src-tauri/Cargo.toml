@@ -5,7 +5,7 @@ default-run = "ubra"
 description = "Agent runtime desktop app"
 authors = ["Ubra"]
 license = "MIT"
-repository = "https://github.com/stackwares/ubra-tauri"
+repository = "https://github.com/Ubra-Dev/ubra"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
