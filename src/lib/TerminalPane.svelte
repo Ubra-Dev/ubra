@@ -385,33 +385,10 @@
       lease.restoreTaken = true;
       onSpawn?.(id, lease.attached, firstDelivery);
       if (snapshot) term.resize(snapshot.cols, snapshot.rows);
-      // Fresh mounts after a daemon restart repaint the pane's last saved
-      // screen beneath the live one, so the terminal feels continuous.
-      // Live events stay buffered until restore, so nothing paints ahead
-      // of the prelude. Best-effort: new panes simply have no history.
-      let prelude: string | null = null;
-      if (!lease.attached && firstDelivery) {
-        try {
-          const history = await invoke<TerminalSnapshot | null>("pty_history", {
-            key: sessionKey,
-          });
-          if (history?.data) prelude = history.data;
-        } catch {
-          // The pane starts blank; live output is unaffected.
-        }
-      }
       if (disposed || lease.cancelled) return;
       const restored = attachment.restore(id, snapshot);
-      if (prelude) term.write(prelude);
-      restored.chunks.forEach((chunk, index) => {
-        // The live snapshot's leading reset would wipe the prelude; drop
-        // it, since the prelude's own reset already cleared the renderer.
-        // Without a prelude (or snapshot) every chunk paints untouched.
-        const paint =
-          prelude && snapshot && index === 0 && chunk.startsWith("\x1bc")
-            ? chunk.slice(1)
-            : chunk;
-        term.write(paint);
+      restored.chunks.forEach((chunk) => {
+        term.write(chunk);
       });
       if (restored.exit) handleExit(restored.exit.success, restored.exit.code);
       else if (snapshotError) {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { acquireSession, closeSession, dropSession, evictDeadSessions, evictSessions } from "../src/lib/ptySessions.ts";
+import { acquireSession, closeSession, dropSession } from "../src/lib/ptySessions.ts";
 
 function deferred() {
   let resolve!: (id: number) => void;
@@ -55,38 +55,6 @@ describe("pane session ownership", () => {
     assert.equal(lease.attached, false);
     assert.equal(lease.restoreTaken, false);
     closeSession("flags");
-  });
-
-  it("eviction drops ownership without killing, and in-flight spawns self-clean", async () => {
-    const pending = deferred();
-    const killed: number[] = [];
-    const kill = async (id: number) => { killed.push(id); };
-    const live = acquireSession("evict-live", async () => 31, kill);
-    assert.equal(await live.ready, 31);
-    const flying = acquireSession("evict-flying", () => pending.promise, kill);
-    assert.deepEqual(evictSessions(["evict-live", "evict-flying", "evict-missing"]).map((l) => l.id), [31, null]);
-    // Resolved sessions are never killed by eviction; in-flight ones are
-    // reaped on resolution instead of leaking.
-    pending.resolve(32);
-    assert.equal(await flying.ready, 32);
-    assert.deepEqual(killed, [32]);
-    const replacement = acquireSession("evict-live", async () => 33, kill);
-    assert.equal(await replacement.ready, 33);
-    closeSession("evict-live");
-    assert.deepEqual(killed, [32, 33]);
-  });
-
-  it("dead-only eviction keeps resolved leases for readoption", async () => {
-    const kill = async () => {};
-    const live = acquireSession("dead-live", async () => 41, kill);
-    assert.equal(await live.ready, 41);
-    const dead = acquireSession("dead-dead", () => new Promise<number>(() => {}), kill);
-    assert.deepEqual(evictDeadSessions(["dead-live", "dead-dead"]), [dead]);
-    assert.equal(acquireSession("dead-live", async () => 99, kill), live);
-    const replacement = acquireSession("dead-dead", async () => 42, kill);
-    assert.equal(await replacement.ready, 42);
-    closeSession("dead-live");
-    closeSession("dead-dead");
   });
 
   it("failed spawn permits retry, while stale failure cannot clear replacement", async () => {

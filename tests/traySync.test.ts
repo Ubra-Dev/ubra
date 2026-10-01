@@ -11,7 +11,7 @@ import {
   type TrayPayload,
 } from "../src/lib/traySync.ts";
 
-const OPTIONS: TrayOptions = { daemonConnected: true, showTitle: true, showAgents: true };
+const OPTIONS: TrayOptions = { showTitle: true, showAgents: true };
 
 function group(wsName: string, agents: { node: string; status: Rollup; tab?: string; dir?: string; pane?: string }[]): WorkspaceAgents {
   return {
@@ -60,7 +60,7 @@ describe("tray payload", () => {
     assert.equal(payload.title, null);
     assert.deepEqual(payload.agents, []);
     assert.equal(payload.overflow, 0);
-    assert.equal(payload.tooltip, "No agents running\nRuntime: connected");
+    assert.equal(payload.tooltip, "No agents running");
   });
 
   it("collapses single-state counts to one phrase", () => {
@@ -115,12 +115,6 @@ describe("tray payload", () => {
     );
     assert.equal(payload.title, null);
     assert.equal(payload.header, "1 working");
-  });
-
-  it("labels the daemon link in every state", () => {
-    assert.equal(payloadFor([], { ...OPTIONS, daemonConnected: true }).daemonLine, "Runtime: connected");
-    assert.equal(payloadFor([], { ...OPTIONS, daemonConnected: false }).daemonLine, "Runtime: reconnecting…");
-    assert.equal(payloadFor([], { ...OPTIONS, daemonConnected: null }).daemonLine, "Runtime: connecting…");
   });
 
   it("scopes row context to tab and pane within one workspace", () => {

@@ -38,7 +38,12 @@ unsigned DMG can never ship silently. Set these repository secrets once:
 - `APPLE_CERTIFICATE` — base64 of the exported Developer ID Application `.p12`
 - `APPLE_CERTIFICATE_PASSWORD` — the `.p12` export password
 - `APPLE_SIGNING_IDENTITY` — e.g. `Developer ID Application: Name (TEAMID)`
-- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`
+- Notarization, exactly one route (API key preferred; the build refuses
+  both, and either route needs the signing secrets above):
+  - `APPLE_API_KEY_P8` — base64 of the App Store Connect `AuthKey_*.p8`
+  - `APPLE_API_KEY` — the Key ID from the keys table (not the file)
+  - `APPLE_API_ISSUER` — the issuer ID shown above the keys table
+  - or `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`
 - `TAURI_SIGNING_PRIVATE_KEY` (+ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) — see below
 
 Generate the updater keypair once with `npm run tauri signer generate -w
@@ -48,9 +53,8 @@ as `TAURI_SIGNING_PRIVATE_KEY`. Never commit the private key; losing it breaks
 the update chain for installed apps, since each release's bundles are verified
 against the embedded public key.
 
-The workflow builds separate arm64 and Intel macOS targets (one universal
-build is not possible: the Tauri CLI only lipo-merges the main binary, while
-Ubra must bundle the sibling `ubra-daemon` and `ubra-cli` binaries), fails
+The workflow builds separate arm64 and Intel macOS targets (kept as
+per-arch legs rather than one universal build), fails
 when the tag does not match `tauri.conf.json`'s version, and publishes
 `latest.json` alongside the bundles so installed apps can update from
 Settings → Updates.

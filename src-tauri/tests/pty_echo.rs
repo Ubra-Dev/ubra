@@ -28,8 +28,8 @@ impl PtyEventSink for ChannelSink {
 ///
 /// ConPTY — and shells like PSReadLine — emit `ESC[6n` at startup and withhold
 /// all further output until the terminal replies with a cursor position
-/// report. In production xterm.js answers via `pty_write`; these headless
-/// tests must play the terminal themselves, or the pane looks permanently
+/// report. In production xterm.js answers via `pty_write`; these tests
+/// must play the terminal themselves, or the pane looks permanently
 /// stuck (no output, no exit). Tracking the whole transcript also covers the
 /// query arriving split across output chunks. On Unix the query never
 /// arrives, so this is a silent no-op there.
@@ -104,8 +104,8 @@ fn pty_spawns_and_captures_output() {
     );
 }
 
-/// Panes advertise a color-capable terminal even when the spawner (a
-/// long-lived daemon) carries a stale colorless environment.
+/// Panes advertise a color-capable terminal even when the spawner
+/// carries a stale colorless environment.
 #[test]
 fn pty_spawn_advertises_color_capable_terminal() {
     fn env_command() -> (Option<String>, Vec<String>) {
@@ -127,9 +127,9 @@ fn pty_spawn_advertises_color_capable_terminal() {
         );
     }
 
-    // Simulate a daemon launched from a colorless session: the pane must
-    // not inherit any of this. Restored immediately after spawn, which
-    // captures the child environment.
+    // Simulate a spawner launched from a colorless session: the pane
+    // must not inherit any of this. Restored immediately after spawn,
+    // which captures the child environment.
     let saved_term = std::env::var_os("TERM");
     let saved_colorterm = std::env::var_os("COLORTERM");
     let saved_no_color = std::env::var_os("NO_COLOR");
@@ -423,7 +423,7 @@ fn keyed_sessions_list_and_reattach_after_frontend_restart() {
         "adopted snapshot must repaint surviving output, got: {snap:?}"
     );
 
-    // Keyed and unkeyed (daemon-style) sessions coexist in one listing.
+    // Keyed and unkeyed sessions coexist in one listing.
     let id2 = manager
         .spawn(SpawnOptions {
             cols: 80,

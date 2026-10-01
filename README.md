@@ -35,9 +35,6 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
   finishes while you're elsewhere.
 - **Explorer & Source Control** — folder tree and git status with per-file diffs,
   staging, commits, branch switching, and push/pull, scoped to the workspace folder.
-- **Headless automation (experimental)** — a separate authenticated local daemon
-  and JSON CLI expose terminal and agent-state operations without a window.
-  See [docs/DAEMON.md](docs/DAEMON.md).
 - **Plan usage** — Settings → Usage shows plan windows for supported Codex and
   Claude Code logins. Credentials stay in the Rust backend and are read-only.
 
@@ -90,7 +87,6 @@ npm audit
 - [docs/RELEASING.md](docs/RELEASING.md) — maintainer release gates, signing, and smoke
 - [docs/VERIFYING.md](docs/VERIFYING.md) — manual verification checklists
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — runtime behavior contracts
-- [docs/DAEMON.md](docs/DAEMON.md) — headless daemon + CLI protocol
 - [docs/telemetry.md](docs/telemetry.md) — telemetry
 
 ## Roadmap
@@ -100,8 +96,7 @@ npm audit
 - [x] Phase 2: multiplexer model, layout persistence, tray behavior
 - [x] Phase 3: agent awareness v1 (process detection + badges)
 - [x] Explicit working/blocked/idle/done/unknown status and completion transitions
-- [x] Experimental local daemon + CLI (separate from the GUI backend)
-- [ ] GUI daemon migration and SSH remotes
+- [ ] SSH remotes
 - [ ] Native smoke approval for each release on macOS, Linux, and Windows
 
 ## Contributing

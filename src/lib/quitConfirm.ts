@@ -1,12 +1,16 @@
 import { countPanes, type Layout } from "./layout.ts";
 
 /** Remembered Quit choice. `ask` shows the confirmation dialog. */
-export type QuitAction = "ask" | "keep" | "stop";
+export type QuitAction = "ask" | "quit";
 
 export const QUIT_ACTION_KEY = "ubra.quitAction";
 
 export function parseQuitAction(raw: string | null): QuitAction {
-  return raw === "keep" || raw === "stop" ? raw : "ask";
+  // Legacy "stop" skipped the dialog and stopped every pane, exactly what
+  // "quit" does now. Legacy "keep" promised survival, which no longer
+  // exists, so it falls through to "ask".
+  if (raw === "quit" || raw === "stop") return "quit";
+  return "ask";
 }
 
 export function countLayoutPanes(layout: Layout | null): number {
@@ -19,16 +23,15 @@ export function countLayoutPanes(layout: Layout | null): number {
 }
 
 /** How a Quit request resolves: show the `dialog`, or quit at once. */
-export type QuitResolution = "dialog" | "keep" | "stop";
+export type QuitResolution = "dialog" | "quit";
 
 export function resolveQuitRequest(
   action: QuitAction,
   paneCount: number,
 ): QuitResolution {
-  // Nothing survives, so nothing needs a warning: plain quit.
-  if (paneCount <= 0) return "keep";
-  if (action === "keep") return "keep";
-  if (action === "stop") return "stop";
+  // Nothing open, so nothing needs a warning: plain quit.
+  if (paneCount <= 0) return "quit";
+  if (action === "quit") return "quit";
   return "dialog";
 }
 
@@ -37,23 +40,12 @@ export interface QuitDialogCopy {
   detail: string;
 }
 
-export function quitDialogCopy(
-  panes: number,
-  agents: number,
-  survival = true,
-): QuitDialogCopy {
+export function quitDialogCopy(panes: number, agents: number): QuitDialogCopy {
   const paneWord = panes === 1 ? "pane" : "panes";
   const agentWord = agents === 1 ? "agent" : "agents";
-  if (!survival) {
-    const detail =
-      agents > 0
-        ? `${panes} terminal ${paneWord} (${agents} ${agentWord}) will stop. Quitting ends every process.`
-        : `${panes} terminal ${paneWord} will stop. Quitting ends every process.`;
-    return { title: "Quit Ubra?", detail };
-  }
   const detail =
     agents > 0
-      ? `${panes} terminal ${paneWord} (${agents} ${agentWord}) will keep running in the background. Reopen Ubra to reattach, or stop every agent first.`
-      : `${panes} terminal ${paneWord} will keep running in the background. Reopen Ubra to reattach, or stop every process first.`;
+      ? `${panes} terminal ${paneWord} (${agents} ${agentWord}) will stop. Quitting ends every process.`
+      : `${panes} terminal ${paneWord} will stop. Quitting ends every process.`;
   return { title: "Quit Ubra?", detail };
 }

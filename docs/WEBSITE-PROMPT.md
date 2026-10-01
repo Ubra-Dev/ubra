@@ -46,7 +46,7 @@ PAGES & ROUTES:
    remote/SSH sessions, plugin ecosystem. Ubra strengths: native desktop
    GUI, MIT open source, free. Tone: factual alternative, never negative.
 4. `/docs`: docs hub with sidebar (Install, Workspaces & panes, Agent
-   awareness, Layout & tray, Usage, Headless daemon/CLI, Telemetry).
+   awareness, Layout & tray, Usage, Telemetry).
    Seed with concise accurate pages from the facts above; mark each page
    "Docs improve with the project — PRs welcome" linking the repo.
 5. `/blog`: changelog-style blog with one launch post ("Introducing Ubra")

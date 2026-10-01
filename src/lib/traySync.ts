@@ -18,14 +18,12 @@ export interface TrayPayload {
   title: string | null;
   tooltip: string;
   header: string;
-  daemonLine: string;
   agents: TrayAgentRow[];
   overflow: number;
   showAgents: boolean;
 }
 
 export interface TrayOptions {
-  daemonConnected: boolean | null;
   showTitle: boolean;
   showAgents: boolean;
 }
@@ -55,12 +53,6 @@ function titleFor(counts: Record<CountedState, number>, showTitle: boolean): str
   return null;
 }
 
-function daemonLineFor(daemonConnected: boolean | null): string {
-  if (daemonConnected === true) return "Runtime: connected";
-  if (daemonConnected === false) return "Runtime: reconnecting…";
-  return "Runtime: connecting…";
-}
-
 /**
  * Build the tray status payload from the sidebar agent groups. Context is
  * `tab · pane` within one workspace, prefixed with the workspace name when
@@ -83,12 +75,10 @@ export function buildTrayPayload(groups: WorkspaceAgents[], options: TrayOptions
     }
   }
   const header = headerFor(counts, rows.length);
-  const daemonLine = daemonLineFor(options.daemonConnected);
   return {
     title: titleFor(counts, options.showTitle),
-    tooltip: `${header}\n${daemonLine}`,
+    tooltip: header,
     header,
-    daemonLine,
     agents: rows.slice(0, TRAY_MAX_ROWS),
     overflow: Math.max(0, rows.length - TRAY_MAX_ROWS),
     showAgents: options.showAgents,

@@ -12,6 +12,15 @@ const STABLE_EVIDENCE: Duration = Duration::from_millis(200);
 const LOST_EVIDENCE: Duration = Duration::from_millis(750);
 const WORKER_TICK: Duration = Duration::from_millis(100);
 
+/// Home directory for session capture. Falls back to the system temp dir
+/// when neither Unix nor Windows conventions resolve.
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
@@ -385,7 +394,7 @@ impl AgentStatusService {
                     None => Watcher::bundled(),
                 };
                 let mut tracker = Tracker {
-                    session_home: Some(crate::daemon::home_dir()),
+                    session_home: Some(home_dir()),
                     ..Default::default()
                 };
                 let started = Instant::now();

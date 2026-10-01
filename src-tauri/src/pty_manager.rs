@@ -4,22 +4,15 @@
 //! thread per pane that forwards output through a [`PtyEventSink`]. The sink
 //! abstraction keeps the manager testable without a Tauri runtime.
 
-use crate::terminal_state::{ScreenState, TerminalQueries};
+use crate::terminal_state::ScreenState;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
-
-/// Keyed screen snapshots older than this are pruned. Liveness never
-/// prunes: history exists precisely for sessions that are gone.
-const HISTORY_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// History files are small emulator dumps; anything larger is not ours.
-const HISTORY_FILE_LIMIT: u64 = 2 * 1024 * 1024 + 1;
 
 /// Opaque pane identifier handed to the frontend.
 pub type PaneId = u32;
@@ -77,8 +70,9 @@ pub fn validate_dimensions(cols: u16, rows: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Session keys double as history filenames, so the charset is restricted
-/// to filename-safe characters. GUI pane ids (`pane-<uuid>`) comply.
+/// Session keys are stable pane identities for reattach, so the charset
+/// is restricted to filename-safe characters. GUI pane ids (`pane-<uuid>`)
+/// comply.
 pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !key.is_empty()
@@ -93,7 +87,6 @@ pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
 
 /// Parameters for [`PtyManager::spawn`]. `cols`/`rows` are required and
 /// validated; everything else defaults to an unkeyed attached shell pane.
-/// The daemon passes its own explicit `headless` per request.
 #[derive(Debug, Default)]
 pub struct SpawnOptions {
     pub shell: Option<String>,
@@ -102,7 +95,6 @@ pub struct SpawnOptions {
     pub cols: u16,
     pub rows: u16,
     pub key: Option<String>,
-    pub headless: bool,
 }
 
 struct Session {
@@ -114,22 +106,20 @@ struct Session {
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PID of the process spawned directly in the PTY (0 when unknown).
     root_pid: u32,
-    history_dir: Option<PathBuf>,
     /// In-memory emulation of the pane's screen, fed every output chunk.
     /// Backs agent detection snapshots; rendering stays in the frontend.
     screen: Mutex<ScreenState>,
     size: Mutex<(u16, u16)>,
     deliberate_close: AtomicBool,
-    /// Exit bookkeeping (registry removal, history save, exit event) runs
-    /// exactly once: on Windows the reader and the exit reaper race, and
-    /// whoever claims this first finishes while the other stands down.
+    /// Exit bookkeeping (registry removal, exit event) runs exactly once:
+    /// on Windows the reader and the exit reaper race, and whoever claims
+    /// this first finishes while the other stands down.
     exit_done: AtomicBool,
     owner: crate::process_tree::ProcessOwner,
-    headless: bool,
     screen_revision: AtomicU64,
     /// Stable frontend pane identity (`pane-<uuid>`). Survives frontend-only
     /// restarts so a remount can reattach instead of spawning a replacement.
-    /// `None` for daemon panes, which address sessions by numeric id.
+    /// `None` for unkeyed sessions, which address sessions by numeric id.
     key: Option<String>,
 }
 
@@ -151,7 +141,6 @@ pub struct PtyManager {
     exits: Arc<Mutex<VecDeque<AgentExit>>>,
     lifecycle: Mutex<()>,
     closing: AtomicBool,
-    history_dir: Mutex<Option<PathBuf>>,
 }
 
 impl PtyManager {
@@ -166,52 +155,7 @@ impl PtyManager {
             activity,
             activity_rx: Mutex::new(Some(activity_rx)),
             exits: Arc::new(Mutex::new(VecDeque::new())),
-            history_dir: Mutex::new(None),
         }
-    }
-
-    /// Durable per-key screen history. Unset disables persistence: the GUI
-    /// test manager and any future ephemeral managers keep no history.
-    pub fn set_history_dir(&self, dir: PathBuf) {
-        *self.history_dir.lock() = Some(dir);
-    }
-
-    /// Snapshot every keyed session to the history dir and prune stale
-    /// files. Best-effort throughout: history must never fail a pane.
-    pub fn save_history(&self) {
-        let Some(dir) = self.history_dir.lock().clone() else {
-            return;
-        };
-        let live: Vec<(String, PtySnapshot)> = self
-            .sessions
-            .lock()
-            .values()
-            .filter_map(|session| {
-                let key = session.key.clone()?;
-                let snapshot = session.screen.lock().snapshot();
-                Some((key, snapshot))
-            })
-            .collect();
-        for (key, snapshot) in live {
-            save_history_file(&dir, &key, &snapshot);
-        }
-        prune_history_older_than(&dir, HISTORY_MAX_AGE);
-    }
-
-    /// Last saved snapshot for `key`, if any. Missing, corrupt, oversize,
-    /// or misplaced history reads as absent: the pane simply starts blank.
-    pub fn load_history(&self, key: &str) -> Option<PtySnapshot> {
-        if validate_session_key(key).is_err() {
-            return None;
-        }
-        let dir = self.history_dir.lock().clone()?;
-        let file = std::fs::File::open(dir.join(format!("{key}.json"))).ok()?;
-        let mut bytes = Vec::new();
-        file.take(HISTORY_FILE_LIMIT).read_to_end(&mut bytes).ok()?;
-        if bytes.len() as u64 >= HISTORY_FILE_LIMIT {
-            return None;
-        }
-        serde_json::from_slice(&bytes).ok()
     }
 
     pub fn take_activity_receiver(&self) -> Option<mpsc::Receiver<()>> {
@@ -234,9 +178,8 @@ impl PtyManager {
     /// since killing on collision could destroy a live agent during a
     /// double-mount race. Reattach picks the lowest id for a key.
     ///
-    /// `headless` selects the terminal query responder: a headless pane has
-    /// one responder (never competing with xterm), while an attached pane
-    /// leaves device queries to its renderer.
+    /// Device queries are left to the attached renderer (xterm.js answers
+    /// them); the backend never responds.
     pub fn spawn(&self, options: SpawnOptions) -> anyhow::Result<PaneId> {
         let SpawnOptions {
             shell,
@@ -245,7 +188,6 @@ impl PtyManager {
             cols,
             rows,
             key,
-            headless,
         } = options;
         validate_dimensions(cols, rows)?;
         if let Some(key) = &key {
@@ -282,7 +224,7 @@ impl PtyManager {
         }
         cmd.cwd(cwd.or_else(default_cwd).unwrap_or_else(|| ".".to_string()));
         // Fixed color-capable identity for the xterm.js renderer; see
-        // `apply_terminal_env` for why this never inherits the daemon env.
+        // `apply_terminal_env` for why this never inherits the parent env.
         apply_terminal_env(&mut cmd);
 
         let mut child = pair.slave.spawn_command(cmd)?;
@@ -310,9 +252,7 @@ impl PtyManager {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             root_pid,
-            history_dir: self.history_dir.lock().clone(),
             owner,
-            headless,
             screen: Mutex::new(ScreenState::new(rows, cols)),
             size: Mutex::new((cols, rows)),
             deliberate_close: AtomicBool::new(false),
@@ -461,7 +401,7 @@ impl PtyManager {
     /// Snapshot of live sessions and their stable keys. The frontend uses
     /// this after a restart to adopt its surviving sessions (reattach) and
     /// to reap sessions whose keys are no longer in the layout (orphans).
-    /// Daemon panes report `key: None` and are never adopted or swept.
+    /// Unkeyed sessions report `key: None` and are never adopted or swept.
     pub fn list(&self) -> Vec<PtySessionInfo> {
         let mut sessions: Vec<PtySessionInfo> = self
             .sessions
@@ -474,11 +414,6 @@ impl PtyManager {
             .collect();
         sessions.sort_by_key(|s| s.id);
         sessions
-    }
-
-    #[cfg(test)]
-    pub(crate) fn session_headless(&self, id: PaneId) -> Option<bool> {
-        self.sessions.lock().get(&id).map(|s| s.headless)
     }
 
     /// Snapshot of live panes and their root PIDs for the agent watcher.
@@ -516,8 +451,6 @@ impl PtyManager {
     /// Called before native application exit, which may bypass Rust drops.
     pub fn shutdown(&self) -> anyhow::Result<()> {
         let _lifecycle = self.lifecycle.lock();
-        // Screens are still live: readers may not run before process exit.
-        self.save_history();
         self.closing.store(true, Ordering::Release);
         let sessions: Vec<_> = self
             .sessions
@@ -557,81 +490,6 @@ impl Drop for PtyManager {
     }
 }
 
-fn save_history_file(dir: &std::path::Path, key: &str, snapshot: &PtySnapshot) {
-    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let Ok(bytes) = serde_json::to_vec(snapshot) else {
-        return;
-    };
-    // Terminal output can carry secrets: current-user-only dir and files
-    // on Unix (Windows inherits the user-profile ACL). Best-effort like
-    // everything else here; a failure simply skips this save.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        if std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .is_err()
-        {
-            return;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
-    }
-    let tmp = dir.join(format!(
-        ".{key}.{}.{}.tmp",
-        std::process::id(),
-        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let done = (|| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?
-                .write_all(&bytes)?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&tmp, &bytes)?;
-        }
-        std::fs::rename(&tmp, dir.join(format!("{key}.json")))
-    })();
-    if done.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
-pub(crate) fn prune_history_older_than(dir: &std::path::Path, max_age: Duration) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let is_history = entry
-            .path()
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("tmp"));
-        if !is_history {
-            continue;
-        }
-        let stale = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .is_ok_and(|mtime| mtime.elapsed().is_ok_and(|age| age > max_age));
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
 fn record_exit(exits: &Mutex<VecDeque<AgentExit>>, exit: AgentExit) {
     let mut exits = exits.lock();
     // Lifecycle evidence must not be dropped: losing a deliberate-close
@@ -646,16 +504,10 @@ fn publish_output(
     session: &Session,
     sink: &Arc<dyn PtyEventSink>,
     activity: &mpsc::SyncSender<()>,
-    queries: &mut TerminalQueries,
 ) {
     let sequence = {
         let mut state = session.screen.lock();
         state.process(&text);
-        if session.headless {
-            queries.respond(&text, state.parser.screen(), |reply| {
-                let _ = session.writer.lock().write_all(reply.as_bytes());
-            });
-        }
         state.sequence
     };
     session.screen_revision.fetch_add(1, Ordering::Release);
@@ -673,7 +525,6 @@ fn reader_loop(
     exits: &Mutex<VecDeque<AgentExit>>,
 ) {
     let mut decoder = Utf8Splitter::new();
-    let mut queries = TerminalQueries::default();
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -681,7 +532,7 @@ fn reader_loop(
             Ok(n) => {
                 let text = decoder.push(&buf[..n]);
                 if !text.is_empty() {
-                    publish_output(id, text, session, sink, activity, &mut queries);
+                    publish_output(id, text, session, sink, activity);
                 }
             }
             // The PTY reader performs a raw read without EINTR retry, so a
@@ -692,7 +543,7 @@ fn reader_loop(
     }
     let tail = decoder.flush();
     if !tail.is_empty() {
-        publish_output(id, tail, session, sink, activity, &mut queries);
+        publish_output(id, tail, session, sink, activity);
     }
 
     // Reap the exit status without blocking forever.
@@ -745,9 +596,6 @@ fn reader_loop(
                 deliberate: false,
             },
         );
-    }
-    if let (Some(dir), Some(key)) = (session.history_dir.clone(), session.key.clone()) {
-        save_history_file(&dir, &key, &session.screen.lock().snapshot());
     }
     let _ = activity.try_send(());
     sink.exited(id, success, code);
@@ -803,9 +651,6 @@ fn reaper_loop(
                 },
             );
         }
-        if let (Some(dir), Some(key)) = (session.history_dir.clone(), session.key.clone()) {
-            save_history_file(&dir, &key, &session.screen.lock().snapshot());
-        }
         let _ = activity.try_send(());
         sink.exited(id, success, code);
         // Tear down ConPTY so the reader's pending read completes and its
@@ -819,10 +664,10 @@ fn reaper_loop(
 /// Advertise a fixed color-capable terminal to pane processes.
 ///
 /// The renderer is always xterm.js, so panes get `xterm-256color` plus
-/// truecolor rather than inheriting the daemon's launch-time environment:
-/// a long-lived daemon would otherwise freeze stale values — notably a
-/// `NO_COLOR` exported only in the terminal it happened to be launched
-/// from — into every future pane, silently disabling TUI colors.
+/// truecolor rather than inheriting this process's launch-time environment:
+/// a stale environment would otherwise freeze values — notably a `NO_COLOR`
+/// exported only in the terminal the app happened to be launched from —
+/// into every future pane, silently disabling TUI colors.
 fn apply_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -906,7 +751,7 @@ mod tests {
     #[test]
     fn pane_env_advertises_color_and_drops_stale_no_color() {
         let mut cmd = CommandBuilder::new("sh");
-        // Simulate a daemon launched from a colorless terminal session.
+        // Simulate a spawner launched from a colorless terminal session.
         cmd.env("TERM", "dumb");
         cmd.env_remove("COLORTERM");
         cmd.env("NO_COLOR", "1");

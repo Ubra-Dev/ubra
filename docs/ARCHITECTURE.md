@@ -23,8 +23,8 @@ timing, and pane isolation must be checked on every supported platform.
 
 Tray initialization failure requests a native warning explaining that window
 close quits. A hide failure likewise warns before quitting, rather than
-silently leaving an unreachable app. The tray and app menus provide Quit and
-Stop Agents and Quit independently of the window. For a repeatable
+silently leaving an unreachable app. The tray and app menus provide Quit
+independently of the window. For a repeatable
 tray-unavailable smoke, use a debug build with
 `UBRA_DISABLE_TRAY=1` and a fresh `UBRA_DATA_DIR`; release builds ignore this
 switch. Native window-close, hide-failure, and warning appearance remain manual
@@ -32,14 +32,14 @@ release checks.
 
 The tray menu is a live status surface. The frontend owns pane labels and the
 effective rollup, so it pushes a `TraySummary` via `tray_update` whenever
-agent state, layout, daemon link, or tray prefs change (debounced, with
+agent state, layout, or tray prefs change (debounced, with
 identical payloads skipped on both ends); the backend rebuilds the menu and
 sets the menu-bar title and tooltip. Agent rows carry `tray-agent-<node>` ids
 and route clicks back through `tray-focus-pane`, which the frontend validates
 against the current layout before revealing the pane. `set_title` renders on
 macOS and Linux and is a no-op on Windows; the menu content is the
 cross-platform surface. Disabling the agent list restores the static
-Show/Quit/Stop-Agents menu while title and tooltip keep updating.
+Show/Quit menu while title and tooltip keep updating.
 
 PTY geometry is validated before OS/emulator mutation: 2–1000 columns,
 1–1000 rows, at most 250,000 cells. Shutdown closes spawn admission and
@@ -62,3 +62,24 @@ without changing recovery state. Saved documents are limited to 4 MiB,
 32 tree levels and 4096 workspace/tab/tree entities, with globally unique
 nonempty IDs and nondegenerate finite split ratios. Unsafe documents are
 rejected rather than silently repaired and overwritten.
+
+## Agent resume
+
+After an app restart the original processes are gone; panes restore via
+agent-native resume (gated by the auto-launch setting; the respawn button
+always resumes explicitly):
+
+| CLI    | Strategy (verified against real installs)                |
+| ------ | -------------------------------------------------------- |
+| claude | `claude --continue` (cwd-scoped, needs no capture)       |
+| codex  | newest `~/.codex/sessions` rollout for the pane cwd → `codex resume <id>` |
+| else   | bare-command retype (previous behavior)                  |
+
+Session ids are discovered in the status service (60s TTL per pane,
+re-resolved on identity change) and ride along on `AgentStatus.sessionRef`
+(`{kind: "id", value}`), persisting to `layout.json` (`agentSession`)
+only on change. Resume argv are validated before use (plain command,
+no control bytes or apostrophes, size caps); edited layouts fall back
+to the original command. To add a CLI: verify its flags against a real
+install, add capture in `src-tauri/src/agent_session.rs` when an id is
+needed, and add a row to `src/lib/agentResume.ts`.

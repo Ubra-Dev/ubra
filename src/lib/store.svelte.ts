@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { agentClis } from "./agentClis.svelte";
-import { evictDeadSessions, evictSessions } from "./ptySessions";
 import {
   activeTab,
   activeWorkspace,
@@ -172,19 +171,6 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
-  /**
-   * Survival mode (`UBRA_DAEMON=1`): quitting detaches and panes keep
-   * running. Null until the backend answers; consumers fall back to the
-   * survival copy, matching backends that predate the `pty_backend`
-   * command. Never changes within a process.
-   */
-  survivalEnabled = $state<boolean | null>(null);
-  /** Agent runtime link: null until the first backend status arrives. */
-  daemonConnected = $state<boolean | null>(null);
-  /** Last daemon error, shown in the disconnected banner. */
-  daemonError = $state<string | null>(null);
-  /** Bumped on every (re)connect so terminals adopt or respawn. */
-  daemonEpoch = $state(0);
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
@@ -288,49 +274,7 @@ class AppStore {
       // The app can still start with its defaults if storage is unavailable.
     }
 
-    void this.watchDaemon();
-    void this.fetchBackend();
     await this.retryLayout();
-  }
-
-  /** Learn whether panes survive a quit; stays null when unknown. */
-  private async fetchBackend(): Promise<void> {
-    try {
-      const backend = await invoke<string>("pty_backend");
-      this.survivalEnabled = backend === "daemon";
-    } catch (e) {
-      console.error("ubra: backend query failed", e);
-    }
-  }
-
-  /**
-   * Track the agent runtime link. Every (re)connect remounts terminals:
-   * a first connect retries failed boot spawns, a reconnect readopts
-   * surviving sessions (or respawns when the daemon restarted). Healthy
-   * mounts readopt their own lease, so the remount is a cheap repaint.
-   */
-  private async watchDaemon(): Promise<void> {
-    try {
-      await listen<{ connected: boolean; error: string | null }>(
-        "daemon-status",
-        (event) => {
-          const was = this.daemonConnected;
-          this.daemonConnected = event.payload.connected;
-          this.daemonError = event.payload.error;
-          if (!event.payload.connected || was === true) return;
-          if (this.layout) {
-            const placed = this.layout.workspaces.flatMap((ws) =>
-              ws.tabs.flatMap((tab) => collectPaneIds(tab.root)),
-            );
-            if (was === false) evictSessions(placed);
-            else evictDeadSessions(placed);
-          }
-          this.daemonEpoch += 1;
-        },
-      );
-    } catch (e) {
-      console.error("ubra: daemon status subscription failed", e);
-    }
   }
 
   /** A failed load never installs a renderable/default layout or enables autosave. */
@@ -1036,40 +980,32 @@ class AppStore {
 
   /**
    * Quit request from menus, shortcuts, or the tray. Warn whenever panes
-   * exist (they stop on quit by default, detach in survival mode) unless
-   * the user remembered a choice. `agents` is the attached-agent count
-   * for the dialog.
+   * exist (quitting stops every pane) unless the user remembered a choice.
+   * `agents` is the attached-agent count for the dialog.
    */
   requestQuit(agents: number): void {
     if (this.pendingQuit) return;
     const panes = countLayoutPanes(this.layout);
-    const resolved = resolveQuitRequest(this.quitAction, panes);
-    if (resolved === "dialog") {
+    if (resolveQuitRequest(this.quitAction, panes) === "dialog") {
       this.pendingQuit = { panes, agents };
       return;
     }
-    void this.quitNow(resolved);
+    void this.quitNow();
   }
 
   cancelQuit(): void {
     this.pendingQuit = null;
   }
 
-  confirmQuitKeep(remember: boolean): void {
-    if (remember) this.setQuitAction("keep");
+  confirmQuit(remember: boolean): void {
+    if (remember) this.setQuitAction("quit");
     this.pendingQuit = null;
-    void this.quitNow("keep");
+    void this.quitNow();
   }
 
-  confirmQuitStop(remember: boolean): void {
-    if (remember) this.setQuitAction("stop");
-    this.pendingQuit = null;
-    void this.quitNow("stop");
-  }
-
-  private async quitNow(how: "keep" | "stop"): Promise<void> {
+  private async quitNow(): Promise<void> {
     try {
-      await invoke(how === "stop" ? "quit_app_and_stop_agents" : "quit_app");
+      await invoke("quit_app");
     } catch (e) {
       console.error("ubra: quit failed", e);
       toasts.push("Couldn't quit Ubra", String(e), "", { kind: "copy" });
@@ -1331,8 +1267,8 @@ class AppStore {
 
   /**
    * Reap backend sessions no layout pane can adopt: keys from panes that no
-   * longer exist (or pre-reattach orphans). Keyless daemon-style sessions
-   * are left alone. Best-effort; failures only log.
+   * longer exist (or pre-reattach orphans). Keyless sessions are left
+   * alone. Best-effort; failures only log.
    */
   private async sweepOrphanedPtys(): Promise<void> {
     const layout = this.layout;

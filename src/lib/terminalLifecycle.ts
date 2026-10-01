@@ -1,7 +1,7 @@
 export interface TerminalOutput { id: number; data: string; sequence: number }
 export interface TerminalExit { id: number; success: boolean; code: number | null }
 export interface TerminalSnapshot { data: string; sequence: number; cols: number; rows: number }
-/** Live backend session: `key` is the stable pane id, null for daemon panes. */
+/** Live backend session: `key` is the stable pane id, null when unkeyed. */
 export interface PtySessionInfo { id: number; key: string | null }
 
 /** Listeners precede spawn/snapshot. Painting and replay are one synchronous cutover. */

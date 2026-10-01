@@ -4,7 +4,7 @@ For release approval, use the **packaged app**, not only `tauri dev`. Launch it
 with a fresh `UBRA_DATA_DIR` (for example `UBRA_DATA_DIR="$(mktemp -d)" <app-binary>`
 on macOS/Linux, or set `$env:UBRA_DATA_DIR` to a new temporary directory before
 launching on Windows). Preserve that scratch directory while testing relaunches.
-Never point destructive probes at your normal layout or running daemon.
+Never point destructive probes at your normal layout or running app.
 
 ## Native platform checklist
 
@@ -23,12 +23,7 @@ Never point destructive probes at your normal layout or running daemon.
    workspaces and agent rows.
 6. Hide/show/quit with the tray; on Linux also exercise tray-unavailable close.
    Quitting must terminate owned sessions.
-7. On Windows, also build the headless executables from the same tagged source
-   (`cargo build --release --manifest-path src-tauri/Cargo.toml --bins`). They are
-   separate from the GUI bundle. Run the daemon/CLI with a fresh `--state-dir`,
-   execute a marker-file command through ConPTY, read output, close the pane and
-   shut down. Check invalid commands return a nonzero exit code on every OS.
-8. Open the right sidebar's Explorer on a scratch folder: browse, reveal, and
+7. Open the right sidebar's Explorer on a scratch folder: browse, reveal, and
    copy paths. In a scratch git repo, verify Source Control status groups,
    diffs, staging, a commit, and push/pull against a local bare remote.
 
@@ -45,17 +40,16 @@ The development checklist below complements, but does not replace, these gates.
   panes automatically rerun their remembered agent on first spawn.
 - Workspaces can be closed from the sidebar; closing the last one resets fresh.
 - Close the window with a working tray: the app hides and panes keep running.
-  Left-click the tray icon to show it again; Quit and Stop Agents and Quit are
-  available in the tray and app menus. Without a working tray, closing the
-  window quits instead.
-- Tray status stays live while hidden: the menu shows an agent summary, one
-  row per agent pane, and the runtime link state; on macOS a working or
-  attention count appears next to the icon and clears when settled. Clicking
-  a row shows the window and focuses its pane. Toggling Settings → App →
-  Menu bar off restores the static menu / clears the count.
-- Quit with panes open: a dialog warns that panes keep running, with Quit &
-  Keep Running, Stop Agents & Quit, and Cancel. A remembered choice skips the
-  dialog and can be reset in Settings → App. Quitting with no panes skips it.
+  Left-click the tray icon to show it again; Quit is available in the tray
+  and app menus. Without a working tray, closing the window quits instead.
+- Tray status stays live while hidden: the menu shows an agent summary and
+  one row per agent pane; on macOS a working or attention count appears
+  next to the icon and clears when settled. Clicking a row shows the
+  window and focuses its pane. Toggling Settings → App → Menu bar off
+  restores the static menu / clears the count.
+- Quit with panes open: a dialog warns that panes stop, with Quit and
+  Cancel. A remembered choice skips the dialog. Quitting with no panes
+  skips it.
 - Agent badges use explicit CLI screen evidence: Working means a recognized
   busy indicator, Blocked means an approval/question prompt or a suspended
   process, and Idle means a recognized ready prompt before an observed task.

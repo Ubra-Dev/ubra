@@ -2,9 +2,9 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ubra",
   "version": "0.1.0",
-  "identifier": "com.nemoryoliver.ubra",
+  "identifier": "com.ubra.app",
   "build": {
-    "beforeDevCommand": "npm run build:sidecars && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../build"

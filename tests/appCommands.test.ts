@@ -21,7 +21,6 @@ describe("application command eligibility", () => {
       }
     }
     assert.equal(canDispatch({ action: "quit" }, context({ blocked: true, ready: false })), true);
-    assert.equal(canDispatch({ action: "quit-stop-agents" }, context({ blocked: true, ready: false })), true);
     assert.equal(canDispatch({ action: "check-for-updates" }, context({ blocked: true, ready: false })), true);
     assert.equal(canDispatch({ action: "open-settings" }, context({ blocked: true })), false);
     assert.equal(canDispatch({ action: "keyboard-shortcuts" }, context({ blocked: true, settingsOpen: true })), true);
@@ -71,7 +70,6 @@ describe("native menus and accelerators", () => {
       assert.ok(!ids.includes("save-template"));
       const application = groups.find((group) => group.label === (mac ? "Ubra" : "File"))!;
       assert.ok(application.items.some((item) => item?.action === "quit"));
-      assert.ok(application.items.some((item) => item?.action === "quit-stop-agents"));
       assert.ok(application.items.some((item) => item?.action === "open-settings"));
       const about = groups.find((group) => group.items.some((item) => item?.system === "About"))!;
       assert.equal(about.label, mac ? "Ubra" : "Help");

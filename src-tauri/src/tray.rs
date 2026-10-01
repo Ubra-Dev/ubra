@@ -1,12 +1,11 @@
 //! Live menu-bar/tray status surface.
 //!
 //! The tray icon doubles as a macOS menu-bar item: the frontend pushes a
-//! [`TraySummary`] whenever agent state, layout, daemon link, or tray prefs
-//! change, and [`tray_update`] rebuilds the menu plus the menu-bar title and
-//! tooltip. Agent-row clicks route back through the `tray-focus-pane` event
-//! so the frontend can reveal and focus the pane.
+//! [`TraySummary`] whenever agent state, layout, or tray prefs change, and
+//! [`tray_update`] rebuilds the menu plus the menu-bar title and tooltip.
+//! Agent-row clicks route back through the `tray-focus-pane` event so the
+//! frontend can reveal and focus the pane.
 
-use crate::daemon_client::{daemon_state_dir, DaemonClient};
 use std::sync::atomic::Ordering;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -40,7 +39,6 @@ pub struct TraySummary {
     pub title: Option<String>,
     pub tooltip: String,
     pub header: String,
-    pub daemon_line: String,
     pub agents: Vec<TrayAgentRow>,
     pub overflow: u32,
     pub show_agents: bool,
@@ -59,33 +57,12 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
-pub fn stop_daemon(app: &AppHandle) {
-    // Local panes die with us at exit; never touch a stray daemon here.
-    if app.state::<crate::PtyBackend>().is_local() {
-        return;
-    }
-    let (tx, _rx) = std::sync::mpsc::sync_channel(8);
-    match DaemonClient::connect(&daemon_state_dir(), tx) {
-        Ok(client) => {
-            if let Err(error) = client.shutdown_daemon() {
-                eprintln!("ubra: daemon shutdown failed: {error}");
-            }
-        }
-        Err(error) => {
-            eprintln!("ubra: no daemon to stop: {error}");
-        }
-    }
-}
-
 fn static_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
-    let quit_stop =
-        MenuItem::with_id(app, "quit-stop", "Stop Agents and Quit", true, None::<&str>)?;
     let menu = Menu::new(app)?;
     menu.append(&show)?;
     menu.append(&quit)?;
-    menu.append(&quit_stop)?;
     Ok(menu)
 }
 
@@ -109,13 +86,6 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     // confirmation dialog (and remembered choice) with menus.
                     show_main(app);
                     let _ = app.emit("quit-requested", ());
-                }
-                "quit-stop" => {
-                    stop_daemon(app);
-                    app.state::<crate::ShellState>()
-                        .quitting
-                        .store(true, Ordering::SeqCst);
-                    app.exit(0);
                 }
                 _ => {
                     if let Some(node) = node_id_from_menu_id(id) {
@@ -231,22 +201,11 @@ fn dynamic_menu(app: &AppHandle, summary: &TraySummary) -> tauri::Result<Menu<ta
         )?;
         menu.append(&more)?;
     }
-    let daemon = MenuItem::with_id(
-        app,
-        "tray-daemon",
-        truncate(&summary.daemon_line, MAX_LINE_CHARS),
-        false,
-        None::<&str>,
-    )?;
-    menu.append(&daemon)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
-    let quit_stop =
-        MenuItem::with_id(app, "quit-stop", "Stop Agents and Quit", true, None::<&str>)?;
     menu.append(&show)?;
     menu.append(&quit)?;
-    menu.append(&quit_stop)?;
     Ok(menu)
 }
 
@@ -308,7 +267,6 @@ mod tests {
             title: Some("● 2".into()),
             tooltip: "2 working".into(),
             header: "2 working".into(),
-            daemon_line: "Runtime: connected".into(),
             agents: vec![
                 row("pane-a", "Claude Code", "ws · tab", "working"),
                 row("pane-b", "Codex", "ws · tab 2", "done"),
@@ -367,7 +325,6 @@ mod tests {
             "title": "● 2",
             "tooltip": "2 working",
             "header": "2 working",
-            "daemonLine": "Runtime: connected",
             "agents": [
                 {"nodeId": "pane-a", "agent": "Claude Code", "context": "ws · tab", "status": "working"},
             ],
@@ -375,13 +332,11 @@ mod tests {
             "showAgents": true,
         }))
         .expect("frontend payload deserializes");
-        assert_eq!(parsed.daemon_line, "Runtime: connected");
         assert_eq!(parsed.agents.len(), 1);
         let cleared: TraySummary = serde_json::from_value(serde_json::json!({
             "title": null,
             "tooltip": "No agents running",
             "header": "No agents running",
-            "daemonLine": "Runtime: connected",
             "agents": [],
             "overflow": 0,
             "showAgents": true,

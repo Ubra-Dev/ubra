@@ -1,4 +1,4 @@
-//! Serializable terminal state and chunk-safe headless query handling.
+//! Serializable terminal state, including unfinished escape input.
 use crate::pty_manager::PtySnapshot;
 
 pub(crate) struct ScreenState {
@@ -194,35 +194,6 @@ impl ControlTail {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct TerminalQueries {
-    control: ControlTail,
-}
-
-impl TerminalQueries {
-    pub fn respond(&mut self, text: &str, screen: &vt100::Screen, mut reply: impl FnMut(&str)) {
-        for ch in text.chars() {
-            if self.control.push(ch) {
-                match self.control.pending.as_str() {
-                    "\x1b[6n" | "\x1b[?6n" => {
-                        let (row, col) = screen.cursor_position();
-                        let private = if self.control.pending == "\x1b[?6n" {
-                            "?"
-                        } else {
-                            ""
-                        };
-                        reply(&format!("\x1b[{private}{};{}R", row + 1, col + 1));
-                    }
-                    "\x1b[5n" => reply("\x1b[0n"),
-                    "\x1b[c" | "\x1b[0c" => reply("\x1b[?1;2c"),
-                    _ => {}
-                }
-                self.control.pending.clear();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,17 +313,6 @@ mod tests {
             history_rows(restored.screen()).contains(&"line-1".to_string()),
             "primary history must survive the round trip"
         );
-    }
-
-    #[test]
-    fn query_responder_handles_split_and_repeated_queries_without_osc_false_positive() {
-        let parser = vt100::Parser::new(24, 80, 0);
-        let mut queries = TerminalQueries::default();
-        let mut replies = Vec::new();
-        for chunk in ["\x1b[", "6n\x1b[6n", "\x1b]title \x1b[6n\x07", "\x1b[5n"] {
-            queries.respond(chunk, parser.screen(), |s| replies.push(s.to_string()));
-        }
-        assert_eq!(replies, ["\x1b[1;1R", "\x1b[1;1R", "\x1b[0n"]);
     }
 }
 
