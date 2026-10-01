@@ -22,7 +22,7 @@ jobs:
       PUBLIC_POSTHOG_HOST: ""
       PUBLIC_POSTHOG_PROJECT_TOKEN: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # System dependencies from https://v2.tauri.app/start/prerequisites/
       - name: Install Linux dependencies
