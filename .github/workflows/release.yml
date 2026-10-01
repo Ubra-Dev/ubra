@@ -138,6 +138,20 @@ jobs:
           chmod 600 "$RUNNER_TEMP/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
 
+      - name: Verify App Store Connect API credentials
+        if: runner.os == 'macOS' && secrets.APPLE_API_KEY_P8 != ''
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        shell: bash
+        run: |
+          xcrun notarytool history \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --output-format json >/dev/null
+          echo "Apple accepted the App Store Connect API credentials."
+
       # Direct CLI build (no tauri-action): bundles via the pinned
       # @tauri-apps/cli in devDependencies. With the Apple credentials set,
       # each macOS build signs, notarizes, and staples automatically.
@@ -158,6 +172,12 @@ jobs:
           PUBLIC_POSTHOG_PROJECT_TOKEN: ${{ secrets.PUBLIC_POSTHOG_PROJECT_TOKEN }}
         shell: bash
         run: |
+          # GitHub exposes missing secrets as empty environment variables.
+          # Tauri selects Apple ID auth by variable presence, so remove empty
+          # values to allow the configured App Store Connect API key route.
+          [ -n "$APPLE_ID" ] || unset APPLE_ID
+          [ -n "$APPLE_PASSWORD" ] || unset APPLE_PASSWORD
+          [ -n "$APPLE_TEAM_ID" ] || unset APPLE_TEAM_ID
           if [ -n "$TAURI_TARGET" ]; then
             npm run tauri build -- --target "$TAURI_TARGET"
           else
