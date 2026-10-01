@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
+  import { MOTION_FAST_MS, motionMs, rise } from "./motion";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
   import { telemetryStatus } from "./telemetry";
@@ -483,12 +485,14 @@
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div
   class="backdrop"
+  transition:fade={{ duration: motionMs(MOTION_FAST_MS) }}
   onclick={(e) => {
     if (e.target === e.currentTarget) close();
   }}
 >
   <div
     class="dialog"
+    transition:rise
     role="dialog"
     aria-modal="true"
     aria-label="Settings"
@@ -1840,6 +1844,10 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .switch .track,
+    .switch .thumb {
+      transition: none;
+    }
     .update-progress > span {
       transition: none;
     }

@@ -154,7 +154,7 @@
       style:top={pct(pane.rect[1])}
       style:width={pct(pane.rect[2])}
       style:height={pct(pane.rect[3])}
-      style:animation-delay={`${Math.min(i, 5) * 28}ms`}
+      style:animation-delay={`${Math.min(i, 5) * 40}ms`}
     >
       <PaneView
         node={pane.node}
@@ -208,12 +208,12 @@
      animation-delay). The `both` fill holds the first frame through the
      delay so slots appear in sequence instead of flashing at full opacity. */
   :global(.ws-enter) .slot {
-    animation: ubra-ws-slot-in 160ms ease-out both;
+    animation: ubra-ws-slot-in var(--motion-slow) ease-out both;
   }
   @keyframes ubra-ws-slot-in {
     from {
       opacity: 0;
-      transform: translateY(5px);
+      transform: translateY(8px);
     }
     to {
       opacity: 1;

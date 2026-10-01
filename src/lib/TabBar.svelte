@@ -1,8 +1,10 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { agent } from "./agent.svelte";
+  import { agentClis } from "./agentClis.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
+  import { fadeUnless } from "./motion";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
 
@@ -11,6 +13,85 @@
   let menu = $state<{ id: string; x: number; y: number; opener: HTMLElement | null } | null>(null);
   const mod = modLabel(isMacPlatform(navigator.platform));
   let tabList = $state<HTMLDivElement | null>(null);
+
+  // New-tab agent picker: hovering the plus button opens a menu of
+  // detected agent CLIs to run in the new tab. Click still opens a
+  // plain tab; ArrowDown opens the menu from the keyboard. Mirrors
+  // the split-button agent picker in PaneView.
+  const TAB_MENU_OPEN_MS = 400;
+  const TAB_MENU_CLOSE_MS = 200;
+  let agentMenu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+  let hoverOpenTimer: ReturnType<typeof setTimeout> | null = null;
+  let hoverCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  const hasAgentClis = $derived((agentClis.clis?.length ?? 0) > 0);
+
+  function cancelHoverOpen(): void {
+    if (hoverOpenTimer !== null) {
+      clearTimeout(hoverOpenTimer);
+      hoverOpenTimer = null;
+    }
+  }
+
+  function cancelHoverClose(): void {
+    if (hoverCloseTimer !== null) {
+      clearTimeout(hoverCloseTimer);
+      hoverCloseTimer = null;
+    }
+  }
+
+  function dismissAgentMenu(): void {
+    cancelHoverOpen();
+    cancelHoverClose();
+    agentMenu = null;
+  }
+
+  function openAgentMenu(target: HTMLElement): void {
+    if (!hasAgentClis) {
+      void agentClis.ensure();
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    announceMenuOpen();
+    agentMenu = { x: rect.left, y: rect.bottom + 4, opener: target };
+  }
+
+  function scheduleHoverClose(): void {
+    cancelHoverClose();
+    hoverCloseTimer = setTimeout(() => {
+      hoverCloseTimer = null;
+      agentMenu = null;
+    }, TAB_MENU_CLOSE_MS);
+  }
+
+  function addButtonEnter(e: PointerEvent): void {
+    if (e.pointerType !== "mouse") return;
+    cancelHoverClose();
+    if (agentMenu) return;
+    cancelHoverOpen();
+    const target = e.currentTarget as HTMLElement;
+    hoverOpenTimer = setTimeout(() => {
+      hoverOpenTimer = null;
+      openAgentMenu(target);
+    }, TAB_MENU_OPEN_MS);
+  }
+
+  function addButtonLeave(e: PointerEvent): void {
+    if (e.pointerType !== "mouse") return;
+    cancelHoverOpen();
+    if (agentMenu) scheduleHoverClose();
+  }
+
+  function onAgentPick(id: string): void {
+    dismissAgentMenu();
+    store.addTabWithCommand(id);
+  }
+
+  function onAddKey(e: KeyboardEvent): void {
+    if (e.key !== "ArrowDown") return;
+    e.preventDefault();
+    dismissAgentMenu();
+    openAgentMenu(e.currentTarget as HTMLElement);
+  }
 
   function revealActive(): void {
     tabList?.querySelector<HTMLElement>(".tab.active")
@@ -72,10 +153,15 @@
       <div class="tab-list" bind:this={tabList} use:trackViewport>
       {#each ws.tabs as tab (tab.id)}
         {@const rollup = agent.tabRollup(tab)}
+        {@const bornWs = store.workspaceSwitchToken}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Outro skipped after a workspace switch: fading buttons would hold
+             row space alongside the incoming tabs, shoving the strip sideways
+             until the snap-back. Same-workspace add/remove still animates. -->
         <div
           class="tab"
           class:active={tab.id === ws.activeTabId}
+          transition:fadeUnless={{ skip: () => store.workspaceSwitchToken !== bornWs }}
           oncontextmenu={(e) => openMenu(e, tab.id)}
         >
           {#if editing === tab.id}
@@ -118,8 +204,17 @@
       {/each}
         <button
           class="add"
-          title={`New tab (${mod}T)`}
-          onclick={() => store.addTab()}
+          title={hasAgentClis ? `New tab (${mod}T) — hover to pick an agent` : `New tab (${mod}T)`}
+          aria-label={hasAgentClis ? "New tab with agent options; activates a plain tab" : "New tab"}
+          aria-haspopup="menu"
+          aria-expanded={agentMenu !== null}
+          onclick={() => {
+            dismissAgentMenu();
+            store.addTab();
+          }}
+          onpointerenter={addButtonEnter}
+          onpointerleave={addButtonLeave}
+          onkeydown={onAddKey}
         >
           <Icon name="plus" size={13} />
         </button>
@@ -156,6 +251,24 @@
         ]}
         onPick={onPick}
         onDismiss={() => (menu = null)}
+      />
+    {/if}
+    {#if agentMenu}
+      <ContextMenu
+        x={agentMenu.x}
+        y={agentMenu.y}
+        opener={agentMenu.opener}
+        items={(agentClis.clis ?? []).map((entry) => ({
+          id: entry.cli,
+          label: `${entry.label} · ${entry.cli}`,
+          cli: entry.cli,
+        }))}
+        onPick={onAgentPick}
+        onDismiss={dismissAgentMenu}
+        onHoverChange={(inside) => {
+          if (inside) cancelHoverClose();
+          else scheduleHoverClose();
+        }}
       />
     {/if}
   {/if}

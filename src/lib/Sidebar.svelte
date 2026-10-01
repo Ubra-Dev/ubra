@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { fly } from "svelte/transition";
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import { gitSummaryTitle, gitSyncLabel } from "./git";
   import Icon from "./Icon.svelte";
+  import { MOTION_MED_MS, motionMs } from "./motion";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import Spinner from "./Spinner.svelte";
   import { sidebarUpdateState } from "./statusBar";
@@ -335,7 +337,12 @@
 </script>
 
 {#if store.layout && store.leftPanelOpen}
-  <aside class="sidebar" style="width: {store.sidebarWidth}px">
+  <!-- Transform-only so show/hide animates without touching the drag-resized width. -->
+  <aside
+    class="sidebar"
+    style="width: {store.sidebarWidth}px"
+    transition:fly={{ x: -16, duration: motionMs(MOTION_MED_MS) }}
+  >
     <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
     <div class="split" bind:this={splitEl} bind:clientHeight={splitHeight}>
       <section class="pane" aria-label="Workspaces" style:flex-grow={splitRatio}>

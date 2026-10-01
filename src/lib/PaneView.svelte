@@ -10,6 +10,7 @@
   import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
+  import { motionMs } from "./motion";
   import { AGENT_LAUNCH_GRACE_MS, AGENT_LAUNCH_TIMEOUT_MS, agentLaunchReady } from "./agentLaunching";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
@@ -208,10 +209,6 @@
   let launchTimedOut = $state(false);
   let launchOverlayArmed = $state(false);
   let launchTimer: ReturnType<typeof setTimeout> | null = null;
-  const reduceMotion =
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   let launchShowTimer: ReturnType<typeof setTimeout> | null = null;
 
   function clearLaunchTimer(): void {
@@ -432,7 +429,7 @@
         class="launch-overlay"
         role="status"
         aria-label={launchLabel}
-        transition:fade={{ duration: reduceMotion ? 0 : 220 }}
+        transition:fade={{ duration: motionMs(220) }}
       >
         <Spinner size={28} />
         <span class="launch-label">{launchLabel}</span>

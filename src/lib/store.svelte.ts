@@ -180,6 +180,8 @@ class AppStore {
   pendingWorkspaceId = $state<string | null>(null);
   /** Bumped whenever a different workspace becomes visible (reveal animation). */
   workspaceSwitchToken = $state(0);
+  /** Bumped whenever a different tab becomes visible (reveal animation). */
+  tabSwitchToken = $state(0);
   private deferredSwitch = new DeferredSwitch({
     onPendingChange: (id) => {
       this.pendingWorkspaceId = id;
@@ -852,14 +854,22 @@ class AppStore {
     this.saveSoon(true);
   }
 
-  addTab(): void {
+  addTab(): string | null {
     const ws = this.workspace();
-    if (!ws) return;
+    if (!ws) return null;
     const tab = defaultTab(`Tab ${ws.tabs.length + 1}`);
     if (tab.root.kind === "pane") this.applyWorkspaceDefaults(ws, tab.root);
     ws.tabs.push(tab);
     ws.activeTabId = tab.id;
+    this.tabSwitchToken += 1;
     this.saveSoon();
+    return tab.root.kind === "pane" ? tab.root.id : null;
+  }
+
+  /** Open a tab and queue an agent command to run in its pane. */
+  addTabWithCommand(command: string): void {
+    const paneId = this.addTab();
+    if (paneId) this.queueAgentCommand(paneId, command);
   }
 
   requestCloseTab(id: string): void {
@@ -885,17 +895,22 @@ class AppStore {
     if (ws.tabs.length <= 1) {
       ws.tabs = [defaultTab()];
       ws.activeTabId = ws.tabs[0].id;
+      this.tabSwitchToken += 1;
     } else {
       ws.tabs = ws.tabs.filter((t) => t.id !== id);
-      if (ws.activeTabId === id) ws.activeTabId = ws.tabs[ws.tabs.length - 1].id;
+      if (ws.activeTabId === id) {
+        ws.activeTabId = ws.tabs[ws.tabs.length - 1].id;
+        this.tabSwitchToken += 1;
+      }
     }
     this.saveSoon(true);
   }
 
   switchTab(id: string): void {
     const ws = this.workspace();
-    if (ws && ws.tabs.some((t) => t.id === id)) {
+    if (ws && ws.tabs.some((t) => t.id === id) && ws.activeTabId !== id) {
       ws.activeTabId = id;
+      this.tabSwitchToken += 1;
       this.saveSoon();
     }
   }
@@ -1089,8 +1104,13 @@ class AppStore {
     if (!this.layout) return;
     const found = findTabByPane(this.layout, nodeId);
     if (!found) return;
-    if (this.layout.activeWorkspaceId !== found.ws.id) {
+    const wsChanged = this.layout.activeWorkspaceId !== found.ws.id;
+    if (wsChanged) {
       this.workspaceSwitchToken += 1;
+    } else if (found.ws.activeTabId !== found.tab.id) {
+      // One reveal per jump: the workspace stagger covers cross-workspace
+      // reveals, the tab fade covers same-workspace ones.
+      this.tabSwitchToken += 1;
     }
     this.layout.activeWorkspaceId = found.ws.id;
     found.ws.activeTabId = found.tab.id;

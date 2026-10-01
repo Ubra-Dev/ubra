@@ -21,6 +21,8 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
+  import { scale } from "svelte/transition";
+  import { MOTION_FAST_MS, motionMs } from "./motion";
   import AgentCliIcon from "./AgentCliIcon.svelte";
   import Icon from "./Icon.svelte";
   import { overlayFocus } from "./overlayFocus";
@@ -78,6 +80,7 @@
 />
 
 <div class="menu" role="menu" tabindex="-1" data-keyboard-overlay
+  transition:scale={{ duration: motionMs(MOTION_FAST_MS), start: 0.97 }}
   bind:this={menuEl} use:overlayFocus={{ initial: '[role="menuitem"]', opener }}
   onkeydown={onKeydown} style:left={cx + "px"} style:top={cy + "px"}
   onpointerenter={() => onHoverChange?.(true)}
@@ -102,6 +105,7 @@
 <style>
   .menu {
     position: fixed;
+    transform-origin: top left;
     z-index: 1000;
     display: flex;
     flex-direction: column;

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { openPath } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
+  import { MOTION_FAST_MS, motionMs, rise } from "./motion";
   import Icon from "./Icon.svelte";
   import {
     COPY_TOAST_DISMISS_MS,
@@ -78,11 +80,13 @@
 <div
   class="backdrop"
   data-keyboard-overlay
+  transition:fade={{ duration: motionMs(MOTION_FAST_MS) }}
   onclick={(e) => e.target === e.currentTarget && onClose()}
   onkeydown={(e) => e.key === "Escape" && onClose()}
 >
   <div
     class="panel"
+    transition:rise
     role="dialog"
     aria-modal="true"
     aria-label={`File preview: ${rel}`}
