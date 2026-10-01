@@ -561,7 +561,7 @@ mod windows_security {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -683,10 +683,15 @@ mod windows_security {
                 bInheritHandle: 0,
             };
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            // Full share mode, matching OpenOptions defaults: rename() and
+            // sibling opens (lock contention, log appends) re-open through
+            // here, and a zero share mode fails them with ERROR_SHARING_
+            // VIOLATION. Cross-user protection comes from the DACL, not the
+            // share mode.
             let handle = CreateFileW(
                 wide.as_ptr(),
                 GENERIC_READ | GENERIC_WRITE,
-                0,
+                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL,
