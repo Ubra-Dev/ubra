@@ -511,6 +511,27 @@ fn invalid_geometry_preserves_a_usable_session() {
     }
     manager.resize(id, 2, 1).unwrap();
     manager.resize(id, 80, 24).unwrap();
+
+    let mut handshake = Handshake::new();
+    let mut output = String::new();
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(got, data)) => {
+                if got == id {
+                    output.push_str(&data);
+                    handshake.note_output(&manager, id, &output);
+                }
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before write"),
+            Err(_) => break, // Quiet: warmed up.
+        }
+    }
+
     #[cfg(unix)]
     manager.write(id, "printf 'healthy-%s\\n' pane\n").unwrap();
     #[cfg(windows)]
@@ -518,13 +539,13 @@ fn invalid_geometry_preserves_a_usable_session() {
         .write(id, "Write-Output ('healthy-' + 'pane')\r\n")
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut output = String::new();
-    let mut handshake = Handshake::new();
     while !output.contains("healthy-pane") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Output(got, data)) => {
-                output.push_str(&data);
-                handshake.note_output(&manager, got, &output);
+                if got == id {
+                    output.push_str(&data);
+                    handshake.note_output(&manager, got, &output);
+                }
             }
             _ => panic!("rejected resize damaged session: {output:?}"),
         }
@@ -575,7 +596,7 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
             args: vec![
                 "-NoProfile".into(),
                 "-Command".into(),
-                "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; Write-Output ('CHILD:' + $p.Id); Start-Sleep 300".into(),
+                "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; [Console]::WriteLine('CHILD:' + $p.Id); Start-Sleep 300".into(),
             ],
             cols: 80,
             rows: 24,
@@ -584,17 +605,23 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
-    let mut handshake = Handshake::new();
+    let mut parent_handshake = Handshake::new();
+    let mut sibling_handshake = Handshake::new();
+    let mut sibling_output = String::new();
     let child = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Output(id, data)) if id == parent => {
                 output.push_str(&data);
-                handshake.note_output(&manager, id, &output);
+                parent_handshake.note_output(&manager, id, &output);
                 if let Some(line) = output.lines().find(|line| line.starts_with("CHILD:")) {
                     if let Ok(pid) = line.trim_start_matches("CHILD:").trim().parse::<i32>() {
                         break pid;
                     }
                 }
+            }
+            Ok(Event::Output(id, data)) if id == sibling => {
+                sibling_output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &sibling_output);
             }
             Ok(_) => {}
             Err(_) => panic!("child did not start: {output:?}"),
@@ -616,6 +643,23 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     assert!(processes
         .process(sysinfo::Pid::from_u32(child as u32))
         .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie));
+
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(id, data)) if id == sibling => {
+                sibling_output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &sibling_output);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
     #[cfg(unix)]
     manager
         .write(sibling, "printf 'sibling-%s\\n' alive\n")
@@ -626,8 +670,6 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
         .unwrap();
     let mut output = String::new();
     let deadline = Instant::now() + Duration::from_secs(10);
-    // Separate instance: the sibling pane's ConPTY emits its own query.
-    let mut sibling_handshake = Handshake::new();
     while !output.contains("sibling-alive") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Output(id, data)) if id == sibling => {
