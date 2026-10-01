@@ -18,7 +18,7 @@ describe("aboutMetadata", () => {
       comments: ABOUT_BLURB,
       license: ABOUT_LICENSE,
       website: ABOUT_WEBSITE,
-      websiteLabel: "GitHub",
+      websiteLabel: "Website",
     });
   });
 

@@ -7,10 +7,9 @@ import { agent } from "./agent.svelte";
 import { isEditableTarget } from "./shortcuts";
 import { findPane } from "./layout";
 import { store } from "./store.svelte";
+import { ISSUES_URL, REPO_URL } from "./site.ts";
 import { terminalCommands } from "./terminalCommands";
 import { toasts } from "./toasts.svelte.ts";
-
-const REPO_URL = "https://github.com/Ubra-Dev/ubra";
 
 function focusedElement(): HTMLElement | null {
   const el = document.activeElement;
@@ -137,7 +136,7 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       }
       case "minimize": await getCurrentWindow().minimize(); break;
       case "documentation": await openUrl(`${REPO_URL}#readme`); break;
-      case "report-issue": await openUrl(`${REPO_URL}/issues`); break;
+      case "report-issue": await openUrl(ISSUES_URL); break;
       case "quit": store.requestQuit(activeAgentCount()); break;
       case "quit-stop-agents": await invoke("quit_app_and_stop_agents"); break;
     }

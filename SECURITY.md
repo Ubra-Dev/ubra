@@ -9,8 +9,9 @@
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Instead, open a
-[private security advisory](https://github.com/Ubra-Dev/ubra/security/advisories/new)
-or email `dev@stackwares.com`.
+[private security advisory](https://github.com/Ubra-Dev/ubra/security/advisories/new),
+email `security@getubra.com`, or reach us via
+[getubra.com/contact](https://getubra.com/contact).
 
 Include: what you did, what you expected, what happened, and the OS / app
 version details if available. Expect an initial response within 7 days.

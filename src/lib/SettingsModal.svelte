@@ -45,6 +45,16 @@
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
   import {
+    CONTACT_URL,
+    ISSUES_URL,
+    LICENSE_URL,
+    PRIVACY_URL,
+    RELEASES_URL,
+    REPO_URL,
+    SITE_URL,
+    TERMS_URL,
+  } from "./site.ts";
+  import {
     formatResetCountdown,
     formatUpdatedAgo,
     joinLabels,
@@ -420,8 +430,6 @@
     invoke("play_sound", playbackPayload("done"))
       .catch((e) => console.error("ubra: test sound failed", e));
   }
-
-  const REPO_URL = "https://github.com/Ubra-Dev/ubra";
 
   function openOnboarding(): void {
     store.settingsOpen = false;
@@ -977,6 +985,11 @@
                 <div class="hint">
                   Helps improve Ubra. Anonymous events and crash reports only —
                   never code, file paths, or commands. Takes effect immediately.
+                  See the
+                  <button
+                    class="link"
+                    onclick={() => openExternal(PRIVACY_URL)}
+                  >Privacy Policy</button>.
                 </div>
               </div>
             {/if}
@@ -993,26 +1006,44 @@
               </div>
               <div class="about-sub">Agent runtime desktop app</div>
               <div class="links">
+                <button class="link" onclick={() => openExternal(SITE_URL)}>
+                  Website
+                </button>
                 <button class="link" onclick={() => openExternal(REPO_URL)}>
                   GitHub
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/issues`)}
+                  onclick={() => openExternal(ISSUES_URL)}
                 >
                   Report an issue
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/releases`)}
+                  onclick={() => openExternal(RELEASES_URL)}
                 >
                   Releases
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/blob/main/LICENSE`)}
+                  onclick={() => openExternal(LICENSE_URL)}
                 >
                   MIT License
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(PRIVACY_URL)}
+                >
+                  Privacy
+                </button>
+                <button class="link" onclick={() => openExternal(TERMS_URL)}>
+                  Terms
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(CONTACT_URL)}
+                >
+                  Contact
                 </button>
               </div>
               <div class="about-sub">© 2026 Ubra</div>

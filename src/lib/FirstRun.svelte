@@ -4,10 +4,12 @@
   import { onMount, tick } from "svelte";
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
   import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import { posthogLogs } from "./posthogLogs";
+  import { PRIVACY_URL } from "./site.ts";
   import { store } from "./store.svelte";
   import { telemetryStatus } from "./telemetry";
   import { applyTelemetryConsent } from "./telemetrySync";
@@ -287,6 +289,17 @@
             Help improve Ubra by sharing anonymous usage and crash reports.
             <span class="hint-inline">
               Never code, file paths, or commands. Change anytime in Settings.
+              <button
+                type="button"
+                class="inline-link"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  openUrl(PRIVACY_URL).catch(console.error);
+                }}
+              >
+                Privacy Policy
+              </button>
             </span>
           </span>
         </label>
@@ -589,6 +602,18 @@
   }
   .consent-row .hint-inline {
     color: var(--text-subtle);
+  }
+  .inline-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .inline-link:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
   }
   .status-tip {
     display: flex;

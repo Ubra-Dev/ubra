@@ -12,6 +12,8 @@ An agent runtime as a cross-platform desktop app (macOS, Linux, Windows).
 Workspaces → tabs → terminal panes running real coding-agent CLIs, with agent
 state badges, layout persistence, and agents that keep running while the window is hidden.
 
+Website: [getubra.com](https://getubra.com) · [Privacy](https://getubra.com/privacy) · [Terms](https://getubra.com/terms) · [Contact](https://getubra.com/contact) · Support: `support@getubra.com`
+
 Built with [Tauri v2](https://v2.tauri.app/) (Rust backend), Svelte + TypeScript,
 and [xterm.js](https://xtermjs.org/) for terminal rendering.
 

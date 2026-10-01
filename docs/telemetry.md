@@ -26,6 +26,9 @@ Two lanes share one PostHog project and one consent record:
 - Revoking stops new capture immediately and restores the previous panic
   hook. At most one batch queued before revocation may still deliver.
 - Consent state: `telemetry_status` → `{ supported, consented, active }`.
+- The user-facing policy lives at
+  [getubra.com/privacy](https://getubra.com/privacy), linked from onboarding
+  consent and Settings → App → Telemetry.
 
 ## Event catalog
 
