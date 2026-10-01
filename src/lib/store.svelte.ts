@@ -117,7 +117,7 @@ class AppStore {
   saveError = $state<string | null>(null);
   /** True while a layout save is scheduled or in flight. */
   saving = $state(false);
-  rightPanelOpen = $state(true);
+  rightPanelOpen = $state(false);
   rightPanelView = $state<RightPanelView>("explorer");
   rightPanelWidth = $state<number>(DEFAULT_RIGHT_PANEL_WIDTH);
   leftPanelOpen = $state(true);
