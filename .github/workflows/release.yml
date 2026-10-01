@@ -75,6 +75,9 @@ jobs:
         run: npm ci
 
       - name: Check tag matches app version
+        # Bash everywhere: windows-latest defaults to PowerShell, which
+        # cannot parse this step (Git Bash ships on the runner).
+        shell: bash
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           CONF_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
@@ -155,6 +158,8 @@ jobs:
           # frontend build (which needs these keys present) stays green.
           PUBLIC_POSTHOG_HOST: ${{ secrets.PUBLIC_POSTHOG_HOST }}
           PUBLIC_POSTHOG_PROJECT_TOKEN: ${{ secrets.PUBLIC_POSTHOG_PROJECT_TOKEN }}
+        # Bash everywhere: windows-latest defaults to PowerShell (see above).
+        shell: bash
         run: |
           if [ -n "$TAURI_TARGET" ]; then
             npm run tauri build -- --target "$TAURI_TARGET"
