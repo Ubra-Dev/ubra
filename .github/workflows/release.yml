@@ -252,34 +252,137 @@ jobs:
           path: ${{ matrix.bundle_dir }}
           if-no-files-found: error
 
-  publish:
+  # Exercise the exact installer artifacts before publication. Each platform
+  # installs and launches its bundle with an isolated data directory, then
+  # runs the same PTY, Explorer, Source Control, and tab UI checks.
+  smoke:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-arm64
+            os: macos-latest
+            artifact: bundle-macOS-arm64
+          - name: macOS-intel
+            os: macos-15-intel
+            artifact: bundle-macOS-intel
+          - name: Linux-x86_64
+            os: ubuntu-latest
+            artifact: bundle-Linux
+          - name: Windows-x86_64
+            os: windows-latest
+            artifact: bundle-Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: smoke-bundle
+
+      - name: Install Linux GUI test prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb dbus-x11
+
+      - name: Install and locate packaged app (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          expected_arch="${{ matrix.name == 'macOS-arm64' && 'arm64' || 'x86_64' }}"
+          actual_arch="$(uname -m)"
+          if [ "$expected_arch" = arm64 ] && [ "$actual_arch" != arm64 ]; then
+            echo "::error::Expected arm64 runner, got $actual_arch"; exit 1
+          fi
+          if [ "$expected_arch" = x86_64 ] && [ "$actual_arch" != x86_64 ]; then
+            echo "::error::Expected Intel runner, got $actual_arch"; exit 1
+          fi
+          dmg="$(find smoke-bundle -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          mkdir -p "$RUNNER_TEMP/ubra-dmg"
+          hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$RUNNER_TEMP/ubra-dmg"
+          app="$RUNNER_TEMP/ubra-dmg/Ubra.app/Contents/MacOS/ubra"
+          test -x "$app"
+          echo "APP_BINARY=$app" >> "$GITHUB_ENV"
+
+      - name: Install and locate packaged app (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          deb="$(find smoke-bundle -name '*.deb' -print -quit)"
+          test -n "$deb"
+          sudo apt-get install -y "$PWD/$deb"
+          test -x /usr/bin/ubra
+          echo "APP_BINARY=/usr/bin/ubra" >> "$GITHUB_ENV"
+
+      - name: Install and locate packaged app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem smoke-bundle -Filter *.msi -Recurse | Select-Object -First 1
+          if (-not $installer) { throw 'No MSI installer found in release artifact' }
+          $process = Start-Process msiexec.exe -ArgumentList @('/i', $installer.FullName, '/qn', '/norestart') -Wait -PassThru
+          if ($process.ExitCode -notin @(0, 3010)) { throw "MSI installation failed: $($process.ExitCode)" }
+          $app = Get-ChildItem 'C:\Program Files' -Filter ubra.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw 'Installed ubra.exe was not found under Program Files' }
+          "APP_BINARY=$($app.FullName)" >> $env:GITHUB_ENV
+
+      - name: Prepare isolated PTY and git fixtures
+        run: node scripts/prepare-native-smoke.mjs
+
+      - name: Run packaged app smoke suite (macOS and Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:native-smoke
+        env:
+          TAURI_WEBDRIVER_PORT: 4445
+
+      - name: Run packaged app smoke suite (Linux WebDriver configuration)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dbus-run-session -- env TAURI_WEBDRIVER_PORT=4445 npm run test:native-smoke
+
+      - name: Record native smoke evidence
+        if: always()
+        shell: bash
+        env:
+          SMOKE_NAME: ${{ matrix.name }}
+        run: |
+          {
+            echo "## Native smoke: $SMOKE_NAME"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Runner: $RUNNER_OS / $RUNNER_ARCH"
+            echo "- Result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p .native-smoke/evidence
+          printf '{"commit":"%s","platform":"%s","runner_os":"%s","runner_arch":"%s","result":"%s"}\n' \
+            "$GITHUB_SHA" "$SMOKE_NAME" "$RUNNER_OS" "$RUNNER_ARCH" "${{ job.status }}" \
+            > .native-smoke/evidence/result.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-smoke-${{ matrix.name }}
+          path: .native-smoke/evidence/result.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  publish:
+    needs: [build, smoke]
     environment: release
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      # A successful build is not proof that a packaged webview/PTY works.
-      # Missing evidence is deliberately a publication blocker.
-      - name: Require native smoke evidence for this commit
-        env:
-          RELEASE_SHA: ${{ github.sha }}
-          MACOS_SHA: ${{ vars.NATIVE_SMOKE_SHA_MACOS }}
-          LINUX_SHA: ${{ vars.NATIVE_SMOKE_SHA_LINUX }}
-          WINDOWS_SHA: ${{ vars.NATIVE_SMOKE_SHA_WINDOWS }}
-        run: |
-          for platform in MACOS LINUX WINDOWS; do
-            case "$platform" in
-              MACOS) verified_sha="$MACOS_SHA" ;;
-              LINUX) verified_sha="$LINUX_SHA" ;;
-              WINDOWS) verified_sha="$WINDOWS_SHA" ;;
-            esac
-            if [ "$verified_sha" != "$RELEASE_SHA" ]; then
-              echo "::error::$platform native smoke is unverified for $RELEASE_SHA; publication is blocked."
-              exit 1
-            fi
-          done
-
       - uses: actions/download-artifact@v8
         with:
           path: bundles

@@ -5,28 +5,18 @@ see the [README](../README.md) and [Releases](https://github.com/Ubra-Dev/ubra/r
 
 ## Release gates and native smoke
 
-Pushing `v*` tags invokes the full CI matrix first. Only after every platform
-passes does the release workflow build and stage its bundles. GitHub release
-publication is then **blocked by default** until all three repository Actions
-variables below contain the tagged commit's full SHA:
+Pushing `v*` tags invokes the full CI matrix, builds the platform bundles, and
+installs and launches each exact bundle on native GitHub-hosted runners before
+publication. The required smoke matrix covers macOS arm64, macOS Intel, Linux
+x86_64, and Windows x86_64. It checks app startup, a real PTY command and marker
+file, Explorer rendering, Source Control staging/commit/push to a local bare
+remote, and tab creation. Each runner uploads a commit- and platform-stamped
+evidence artifact. Any failed smoke job blocks publication.
 
-- `NATIVE_SMOKE_SHA_MACOS`
-- `NATIVE_SMOKE_SHA_LINUX`
-- `NATIVE_SMOKE_SHA_WINDOWS`
-
-Download the `bundle-macOS-arm64`, `bundle-macOS-intel`, `bundle-Linux`, and
-`bundle-Windows` artifacts from that release run and smoke-test each on its
-native OS. Both macOS artifacts share the `NATIVE_SMOKE_SHA_MACOS` variable:
-smoke each architecture where hardware allows and record which builds were
-covered. Record the commit, OS, bundle, checks and failures in the release
-review before setting that platform's variable. A failed or unavailable
-platform remains unverified: leave its variable unset and do not publish.
-After all evidence is recorded, rerun the failed publish job. The `release`
-environment can additionally require maintainer approval; the SHA checks fail
-closed even if environment reviewers are not configured.
-
-Neither automated bundle creation nor this documentation establishes a successful
-native smoke run.
+The automated checks do not exercise every item in [VERIFYING.md](VERIFYING.md).
+Tray interaction, audible notifications, focus details, full split/move/zoom
+behavior, and updater installation still need manual QA. The `release`
+environment can additionally require maintainer approval.
 
 ## Release signing and updates (one-time maintainer setup)
 
