@@ -74,6 +74,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install isolated native smoke dependencies
+        run: npm ci
+        working-directory: tests/native-smoke
+
       - name: Check tag matches app version
         shell: bash
         run: |
@@ -343,13 +347,15 @@ jobs:
 
       - name: Run packaged app smoke suite (macOS and Windows)
         if: runner.os != 'Linux'
-        run: npm run test:native-smoke
+        run: npm run smoke
+        working-directory: tests/native-smoke
         env:
           TAURI_WEBDRIVER_PORT: 4445
 
       - name: Run packaged app smoke suite (Linux WebDriver configuration)
         if: runner.os == 'Linux'
-        run: xvfb-run -a dbus-run-session -- env TAURI_WEBDRIVER_PORT=4445 npm run test:native-smoke
+        run: xvfb-run -a dbus-run-session -- env TAURI_WEBDRIVER_PORT=4445 npm run smoke
+        working-directory: tests/native-smoke
 
       - name: Record native smoke evidence
         if: always()

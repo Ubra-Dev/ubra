@@ -16,7 +16,9 @@ evidence artifact. Any failed smoke job blocks publication.
 The automated checks do not exercise every item in [VERIFYING.md](VERIFYING.md).
 Tray interaction, audible notifications, focus details, full split/move/zoom
 behavior, and updater installation still need manual QA. The `release`
-environment can additionally require maintainer approval.
+environment can additionally require maintainer approval. WebDriver dependencies
+are isolated under `tests/native-smoke` so they do not enter the shipped app's
+dependency graph or its existing application dependency audit.
 
 ## Release signing and updates (one-time maintainer setup)
 

@@ -1,6 +1,6 @@
 export const config = {
   runner: "local",
-  specs: ["./tests/native-smoke/**/*.spec.mjs"],
+  specs: ["./release.spec.mjs"],
   maxInstances: 1,
   logLevel: "info",
   framework: "mocha",
@@ -8,8 +8,6 @@ export const config = {
   services: [["@wdio/tauri-service", {
     appBinaryPath: process.env.APP_BINARY,
     driverProvider: "embedded",
-    // The service passes this to the app; Rust registers the embedded driver
-    // only when it is present.
     embeddedPort: 4445,
     appArgs: [],
   }]],
