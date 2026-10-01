@@ -15,6 +15,10 @@ All notable changes to Ubra are documented here. The format follows
   (relaunch or explicit restart); the restart button names the agent.
 - Terminal dispose no longer kills its PTY while the layout is unloaded,
   fixing agent loss during hot-reload windows.
+- Visible terminal panes render with the GPU (WebGL) renderer when the
+  webview supports it, falling back to canvas automatically otherwise;
+  hidden tabs release their GPU contexts. Toggle in
+  Settings → Appearance.
 
 ## [0.1.0] — Initial development snapshot
 

@@ -105,6 +105,7 @@ export const SCROLLBACK_OPTIONS = [100, 1000, 5000, 10000];
 export const DEFAULT_TERM_OPACITY = 100;
 export const MIN_TERM_OPACITY = 10;
 export const MAX_TERM_OPACITY = 100;
+export const DEFAULT_TERM_GPU = true;
 
 class AppStore {
   layout = $state<Layout | null>(null);
@@ -135,6 +136,8 @@ class AppStore {
   sidebarSplit = $state<number>(DEFAULT_SPLIT_RATIO);
   termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
   termOpacity = $state<number>(DEFAULT_TERM_OPACITY);
+  /** Prefer the GPU terminal renderer; canvas is the automatic fallback. */
+  termGpu = $state<boolean>(DEFAULT_TERM_GPU);
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
   toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
   soundEnabled = $state<boolean>(true);
@@ -212,6 +215,8 @@ class AppStore {
       if (savedOpacity !== null) {
         this.termOpacity = this.clampOpacity(Number(savedOpacity));
       }
+      const savedGpu = window.localStorage.getItem("ubra.termGpu");
+      if (savedGpu !== null) this.termGpu = savedGpu !== "false";
       const savedDelivery = window.localStorage.getItem("ubra.notifyDelivery");
       if (savedDelivery !== null) this.notifyDelivery = parseDelivery(savedDelivery);
       const savedPosition = window.localStorage.getItem("ubra.toastPosition");
@@ -568,6 +573,11 @@ class AppStore {
   setSoundEnabled(enabled: boolean): void {
     this.soundEnabled = enabled;
     this.savePref("ubra.soundEnabled", String(enabled));
+  }
+
+  setTermGpu(enabled: boolean): void {
+    this.termGpu = enabled;
+    this.savePref("ubra.termGpu", String(enabled));
   }
 
   setAutoLaunchAgent(enabled: boolean): void {

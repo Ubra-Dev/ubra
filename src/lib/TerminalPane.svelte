@@ -3,6 +3,7 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
   import { WebLinksAddon } from "@xterm/addon-web-links";
+  import type { WebglAddon } from "@xterm/addon-webgl";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -20,6 +21,7 @@
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
   import { frameCoalescer, trailingDebouncer } from "./schedule";
   import { terminalCommands } from "./terminalCommands";
+  import { disableGpuRenderer, enableGpuRenderer } from "./terminalGpu";
   import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
@@ -39,6 +41,8 @@
     findToken: number;
     /** Scrollback lines kept. */
     scrollback: number;
+    /** False forces the canvas renderer (Settings toggle). */
+    gpuEnabled: boolean;
     onExit?: () => void;
     /**
      * Fired once the live PTY id is known. `attached` means a surviving
@@ -57,6 +61,7 @@
     focusToken,
     findToken,
     scrollback,
+    gpuEnabled,
     onExit,
     onSpawn,
     onDispose,
@@ -65,6 +70,7 @@
   let container: HTMLDivElement | undefined = $state();
   let terminal: Terminal | null = null;
   let refit: (() => void) | null = null;
+  let setGpuEnabled: ((on: boolean) => void) | null = null;
   let searchAddon: SearchAddon | null = null;
   let finding = $state(false);
   let findText = $state("");
@@ -121,6 +127,13 @@
     if (terminal) terminal.options.scrollback = lines;
   });
 
+  $effect(() => {
+    const on = gpuEnabled;
+    // Null until onMount installs the handler; the mount path reads the
+    // initial prop directly, so a pre-mount run is safely skipped.
+    setGpuEnabled?.(on);
+  });
+
   onMount(() => {
     const term = new Terminal({
       cursorBlink: true,
@@ -146,6 +159,35 @@
 
     let paneId: number | null = null;
     let disposed = false;
+    // GPU renderer state: visible panes upgrade to WebGL while hidden ones
+    // stay on (or drop back to) canvas, so background tabs never hold GPU
+    // contexts. A failed attempt waits for the next hide/show cycle instead
+    // of logging once per frame during resize bursts.
+    let gpu: WebglAddon | null = null;
+    let gpuFailed = false;
+    let gpuWanted = gpuEnabled;
+    const ensureGpu = (): void => {
+      if (disposed || gpu !== null || gpuFailed || !gpuWanted) return;
+      gpu = enableGpuRenderer(term);
+      if (gpu !== null) console.debug(`ubra: GPU terminal renderer active (${sessionKey})`);
+      else gpuFailed = true;
+    };
+    const dropGpu = (): void => {
+      gpuFailed = false;
+      gpu = disableGpuRenderer(gpu);
+    };
+    setGpuEnabled = (on: boolean) => {
+      gpuWanted = on;
+      if (disposed) return;
+      if (!on) dropGpu();
+      else if (
+        container &&
+        container.clientWidth >= 10 &&
+        container.clientHeight >= 10
+      )
+        ensureGpu();
+      // Hidden panes upgrade on show via doFit.
+    };
     const unlistens: UnlistenFn[] = [];
     const attachment = new TerminalAttachment();
     let lease: SessionLease | null = null;
@@ -245,8 +287,12 @@
         !container ||
         container.clientWidth < 10 ||
         container.clientHeight < 10
-      )
+      ) {
+        // Hidden: release the GPU context; re-acquired on show.
+        dropGpu();
         return;
+      }
+      ensureGpu();
       fit.fit();
       ptyResize.schedule(sendPtyResize);
     };
@@ -388,7 +434,9 @@
       disposed = true;
       terminal = null;
       refit = null;
+      setGpuEnabled = null;
       searchAddon = null;
+      dropGpu();
       fitFrame.cancel();
       ptyResize.cancel();
       if (copyTimer) clearTimeout(copyTimer);
