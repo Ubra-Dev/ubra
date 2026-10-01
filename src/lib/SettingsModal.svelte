@@ -9,6 +9,8 @@
   import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import LoadingText from "./LoadingText.svelte";
+  import { DEFAULT_LOADING_TEXT } from "./loadingGradient";
   import Spinner from "./Spinner.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
@@ -70,7 +72,8 @@
     | "shortcuts"
     | "app"
     | "workspace"
-    | "usage";
+    | "usage"
+    | "debug";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
@@ -79,6 +82,7 @@
     { id: "app", label: "App", icon: "info" },
     { id: "workspace", label: "Workspace", icon: "layers" },
     { id: "usage", label: "Usage", icon: "activity" },
+    { id: "debug", label: "Debug", icon: "tool" },
   ];
 
   let section = $state<SectionId>("app");
@@ -93,6 +97,8 @@
   let appName = $state("Ubra");
   let appVersion = $state("");
   let fontQuery = $state("");
+  /** Debug-section draft for the loading-animation preview text. */
+  let debugLoadingText = $state(DEFAULT_LOADING_TEXT);
   /** Workspace-section draft: "" = off, a CLI id, or CUSTOM_COMMAND. */
   let cliSelection = $state("");
   let cliCustom = $state("");
@@ -1359,6 +1365,35 @@
               {/if}
             {/if}
           </section>
+        {:else if section === "debug"}
+          <section aria-label="Debug">
+            <h2>Debug</h2>
+            <div class="group">
+              <h3 class="group-label">Loading animation</h3>
+              <div class="card">
+                <div class="row debug-preview">
+                  <LoadingText text={debugLoadingText || DEFAULT_LOADING_TEXT} />
+                </div>
+                <label class="row">
+                  <span class="label">Preview text</span>
+                  <input
+                    type="text"
+                    bind:value={debugLoadingText}
+                    placeholder={DEFAULT_LOADING_TEXT}
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    aria-label="Loading animation preview text"
+                    class="file-input"
+                  />
+                </label>
+              </div>
+              <div class="hint">
+                Silkscreen text over the animated brand gradient. Clear the
+                field to fall back to &ldquo;{DEFAULT_LOADING_TEXT}&rdquo;.
+              </div>
+            </div>
+          </section>
         {/if}
       </div>
     </div>
@@ -1842,6 +1877,11 @@
   /* Square icon-only action; keeps its accessible name in markup. */
   .btn-icon {
     padding: 5px 8px;
+  }
+  /* Centered stage for the Debug loading-animation preview. */
+  .debug-preview {
+    justify-content: center;
+    padding: 16px 0;
   }
   .file-input {
     border: 1px solid var(--input-border);

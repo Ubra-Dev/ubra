@@ -25,6 +25,10 @@ All notable changes to Ubra are documented here. The format follows
   webview supports it, falling back to canvas automatically otherwise;
   hidden tabs release their GPU contexts. Toggle in
   Settings → Appearance.
+- Panes launching an agent CLI show a centered progress indicator until
+  the CLI's UI is detected, then fade the terminal in (reduced-motion
+  users get an instant cutover; CLIs without detection rules resolve
+  after a bounded wait).
 
 ## [0.1.0] — Initial development snapshot
 

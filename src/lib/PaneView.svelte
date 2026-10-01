@@ -1,13 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import AgentCliIcon from "./AgentCliIcon.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
+  import Spinner from "./Spinner.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
+  import { AGENT_LAUNCH_TIMEOUT_MS, agentLaunchReady } from "./agentLaunching";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import { paneDisplayTitle, type PaneNode } from "./layout";
@@ -195,15 +198,64 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
+  // Agent launch overlay: shown from the moment we type an agent command
+  // until the backend reports recognized agent UI (or the wait times out).
+  // A new spawn supersedes any previous wait; exits and unmounts clear it.
+  let launchStartedAt = $state<number | null>(null);
+  let launchTimedOut = $state(false);
+  let launchTimer: ReturnType<typeof setTimeout> | null = null;
+  const reduceMotion =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function clearLaunchTimer(): void {
+    if (launchTimer !== null) {
+      clearTimeout(launchTimer);
+      launchTimer = null;
+    }
+  }
+
+  function clearLaunch(): void {
+    clearLaunchTimer();
+    launchStartedAt = null;
+    launchTimedOut = false;
+  }
+
+  onMount(() => () => clearLaunchTimer());
+
+  const launchReady = $derived(agentLaunchReady(agent.paneState(node.id)));
+  const launching = $derived(
+    launchStartedAt !== null && !launchTimedOut && !launchReady && !exited,
+  );
+  const launchLabel = $derived(
+    `Launching ${agentLabel ?? node.agentCli?.trim().split(/\s+/)[0] ?? "agent"}…`,
+  );
+
+  // Retire a satisfied wait so the timeout timer never fires late.
+  $effect(() => {
+    if (launchStartedAt !== null && (launchReady || exited)) clearLaunch();
+  });
+
   function onTerminalSpawn(id: number, attached: boolean, firstDelivery: boolean): void {
     agent.register(id, node.id);
+    clearLaunch();
     // Session queue wins; otherwise a fresh (non-attached) first delivery
     // reruns the pane's persisted agent. Attached sessions already run it.
     const command =
       store.takePendingTerminalCommand(node.id) ??
       (!attached && firstDelivery ? store.takeRestoreAgent(node.id) : null);
     if (!command) return;
+    const startedAt = Date.now();
+    launchStartedAt = startedAt;
+    launchTimer = setTimeout(() => {
+      launchTimer = null;
+      launchTimedOut = true;
+    }, AGENT_LAUNCH_TIMEOUT_MS);
     invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
+      // A failed send never launches; drop only our own wait, since a
+      // newer spawn may already be waiting.
+      if (launchStartedAt === startedAt) clearLaunch();
       console.error("ubra: failed to start onboarding command", error);
       toasts.push(
         "Couldn't send the agent command",
@@ -348,6 +400,17 @@
         onDispose={(id) => agent.unregister(id)}
       />
     {/key}
+    {#if launching}
+      <div
+        class="launch-overlay"
+        role="status"
+        aria-label={launchLabel}
+        transition:fade={{ duration: reduceMotion ? 0 : 220 }}
+      >
+        <Spinner size={28} />
+        <span class="launch-label">{launchLabel}</span>
+      </div>
+    {/if}
     {#if exited}
       <button
         class="respawn"
@@ -520,6 +583,22 @@
     position: relative;
     flex: 1 1 0;
     min-height: 0;
+  }
+  .launch-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: var(--terminal-background);
+    color: var(--text-subtle);
+  }
+  .launch-label {
+    font: 12px var(--font-ui);
+    user-select: none;
   }
   .respawn {
     position: absolute;
