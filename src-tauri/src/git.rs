@@ -670,6 +670,27 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
+    /// Repo-local identity so `commit` never depends on ambient git config.
+    fn set_identity(dir: &Path) {
+        for (key, value) in [
+            ("user.email", "ubra-test@example.com"),
+            ("user.name", "Ubra Test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["config", "--local", key, value])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git config {key} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn parses_branch_headers() {
         assert_eq!(
@@ -792,6 +813,7 @@ mod tests {
         let root = root_str(&dir);
 
         init(&root).unwrap();
+        set_identity(&dir);
         let fresh = status(&root).unwrap();
         assert!(fresh.is_repo);
         assert!(fresh.branch.is_some());

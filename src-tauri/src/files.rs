@@ -51,7 +51,11 @@ fn resolve_under_root(root: &str, rel_path: &str) -> Result<std::path::PathBuf, 
     if root.contains('\0') || rel_path.contains('\0') {
         return Err("Path must not contain NUL bytes.".to_string());
     }
-    if Path::new(rel_path).is_absolute() {
+    // Normalize separators first: `/etc` has no drive prefix so Windows
+    // reports it as relative; the lexical check keeps the rejection (and
+    // its message) identical on every platform. Mirrors check_rel_path.
+    let normalized = rel_path.replace('\\', "/");
+    if Path::new(rel_path).is_absolute() || normalized.starts_with('/') {
         return Err("Path must be relative to the workspace.".to_string());
     }
     let canonical_root =
