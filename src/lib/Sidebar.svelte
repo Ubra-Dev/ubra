@@ -346,10 +346,11 @@
       {@const branch = workspaceGit.branchFor(ws.id)}
       {@const git = workspaceGit.summaryFor(ws.id)}
       {@const sync = git ? gitSyncLabel(git) : ""}
+      {@const shownActive = store.pendingWorkspaceId ?? store.layout.activeWorkspaceId}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="ws"
-        class:active={ws.id === store.layout.activeWorkspaceId}
+        class:active={ws.id === shownActive}
         class:dragging={dragId === ws.id}
         class:drop-before={dropId === ws.id && dropPos === "before"}
         class:drop-after={dropId === ws.id && dropPos === "after"}
@@ -375,7 +376,7 @@
           <button
             class="name"
             title={branch ? `${ws.name} — ${branch}` : ws.name}
-            onclick={() => store.switchWorkspace(ws.id)}
+            onclick={() => store.requestSwitchWorkspace(ws.id)}
             ondblclick={() => {
               editing = ws.id;
               draft = ws.name;

@@ -308,7 +308,10 @@
 
   onMount(() => {
     message = draftCache.get(root) ?? "";
-    void loadStatus();
+    // The view remounts on every workspace switch: let the reveal frame
+    // paint before kicking off git IPC.
+    const frame = requestAnimationFrame(() => void loadStatus());
+    return () => cancelAnimationFrame(frame);
   });
 </script>
 

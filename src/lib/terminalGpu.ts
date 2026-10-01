@@ -1,5 +1,13 @@
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { Terminal } from "@xterm/xterm";
+import { frameBudgetQueue, type FrameBudgetQueue } from "./schedule.ts";
+
+/**
+ * Shared GPU-upgrade queue: revealing a multi-pane workspace re-acquires one
+ * WebGL context per pane, so upgrades drain at most two per frame instead of
+ * all landing in the reveal frame. Keyed by pane session key (latest wins).
+ */
+export const gpuUpgradeQueue: FrameBudgetQueue = frameBudgetQueue(2);
 
 /**
  * Probe for WebGL2 support. Injectable so unit tests can run without a DOM;

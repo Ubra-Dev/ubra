@@ -72,6 +72,24 @@
     else updater.stopAutoCheck();
   });
 
+  // Workspace reveal animation: `ws-enter` marks the newly shown workspace
+  // so its panes fade in. The class comes from the pending id while hidden
+  // (animations start exactly on unhide) and is held via enterWsId until
+  // the stagger finishes. Token 0 is the boot state: no animation on load.
+  let enterWsId = $state<string | null>(null);
+  let enterTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const token = store.workspaceSwitchToken;
+    const id = store.layout?.activeWorkspaceId ?? null;
+    if (!token || !id) return;
+    enterWsId = id;
+    if (enterTimer) clearTimeout(enterTimer);
+    enterTimer = setTimeout(() => {
+      if (enterWsId === id) enterWsId = null;
+      enterTimer = null;
+    }, 500);
+  });
+
   function onGlobalKeyDown(e: KeyboardEvent): void {
     if (e.defaultPrevented || e.isComposing) return;
     const isMac = isMacPlatform(navigator.platform);
@@ -126,7 +144,11 @@
           <TabBar />
           <div class="tabs">
             {#each store.layout.workspaces as ws (ws.id)}
-              <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
+              <div
+                class="ws"
+                class:ws-enter={ws.id === store.pendingWorkspaceId || ws.id === enterWsId}
+                hidden={ws.id !== store.layout.activeWorkspaceId}
+              >
                 {#each ws.tabs as tab (tab.id)}
                   <div class="tab" hidden={tab.id !== ws.activeTabId}>
                     <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />

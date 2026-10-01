@@ -63,6 +63,73 @@ export function frameCoalescer(
   };
 }
 
+export interface FrameBudgetQueue {
+  /** Enqueue `fn` under `key`, replacing any callback queued for that key. */
+  push(key: string, fn: () => void): void;
+  /** Drop the queued callback for `key`, if any. */
+  drop(key: string): void;
+  /** Drop every queued callback. */
+  cancel(): void;
+  readonly depth: number;
+}
+
+/**
+ * Drain a deduplicated queue across frames, running at most `maxPerFrame`
+ * callbacks per frame (minimum 1). Callbacks queued while a batch runs wait
+ * for a later frame; a throwing callback is reported and the drain continues
+ * so one failure never wedges the queue.
+ */
+export function frameBudgetQueue(
+  maxPerFrame: number,
+  clock: FrameClock = browserFrameClock,
+): FrameBudgetQueue {
+  const budget = Math.max(1, Math.floor(maxPerFrame));
+  const queued = new Map<string, () => void>();
+  let scheduled = false;
+  let handle = 0;
+  const run = (): void => {
+    scheduled = false;
+    const batch = [...queued.keys()].slice(0, budget);
+    for (const key of batch) {
+      const fn = queued.get(key);
+      if (!fn) continue;
+      queued.delete(key);
+      try {
+        fn();
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    if (queued.size > 0) {
+      scheduled = true;
+      handle = clock.request(run);
+    }
+  };
+  const arm = (): void => {
+    if (scheduled) return;
+    scheduled = true;
+    handle = clock.request(run);
+  };
+  return {
+    push(key: string, fn: () => void): void {
+      queued.set(key, fn);
+      arm();
+    },
+    drop(key: string): void {
+      queued.delete(key);
+    },
+    cancel(): void {
+      queued.clear();
+      if (!scheduled) return;
+      scheduled = false;
+      clock.cancel(handle);
+    },
+    get depth(): number {
+      return queued.size;
+    },
+  };
+}
+
 /** Minimal setTimeout-shaped clock; defaults to the browser's. */
 export interface TimerClock {
   set(callback: () => void, ms: number): unknown;

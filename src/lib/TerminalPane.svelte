@@ -21,7 +21,7 @@
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
   import { frameCoalescer, trailingDebouncer } from "./schedule";
   import { terminalCommands } from "./terminalCommands";
-  import { disableGpuRenderer, enableGpuRenderer } from "./terminalGpu";
+  import { disableGpuRenderer, enableGpuRenderer, gpuUpgradeQueue } from "./terminalGpu";
   import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
@@ -168,12 +168,19 @@
     let gpuWanted = gpuEnabled;
     const ensureGpu = (): void => {
       if (disposed || gpu !== null || gpuFailed || !gpuWanted) return;
-      gpu = enableGpuRenderer(term);
-      if (gpu !== null) console.debug(`ubra: GPU terminal renderer active (${sessionKey})`);
-      else gpuFailed = true;
+      // Upgrades drain through the shared queue (latest wins per pane) so a
+      // multi-pane reveal never pays N WebGL context creations in one frame.
+      // The canvas fit already ran, so panes paint correctly while queued.
+      gpuUpgradeQueue.push(sessionKey, () => {
+        if (disposed || gpu !== null || gpuFailed || !gpuWanted) return;
+        gpu = enableGpuRenderer(term);
+        if (gpu !== null) console.debug(`ubra: GPU terminal renderer active (${sessionKey})`);
+        else gpuFailed = true;
+      });
     };
     const dropGpu = (): void => {
       gpuFailed = false;
+      gpuUpgradeQueue.drop(sessionKey);
       gpu = disableGpuRenderer(gpu);
     };
     setGpuEnabled = (on: boolean) => {

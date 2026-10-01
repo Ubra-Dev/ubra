@@ -126,9 +126,12 @@
     }
   });
 
-  // Active workspace root changed: re-resolve dirty state immediately.
+  // Active workspace root changed: re-resolve dirty state after the reveal
+  // frame paints, so the git scan never competes with the switch itself.
   $effect(() => {
-    dirtyRefresh.request(wsRoot);
+    const root = wsRoot;
+    const frame = requestAnimationFrame(() => dirtyRefresh.request(root));
+    return () => cancelAnimationFrame(frame);
   });
 
   const usageLabels = $derived(

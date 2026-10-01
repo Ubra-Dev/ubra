@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { agentClis } from "./agentClis.svelte";
+import { DeferredSwitch } from "./deferredSwitch";
 import {
   activeTab,
   activeWorkspace,
@@ -171,6 +172,19 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
+  /**
+   * Workspace id highlighted in the sidebar while a deferred switch is still
+   * scheduled; null when idle. Lets the highlight paint on click, a frame
+   * before the canvas reveal commits.
+   */
+  pendingWorkspaceId = $state<string | null>(null);
+  /** Bumped whenever a different workspace becomes visible (reveal animation). */
+  workspaceSwitchToken = $state(0);
+  private deferredSwitch = new DeferredSwitch({
+    onPendingChange: (id) => {
+      this.pendingWorkspaceId = id;
+    },
+  });
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
@@ -664,7 +678,7 @@ class AppStore {
     if (typeof dir !== "string" || dir.trim() === "") return;
     const existing = findWorkspaceByRoot(this.layout.workspaces, dir);
     if (existing) {
-      this.switchWorkspace(existing.id);
+      this.requestSwitchWorkspace(existing.id);
       toasts.push(`"${existing.name}" is already open.`, "", "", {
         kind: "copy",
       });
@@ -694,6 +708,7 @@ class AppStore {
     workspace.root = projectDirectory;
     this.layout.workspaces.push(workspace);
     this.layout.activeWorkspaceId = workspace.id;
+    this.workspaceSwitchToken += 1;
     const tab = workspace.tabs[0];
     for (const id of collectPaneIds(tab.root)) {
       const node = findPane(tab.root, id);
@@ -717,15 +732,51 @@ class AppStore {
     const ws = defaultWorkspace(`Workspace ${this.layout.workspaces.length + 1}`);
     this.layout.workspaces.push(ws);
     this.layout.activeWorkspaceId = ws.id;
+    this.workspaceSwitchToken += 1;
     this.saveSoon();
   }
 
   switchWorkspace(id: string): void {
     if (!this.layout) return;
-    if (this.layout.workspaces.some((w) => w.id === id)) {
+    if (
+      this.layout.workspaces.some((w) => w.id === id) &&
+      this.layout.activeWorkspaceId !== id
+    ) {
       this.layout.activeWorkspaceId = id;
+      this.workspaceSwitchToken += 1;
       this.saveSoon();
     }
+  }
+
+  /**
+   * UI-initiated workspace switch: the sidebar highlights `id` synchronously
+   * while the canvas reveal commits on the next frame, so the click always
+   * paints first. Rapid requests collapse; only the latest commits.
+   */
+  requestSwitchWorkspace(id: string): void {
+    if (!this.layout) return;
+    if (!this.layout.workspaces.some((w) => w.id === id)) return;
+    if (id === this.layout.activeWorkspaceId) return;
+    this.deferredSwitch.request(id, () => this.switchWorkspace(id));
+  }
+
+  /**
+   * UI-initiated reveal: highlights the pane's workspace synchronously and
+   * switches workspace+tab on the next frame. Already-visible panes reveal
+   * synchronously since there is nothing to defer.
+   */
+  requestRevealPane(nodeId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, nodeId);
+    if (!found) return;
+    if (
+      found.ws.id === this.layout.activeWorkspaceId &&
+      found.tab.id === found.ws.activeTabId
+    ) {
+      this.revealPane(nodeId);
+      return;
+    }
+    this.deferredSwitch.request(found.ws.id, () => this.revealPane(nodeId));
   }
 
   renameWorkspace(id: string, name: string): void {
@@ -783,6 +834,7 @@ class AppStore {
 
   private doCloseWorkspace(id: string): void {
     if (!this.layout) return;
+    if (this.pendingWorkspaceId === id) this.deferredSwitch.cancel();
     const closing = this.layout.workspaces.find((w) => w.id === id);
     if (closing) {
       for (const tab of closing.tabs) {
@@ -793,6 +845,7 @@ class AppStore {
     if (this.layout.activeWorkspaceId === id) {
       this.layout.activeWorkspaceId =
         this.layout.workspaces[this.layout.workspaces.length - 1]?.id ?? "";
+      this.workspaceSwitchToken += 1;
     }
     // Closing the last workspace reveals the empty-state overlay instead of
     // resurrecting a blank workspace.
@@ -1036,6 +1089,9 @@ class AppStore {
     if (!this.layout) return;
     const found = findTabByPane(this.layout, nodeId);
     if (!found) return;
+    if (this.layout.activeWorkspaceId !== found.ws.id) {
+      this.workspaceSwitchToken += 1;
+    }
     this.layout.activeWorkspaceId = found.ws.id;
     found.ws.activeTabId = found.tab.id;
     this.saveSoon();
@@ -1117,7 +1173,7 @@ class AppStore {
     if (!this.layout) return null;
     const existing = findWorkspaceByRoot(this.layout.workspaces, projectDirectory);
     if (existing) {
-      this.switchWorkspace(existing.id);
+      this.requestSwitchWorkspace(existing.id);
       this.onboardingOpen = false;
       return collectPaneIds(activeTab(existing).root)[0] ?? null;
     }
@@ -1279,9 +1335,12 @@ class AppStore {
   cycleWorkspace(dir: 1 | -1): void {
     if (!this.layout || this.layout.workspaces.length < 2) return;
     const all = this.layout.workspaces;
-    const at = all.findIndex((w) => w.id === this.layout!.activeWorkspaceId);
+    // Cycle from the pending target while a switch is in flight so rapid
+    // key repeats walk forward instead of re-requesting the same workspace.
+    const from = this.pendingWorkspaceId ?? this.layout.activeWorkspaceId;
+    const at = all.findIndex((w) => w.id === from);
     const cur = at < 0 ? 0 : at;
-    this.switchWorkspace(all[(cur + dir + all.length) % all.length].id);
+    this.requestSwitchWorkspace(all[(cur + dir + all.length) % all.length].id);
   }
 
   jumpTab(index: number): void {
