@@ -121,8 +121,15 @@ export function menuGroups(isMac: boolean): MenuGroup[] {
   ];
 }
 
-/** Native accelerators own their commands; unmatched bindings retain DOM dispatch. */
+/**
+ * Native accelerators own their commands; unmatched bindings retain DOM dispatch.
+ * Editing keys are the exception: the webview consumes their key equivalents
+ * for first-responder editing, so the custom menu item never fires for the
+ * same press a DOM keydown handler receives. A DOM-received edit must always
+ * dispatch here, or the key is swallowed with no effect.
+ */
 export function shouldDispatchDom(action: AppCommand, nativeOwnsBinding: boolean, shiftedPlus = false): boolean {
+  if (["undo", "redo", "cut", "copy", "paste", "select-all"].includes(action)) return true;
   return !nativeOwnsBinding || (action === "font-bigger" && shiftedPlus);
 }
 

@@ -124,10 +124,10 @@
     }
     if (!matched || matched.action === "switch-workspace" || !canDispatch(matched, context)) return;
     // Capture before xterm so app accelerators never become terminal input.
+    // A keydown that reaches the DOM was not consumed by the native menu, so
+    // the native action cannot also fire for this press (no double dispatch).
     e.preventDefault();
-    const ordinaryTextEdit = !isMac && context.textFocus && !e.shiftKey &&
-      ["copy", "paste", "select-all", "undo", "redo", "cut"].includes(matched.action);
-    if (shouldDispatchDom(matched.action, !ordinaryTextEdit && nativeOwnsShortcut(matched.action), e.key === "+" && e.shiftKey)) {
+    if (shouldDispatchDom(matched.action, nativeOwnsShortcut(matched.action), e.key === "+" && e.shiftKey)) {
       void dispatchCommand(matched);
     }
   }
