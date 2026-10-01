@@ -14,3 +14,6 @@ vite.config.ts.timestamp-*
 
 # Personal scratch / planning notes
 tasks/
+
+# Local git worktrees (kept inside the workspace root)
+/.worktrees/
