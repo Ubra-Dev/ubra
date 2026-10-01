@@ -2,7 +2,7 @@
 //! state dir, drive the protocol over TCP (directly and via `ubra-cli`),
 //! and shut it down.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
