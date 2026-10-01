@@ -18,6 +18,7 @@
   } from "./clipboard";
   import { findTabByPane } from "./layout";
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
+  import { terminalCommands } from "./terminalCommands";
   import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
@@ -148,6 +149,17 @@
     const attachment = new TerminalAttachment();
     let lease: SessionLease | null = null;
     let exited = false;
+    const unregisterCommands = terminalCommands.register(sessionKey, {
+      selection: () => term.getSelection(),
+      paste: (text) => {
+        if (!disposed && !exited && paneId !== null) { term.focus(); term.paste(text); }
+      },
+      selectAll: () => { if (!disposed) term.selectAll(); },
+      running: () => !disposed && !exited && paneId !== null,
+    });
+    const menuSelectionDispose = term.onSelectionChange(() => terminalCommands.changed());
+    // The document capture handler owns app shortcuts before xterm handles them.
+    term.attachCustomKeyEventHandler((event) => !event.defaultPrevented);
 
     const handleExit = (success: boolean, code: number | null) => {
       if (exited) return;
@@ -301,6 +313,7 @@
       }
       if (disposed || lease.cancelled) return;
       paneId = id;
+      terminalCommands.changed();
       const firstDelivery = !lease.restoreTaken;
       lease.restoreTaken = true;
       onSpawn?.(id, lease.attached, firstDelivery);
@@ -331,6 +344,8 @@
       searchAddon = null;
       if (copyTimer) clearTimeout(copyTimer);
       selectionDispose.dispose();
+      menuSelectionDispose.dispose();
+      unregisterCommands();
       host.removeEventListener("mouseup", onMouseUp);
       resizeObserver.disconnect();
       unlistens.forEach((u) => u());

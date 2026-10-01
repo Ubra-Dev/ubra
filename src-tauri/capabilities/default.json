@@ -6,6 +6,10 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-theme",
+    "core:window:allow-minimize",
+    "core:window:allow-set-fullscreen",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
     "opener:allow-open-url",
     "opener:allow-default-urls",
     "opener:allow-open-path",

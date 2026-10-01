@@ -141,6 +141,12 @@
   }
 
   onMount(() => {
+    // Honor a section requested by menus/commands; fall back to App.
+    const requested = store.settingsOpenSection;
+    if (requested && SECTIONS.some((s) => s.id === requested)) {
+      section = requested as SectionId;
+    }
+    store.settingsOpenSection = null;
     invoke<boolean>("autostart_enabled")
       .then((v) => {
         autostart = v;

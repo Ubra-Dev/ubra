@@ -125,6 +125,8 @@ class AppStore {
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
   settingsOpen = $state(false);
+  /** Section the Settings modal should open on; consumed on mount, then cleared. */
+  settingsOpenSection = $state<string | null>(null);
   /** Revisit-mode onboarding opened from Settings (independent of firstRun). */
   onboardingOpen = $state(false);
   /** Last-focused pane node id (session-only, for shortcuts). */

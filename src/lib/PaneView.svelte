@@ -1,9 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
   import AgentCliIcon from "./AgentCliIcon.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
+  import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
@@ -29,6 +31,20 @@
   let editing = $state(false);
   let draft = $state("");
   let menu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+
+  function restartTerminal(): void {
+    if (!exited) return;
+    store.authorizePaneCommand(node.id);
+    store.relaunchPaneAgent(node.id);
+    exited = false;
+    runId += 1;
+    store.paneFocusTarget = node.id;
+    terminalCommands.changed();
+  }
+  onMount(() => terminalCommands.registerRestart(node.id, {
+    available: () => exited,
+    restart: restartTerminal,
+  }));
 
   // Split-button agent picker: hovering a split button opens a menu of
   // detected agent CLIs to run in the new pane. Click still splits with
@@ -326,7 +342,7 @@
         focusToken={focusToken}
         findToken={findToken}
         scrollback={store.termScrollback}
-        onExit={() => (exited = true)}
+        onExit={() => { exited = true; terminalCommands.changed(); }}
         onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}
       />
@@ -334,12 +350,7 @@
     {#if exited}
       <button
         class="respawn"
-        onclick={() => {
-          store.authorizePaneCommand(node.id);
-          store.relaunchPaneAgent(node.id);
-          exited = false;
-          runId += 1;
-        }}
+        onclick={restartTerminal}
       >
         <Icon name="refresh" size={12} />
         <span>{respawnLabel}</span>
