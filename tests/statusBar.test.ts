@@ -193,59 +193,54 @@ describe("sidebarUpdateState", () => {
     error: null as string | null,
   };
 
-  it("stays quiet when idle", () => {
+  it("stays hidden when idle", () => {
     assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: false }), {
       icon: "download",
       label: "Check for updates",
-      attention: false,
+      visible: false,
       busy: false,
-      tone: "default",
       progress: null,
     });
     assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: true }), {
       icon: "download",
       label: "You're up to date — open Updates",
-      attention: false,
+      visible: false,
       busy: false,
-      tone: "default",
       progress: null,
     });
   });
 
-  it("shows a spinner while checking", () => {
+  it("stays hidden while checking", () => {
     assert.deepEqual(sidebarUpdateState({ ...base, phase: "checking", checked: false }), {
       icon: "download",
       label: "Checking for updates…",
-      attention: false,
+      visible: false,
       busy: true,
-      tone: "default",
       progress: null,
     });
   });
 
-  it("demands attention when an update is available or ready", () => {
+  it("appears when an update is available or ready", () => {
     assert.deepEqual(
       sidebarUpdateState({ ...base, phase: "available", checked: true, version: "0.2.0" }),
       {
         icon: "download",
         label: "Ubra 0.2.0 available — open Updates to install",
-        attention: true,
+        visible: true,
         busy: false,
-        tone: "accent",
         progress: null,
       },
     );
     assert.deepEqual(sidebarUpdateState({ ...base, phase: "ready", checked: true }), {
       icon: "refresh",
       label: "Update installed — open Updates to restart",
-      attention: true,
+      visible: true,
       busy: false,
-      tone: "accent",
       progress: null,
     });
   });
 
-  it("reports download progress without the action badge", () => {
+  it("appears with download progress", () => {
     assert.deepEqual(
       sidebarUpdateState({
         ...base,
@@ -257,23 +252,21 @@ describe("sidebarUpdateState", () => {
       {
         icon: "download",
         label: "Downloading update 50% — open Updates for details",
-        attention: false,
+        visible: true,
         busy: true,
-        tone: "accent",
         progress: 50,
       },
     );
   });
 
-  it("surfaces failures with a retry hint", () => {
+  it("stays hidden on failure; Settings and the status bar carry the retry", () => {
     assert.deepEqual(
       sidebarUpdateState({ ...base, phase: "error", checked: true, error: "net down" }),
       {
         icon: "alert",
         label: "net down — open Updates to retry",
-        attention: true,
+        visible: false,
         busy: false,
-        tone: "error",
         progress: null,
       },
     );

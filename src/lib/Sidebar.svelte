@@ -451,28 +451,25 @@
           <Icon name="settings" size={13} />
           <span>Settings</span>
         </button>
-        <button
-          class="update-btn"
-          class:attention={updateState.attention}
-          class:error={updateState.tone === "error"}
-          title={updateState.label}
-          aria-label={updateState.label}
-          onclick={openUpdates}
-        >
-          {#if updateState.busy}
-            <Spinner size={13} />
-          {:else}
-            <Icon name={updateState.icon} size={13} />
-          {/if}
-          {#if updateState.attention}
-            <span class="update-dot" aria-hidden="true"></span>
-          {/if}
-          {#if updateState.progress !== null}
-            <span class="update-progress" aria-hidden="true">
-              <span style="width: {updateState.progress}%"></span>
-            </span>
-          {/if}
-        </button>
+        {#if updateState.visible}
+          <button
+            class="update-btn"
+            title={updateState.label}
+            aria-label={updateState.label}
+            onclick={openUpdates}
+          >
+            {#if updateState.busy}
+              <Spinner size={13} />
+            {:else}
+              <Icon name={updateState.icon} size={13} />
+            {/if}
+            {#if updateState.progress !== null}
+              <span class="update-progress" aria-hidden="true">
+                <span style="width: {updateState.progress}%"></span>
+              </span>
+            {/if}
+          </button>
+        {/if}
       </div>
       {#if updateAnnounce}
         <span class="sr-only" role="status">{updateAnnounce}</span>
@@ -900,8 +897,9 @@
     color: var(--text-strong);
     background: var(--surface-bg);
   }
-  /* Update shortcut: always rendered for a stable footer, prominent only
-     while there is something to act on. Opens Settings → App. */
+  /* Update shortcut: only rendered while an update is actionable.
+     Filled accent circle; the glyph uses the app background for contrast
+     in both dark and light themes. Opens Settings → App. */
   .update-btn {
     position: relative;
     display: inline-flex;
@@ -910,60 +908,39 @@
     flex: 0 0 28px;
     width: 28px;
     height: 28px;
-    background: transparent;
+    background: var(--accent);
     border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
+    border-radius: 50%;
+    color: var(--app-bg);
     cursor: pointer;
   }
   .update-btn:hover {
-    color: var(--text-strong);
-    background: var(--surface-bg);
+    background: var(--accent-hover);
+    color: var(--app-bg);
   }
   .update-btn:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    outline-offset: 2px;
   }
-  .update-btn.attention {
-    color: var(--accent);
-  }
-  .update-btn.attention:hover {
-    color: var(--accent);
-  }
-  .update-btn.error {
-    color: var(--error-text);
-  }
-  .update-btn.error:hover {
-    color: var(--error-text);
-  }
-  .update-dot {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-    border: 1.5px solid var(--sidebar-bg);
-  }
-  .update-btn.error .update-dot {
-    background: var(--error-text);
+  /* The spinner arc follows the theme accent by default; on the filled
+     circle it must match the glyph instead. */
+  .update-btn :global(.spinner .arc) {
+    fill: var(--app-bg);
   }
   .update-progress {
     position: absolute;
-    left: 5px;
-    right: 5px;
-    bottom: 3px;
+    left: 6px;
+    right: 6px;
+    bottom: 4px;
     height: 2px;
     border-radius: 1px;
-    background: var(--surface-active);
     overflow: hidden;
   }
   .update-progress > span {
     display: block;
     height: 100%;
     border-radius: 1px;
-    background: var(--accent);
+    background: var(--app-bg);
   }
   .sr-only {
     position: absolute;

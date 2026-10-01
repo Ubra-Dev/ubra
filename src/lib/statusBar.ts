@@ -70,17 +70,14 @@ export function friendlyUpdateError(raw: string | null): string {
   return detail || "Couldn't check for updates.";
 }
 
-export type SidebarUpdateTone = "default" | "accent" | "error";
-
 export interface SidebarUpdateState {
   icon: "download" | "refresh" | "alert";
   /** Accessible name and tooltip. */
   label: string;
-  /** Accent treatment + dot badge while the user should act. */
-  attention: boolean;
+  /** Render the button only while an update is actionable. */
+  visible: boolean;
   /** Spinner replaces the icon. */
   busy: boolean;
-  tone: SidebarUpdateTone;
   /** Download percent 0-99; null when unknown or not downloading. */
   progress: number | null;
 }
@@ -95,10 +92,10 @@ export interface SidebarUpdateInput {
 }
 
 /**
- * Sidebar update button for the updater phase. The button is always rendered
- * (stable layout, no content shift) and turns prominent only while there is
- * something to act on. It opens Settings → App; one-click install/restart
- * lives in Settings and the status bar.
+ * Sidebar update button for the updater phase. The button only renders while
+ * an update is actionable (available, downloading, ready). It opens
+ * Settings → App; one-click install/restart lives in Settings and the
+ * status bar.
  */
 export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState {
   switch (opts.phase) {
@@ -107,26 +104,23 @@ export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState
         ? {
             icon: "download",
             label: "You're up to date — open Updates",
-            attention: false,
+            visible: false,
             busy: false,
-            tone: "default",
             progress: null,
           }
         : {
             icon: "download",
             label: "Check for updates",
-            attention: false,
+            visible: false,
             busy: false,
-            tone: "default",
             progress: null,
           };
     case "checking":
       return {
         icon: "download",
         label: "Checking for updates…",
-        attention: false,
+        visible: false,
         busy: true,
-        tone: "default",
         progress: null,
       };
     case "available":
@@ -135,9 +129,8 @@ export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState
         label: opts.version
           ? `Ubra ${opts.version} available — open Updates to install`
           : "Update available — open Updates to install",
-        attention: true,
+        visible: true,
         busy: false,
-        tone: "accent",
         progress: null,
       };
     case "downloading": {
@@ -148,9 +141,8 @@ export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState
           pct === null
             ? "Downloading update…"
             : `Downloading update ${pct}% — open Updates for details`,
-        attention: false,
+        visible: true,
         busy: true,
-        tone: "accent",
         progress: pct,
       };
     }
@@ -158,18 +150,16 @@ export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState
       return {
         icon: "refresh",
         label: "Update installed — open Updates to restart",
-        attention: true,
+        visible: true,
         busy: false,
-        tone: "accent",
         progress: null,
       };
     case "error":
       return {
         icon: "alert",
         label: `${friendlyUpdateError(opts.error)} — open Updates to retry`,
-        attention: true,
+        visible: false,
         busy: false,
-        tone: "error",
         progress: null,
       };
   }
