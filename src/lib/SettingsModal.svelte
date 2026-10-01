@@ -61,6 +61,7 @@
     selectUsageClis,
   } from "./usage";
   import { usage } from "./usage.svelte";
+  import { downloadPercent, friendlyUpdateError } from "./statusBar";
   import { updater } from "./updater.svelte";
 
   type SectionId =
@@ -136,6 +137,39 @@
     if (bytes < 1024) return `${bytes} B`;
     const mb = bytes / (1024 * 1024);
     return mb < 10 ? `${mb.toFixed(1)} MB` : `${Math.round(mb)} MB`;
+  }
+
+  const updateHeadline = $derived(
+    updater.phase === "checking"
+      ? "Checking for updates…"
+      : updater.phase === "available"
+        ? "Update available"
+        : updater.phase === "downloading"
+          ? "Downloading update…"
+          : updater.phase === "ready"
+            ? "Update installed — relaunch to apply it"
+            : updater.phase === "error"
+              ? "Update check failed"
+              : updater.checked
+                ? "You're up to date"
+                : "Never checked for updates",
+  );
+  const updateProgress = $derived(
+    downloadPercent(updater.downloadedBytes, updater.totalBytes),
+  );
+  const updateErrorFriendly = $derived(friendlyUpdateError(updater.error));
+  const updateErrorRaw = $derived((updater.error ?? "").trim());
+  const lastCheckedLabel = $derived(
+    updater.lastCheckedAt === null
+      ? "Never"
+      : formatUpdatedAgo(updater.lastCheckedAt),
+  );
+
+  function onAutoCheckUpdatesChange(e: Event): void {
+    const enabled = (e.target as HTMLInputElement).checked;
+    store.setAutoCheckUpdates(enabled);
+    // Re-enabling checks right away instead of waiting for the next tick.
+    if (enabled) void updater.checkForUpdates({ silent: true });
   }
 
   function close(): void {
@@ -935,39 +969,59 @@
             <div class="group">
               <h3 class="group-label">Updates</h3>
               <div class="card">
-                <div class="row">
-                  <span class="label">
-                    {#if updater.phase === "available" && updater.version}
-                      Ubra {updater.version} is available
-                    {:else if updater.phase === "downloading"}
-                      {#if updater.totalBytes}
-                        Downloading… {formatBytes(updater.downloadedBytes)} of
-                        {formatBytes(updater.totalBytes)}
-                      {:else}
-                        Downloading… {formatBytes(updater.downloadedBytes)}
-                      {/if}
+                <div class="row update-head">
+                  <span class="update-status">
+                    {#if updater.phase === "checking"}
+                      <Spinner size={14} />
+                    {:else if updater.phase === "downloading" || updater.phase === "available"}
+                      <span class="update-icon accent">
+                        <Icon name="download" size={14} />
+                      </span>
                     {:else if updater.phase === "ready"}
-                      Update installed — relaunch to apply it
-                    {:else if appVersion}
-                      Ubra {appVersion}
+                      <span class="update-icon success">
+                        <Icon name="check" size={14} />
+                      </span>
+                    {:else if updater.phase === "error"}
+                      <span class="update-icon error">
+                        <Icon name="alert" size={14} />
+                      </span>
+                    {:else if updater.checked}
+                      <span class="update-icon success">
+                        <Icon name="check" size={14} />
+                      </span>
                     {:else}
-                      Check for updates
+                      <span class="update-icon">
+                        <Icon name="refresh" size={14} />
+                      </span>
+                    {/if}
+                    <span class="label">{updateHeadline}</span>
+                    {#if updater.phase === "available" && updater.version}
+                      <span class="version-pill">v{updater.version}</span>
                     {/if}
                   </span>
-                  {#if updater.phase === "ready"}
+                  {#if updater.phase === "available"}
                     <button
-                      class="btn"
+                      class="btn primary"
+                      onclick={() => void updater.downloadAndInstall()}
+                    >
+                      <Icon name="download" size={12} />
+                      <span>Download and install</span>
+                    </button>
+                  {:else if updater.phase === "ready"}
+                    <button
+                      class="btn primary"
                       onclick={() => void updater.relaunchApp()}
                     >
                       <Icon name="refresh" size={12} />
                       <span>Relaunch</span>
                     </button>
-                  {:else if updater.phase === "available"}
+                  {:else if updater.phase === "error"}
                     <button
                       class="btn"
-                      onclick={() => void updater.downloadAndInstall()}
+                      onclick={() => void updater.checkForUpdates()}
                     >
-                      Download and install
+                      <Icon name="refresh" size={12} />
+                      <span>Retry</span>
                     </button>
                   {:else}
                     <button
@@ -984,20 +1038,83 @@
                       <span>
                         {updater.phase === "checking"
                           ? "Checking…"
-                          : "Check for updates"}
+                          : updater.phase === "downloading"
+                            ? "Downloading…"
+                            : updater.checked
+                              ? "Check again"
+                              : "Check for updates"}
                       </span>
                     </button>
                   {/if}
                 </div>
-                {#if updater.phase === "error" && updater.error}
-                  <div class="hint error-hint" role="alert">
-                    {updater.error}
+                {#if updater.phase === "downloading"}
+                  <div
+                    class="update-progress"
+                    class:indeterminate={updateProgress === null}
+                    role="progressbar"
+                    aria-label="Update download progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={updateProgress ?? undefined}
+                  >
+                    <span
+                      style={updateProgress === null
+                        ? ""
+                        : `width: ${updateProgress}%`}
+                    ></span>
                   </div>
-                {:else if updater.phase === "idle" && updater.checked}
-                  <div class="hint">You&rsquo;re up to date.</div>
-                {:else if updater.phase === "available" && updater.notes}
-                  <div class="hint">{updater.notes}</div>
+                  <div class="hint">
+                    {#if updater.totalBytes}
+                      {formatBytes(updater.downloadedBytes)} of
+                      {formatBytes(updater.totalBytes)}
+                      {#if updateProgress !== null}
+                        · {updateProgress}%
+                      {/if}
+                    {:else}
+                      {formatBytes(updater.downloadedBytes)} downloaded
+                    {/if}
+                  </div>
                 {/if}
+                {#if updater.phase === "available" && updater.notes}
+                  <div class="update-notes">{updater.notes}</div>
+                {/if}
+                {#if updater.phase === "error"}
+                  <div class="hint error-hint" role="alert">
+                    {updateErrorFriendly}
+                  </div>
+                  {#if updateErrorRaw && updateErrorRaw !== updateErrorFriendly}
+                    <div class="hint update-raw" title={updateErrorRaw}>
+                      {updateErrorRaw}
+                    </div>
+                  {/if}
+                {/if}
+                <div class="row update-meta">
+                  <span class="hint">
+                    {#if appVersion}Ubra {appVersion} · {/if}Last checked
+                    {lastCheckedLabel}
+                  </span>
+                  <button
+                    class="link"
+                    onclick={() => openExternal(RELEASES_URL)}
+                  >
+                    View releases
+                  </button>
+                </div>
+                <label class="row switch">
+                  <span class="label">Automatically check for updates</span>
+                  <input
+                    type="checkbox"
+                    checked={store.autoCheckUpdates}
+                    onchange={onAutoCheckUpdatesChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="hint">
+                Checks quietly in the background; downloading and restarting
+                always ask first.
               </div>
             </div>
             {#if telemetrySupported}
@@ -1637,6 +1754,114 @@
   }
   .btn-sm {
     padding: 2px 10px;
+    font-size: 11px;
+  }
+  /* Accent-filled call to action for the primary update step. */
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--app-bg);
+    font-weight: 600;
+  }
+  .btn.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--app-bg);
+  }
+  .update-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .update-status .label {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .update-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    color: var(--text-muted);
+  }
+  .update-icon.accent {
+    color: var(--accent);
+  }
+  .update-icon.success {
+    color: var(--success);
+  }
+  .update-icon.error {
+    color: var(--error-text);
+  }
+  .version-pill {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--surface-active);
+    border-radius: 999px;
+    padding: 1px 8px;
+    white-space: nowrap;
+  }
+  .update-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-active);
+    margin: 2px 0 4px;
+    overflow: hidden;
+  }
+  .update-progress > span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width 150ms ease;
+  }
+  .update-progress.indeterminate > span {
+    width: 40%;
+    animation: update-slide 1.2s ease-in-out infinite alternate;
+  }
+  @keyframes update-slide {
+    from {
+      margin-left: -40%;
+    }
+    to {
+      margin-left: 100%;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .update-progress > span {
+      transition: none;
+    }
+    .update-progress.indeterminate > span {
+      animation: none;
+      width: 100%;
+      margin-left: 0;
+    }
+  }
+  .update-notes {
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--separator);
+    padding: 8px 0;
+    margin: 0;
+    max-height: 96px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .update-raw {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .update-meta .hint {
+    padding: 0;
+  }
+  .update-meta .link {
+    flex: 0 0 auto;
     font-size: 11px;
   }
   /* Square icon-only action; keeps its accessible name in markup. */

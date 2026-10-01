@@ -15,6 +15,7 @@
   import { nativeOwnsShortcut } from "$lib/nativeMenus";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
+  import { updater } from "$lib/updater.svelte";
   import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
@@ -63,6 +64,14 @@
         showAgents: store.trayMenuListEnabled,
       }),
     );
+  });
+
+  // Silent background update checks once prefs are loaded; the Settings →
+  // App toggle starts/stops them live. Only the check is automatic.
+  $effect(() => {
+    if (!store.loaded) return;
+    if (store.autoCheckUpdates) updater.startAutoCheck();
+    else updater.stopAutoCheck();
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {

@@ -22,6 +22,7 @@ describe("application command eligibility", () => {
     }
     assert.equal(canDispatch({ action: "quit" }, context({ blocked: true, ready: false })), true);
     assert.equal(canDispatch({ action: "quit-stop-agents" }, context({ blocked: true, ready: false })), true);
+    assert.equal(canDispatch({ action: "check-for-updates" }, context({ blocked: true, ready: false })), true);
     assert.equal(canDispatch({ action: "open-settings" }, context({ blocked: true })), false);
     assert.equal(canDispatch({ action: "keyboard-shortcuts" }, context({ blocked: true, settingsOpen: true })), true);
   });
@@ -76,7 +77,16 @@ describe("native menus and accelerators", () => {
       assert.equal(about.label, mac ? "Ubra" : "Help");
       assert.equal(groups.some((group) => group.items.some((item) => item?.system === "Services")), mac);
       assert.equal(groups.some((group) => group.items.some((item) => item?.system === "BringAllToFront")), mac);
+      const checkHomes = groups.filter((group) =>
+        group.items.some((item) => item?.action === "check-for-updates"));
+      assert.equal(checkHomes.length, 1);
+      assert.equal(checkHomes[0].label, mac ? "Ubra" : "Help");
     }
+  });
+
+  it("keeps Check for Updates accelerator-free", () => {
+    assert.equal(acceleratorFor("check-for-updates", true), null);
+    assert.equal(acceleratorFor("check-for-updates", false), null);
   });
 
   it("derives app accelerators and keeps terminal control keys untouched on Windows/Linux", () => {

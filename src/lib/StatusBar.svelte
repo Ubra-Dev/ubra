@@ -33,6 +33,8 @@
   const DIRTY_POLL_MS = 10_000;
   /** Usage refresh; matches the backend cache TTL. */
   const USAGE_POLL_MS = 5 * 60 * 1000;
+  /** Hold duration on the app version to toggle the update simulation. */
+  const VERSION_HOLD_MS = 600;
 
   interface PaneContext {
     paneId: string;
@@ -159,6 +161,7 @@
 
   let dirtyTimer: ReturnType<typeof setInterval> | null = null;
   let usageTimer: ReturnType<typeof setInterval> | null = null;
+  let versionHoldTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
     invoke<{ name: string; version: string }>("app_info")
@@ -179,7 +182,22 @@
   onDestroy(() => {
     if (dirtyTimer) clearInterval(dirtyTimer);
     if (usageTimer) clearInterval(usageTimer);
+    cancelVersionHold();
   });
+
+  function startVersionHold(e: PointerEvent): void {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    cancelVersionHold();
+    versionHoldTimer = setTimeout(() => {
+      versionHoldTimer = null;
+      updater.toggleSimulation();
+    }, VERSION_HOLD_MS);
+  }
+
+  function cancelVersionHold(): void {
+    if (versionHoldTimer) clearTimeout(versionHoldTimer);
+    versionHoldTimer = null;
+  }
 
   function focusContextPane(): void {
     if (!context) return;
@@ -322,9 +340,18 @@
       <span class="text">{soundLabel(store.soundEnabled)}</span>
     </button>
     {#if appVersion}
-      <span class="seg dim" title="Ubra {appVersion}">
+      <button
+        class="seg dim version-sim"
+        title="Ubra {appVersion} — press and hold to simulate an update"
+        aria-label="Ubra {appVersion}. Press and hold to simulate an available update."
+        onpointerdown={startVersionHold}
+        onpointerup={cancelVersionHold}
+        onpointerleave={cancelVersionHold}
+        onpointercancel={cancelVersionHold}
+        oncontextmenu={(e) => e.preventDefault()}
+      >
         <span class="text">v{appVersion}</span>
-      </span>
+      </button>
     {/if}
   </div>
 </footer>
@@ -377,6 +404,12 @@
   button.seg:hover {
     background: var(--surface-bg);
     color: var(--text-strong);
+  }
+  /* Version looks like the label it is; the hold gesture stays hidden. */
+  button.seg.version-sim:hover {
+    background: transparent;
+    color: var(--text-muted);
+    cursor: default;
   }
   .seg.crumb {
     flex: 0 1 auto;

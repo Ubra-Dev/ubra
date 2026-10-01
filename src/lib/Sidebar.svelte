@@ -4,6 +4,9 @@
   import { gitSummaryTitle, gitSyncLabel } from "./git";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
+  import Spinner from "./Spinner.svelte";
+  import { sidebarUpdateState } from "./statusBar";
+  import { updater } from "./updater.svelte";
   import { frameCoalescer } from "./schedule";
   import {
     MAX_SIDEBAR_WIDTH,
@@ -217,6 +220,43 @@
     }
   }
 
+  const updateState = $derived(
+    sidebarUpdateState({
+      phase: updater.phase,
+      checked: updater.checked,
+      version: updater.version,
+      downloadedBytes: updater.downloadedBytes,
+      totalBytes: updater.totalBytes,
+      error: updater.error,
+    }),
+  );
+
+  // One atomic status per phase for screen readers; progress percent stays
+  // in the button tooltip so downloads don't chatter on every chunk.
+  const updateAnnounce = $derived.by((): string => {
+    switch (updater.phase) {
+      case "available":
+        return updater.version
+          ? `Update available: Ubra ${updater.version}`
+          : "Update available";
+      case "downloading":
+        return "Downloading update";
+      case "ready":
+        return "Update installed. Restart to apply it.";
+      case "error":
+        return "Update failed. Open Updates to retry.";
+      case "checking":
+        return "Checking for updates";
+      default:
+        return "";
+    }
+  });
+
+  function openUpdates(): void {
+    store.settingsOpenSection = "app";
+    store.settingsOpen = true;
+  }
+
 </script>
 
 {#if store.layout && store.leftPanelOpen}
@@ -402,14 +442,41 @@
       </section>
     </div>
     <div class="footer">
-      <button
-        class="settings-btn"
-        title={`Settings (${mod},)`}
-        onclick={() => (store.settingsOpen = true)}
-      >
-        <Icon name="settings" size={13} />
-        <span>Settings</span>
-      </button>
+      <div class="footer-row">
+        <button
+          class="settings-btn"
+          title={`Settings (${mod},)`}
+          onclick={() => (store.settingsOpen = true)}
+        >
+          <Icon name="settings" size={13} />
+          <span>Settings</span>
+        </button>
+        <button
+          class="update-btn"
+          class:attention={updateState.attention}
+          class:error={updateState.tone === "error"}
+          title={updateState.label}
+          aria-label={updateState.label}
+          onclick={openUpdates}
+        >
+          {#if updateState.busy}
+            <Spinner size={13} />
+          {:else}
+            <Icon name={updateState.icon} size={13} />
+          {/if}
+          {#if updateState.attention}
+            <span class="update-dot" aria-hidden="true"></span>
+          {/if}
+          {#if updateState.progress !== null}
+            <span class="update-progress" aria-hidden="true">
+              <span style="width: {updateState.progress}%"></span>
+            </span>
+          {/if}
+        </button>
+      </div>
+      {#if updateAnnounce}
+        <span class="sr-only" role="status">{updateAnnounce}</span>
+      {/if}
     {#if menu}
       <ContextMenu
         x={menu.x}
@@ -808,11 +875,17 @@
     border-top: 1px solid var(--border);
     color: var(--text-muted);
   }
+  .footer-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
   .settings-btn {
     display: flex;
     align-items: center;
     gap: 7px;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
     box-sizing: border-box;
     background: transparent;
     border: none;
@@ -826,6 +899,79 @@
   .settings-btn:hover {
     color: var(--text-strong);
     background: var(--surface-bg);
+  }
+  /* Update shortcut: always rendered for a stable footer, prominent only
+     while there is something to act on. Opens Settings → App. */
+  .update-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .update-btn:hover {
+    color: var(--text-strong);
+    background: var(--surface-bg);
+  }
+  .update-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .update-btn.attention {
+    color: var(--accent);
+  }
+  .update-btn.attention:hover {
+    color: var(--accent);
+  }
+  .update-btn.error {
+    color: var(--error-text);
+  }
+  .update-btn.error:hover {
+    color: var(--error-text);
+  }
+  .update-dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 1.5px solid var(--sidebar-bg);
+  }
+  .update-btn.error .update-dot {
+    background: var(--error-text);
+  }
+  .update-progress {
+    position: absolute;
+    left: 5px;
+    right: 5px;
+    bottom: 3px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--surface-active);
+    overflow: hidden;
+  }
+  .update-progress > span {
+    display: block;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--accent);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .attention {
     display: flex;

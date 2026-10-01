@@ -10,6 +10,7 @@ import { store } from "./store.svelte";
 import { ISSUES_URL, REPO_URL } from "./site.ts";
 import { terminalCommands } from "./terminalCommands";
 import { toasts } from "./toasts.svelte.ts";
+import { updater } from "./updater.svelte";
 
 function focusedElement(): HTMLElement | null {
   const el = document.activeElement;
@@ -137,6 +138,11 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       case "minimize": await getCurrentWindow().minimize(); break;
       case "documentation": await openUrl(`${REPO_URL}#readme`); break;
       case "report-issue": await openUrl(ISSUES_URL); break;
+      case "check-for-updates":
+        store.settingsOpenSection = "app";
+        store.settingsOpen = true;
+        void updater.checkForUpdates();
+        break;
       case "quit": store.requestQuit(activeAgentCount()); break;
       case "quit-stop-agents": await invoke("quit_app_and_stop_agents"); break;
     }

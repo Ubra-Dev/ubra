@@ -4,9 +4,12 @@ import {
   branchTooltip,
   crumbDotClass,
   deliveryLabel,
+  downloadPercent,
   fleetSummary,
+  friendlyUpdateError,
   notifyTooltip,
   saveState,
+  sidebarUpdateState,
   soundLabel,
   updateSegment,
   USAGE_WARN_THRESHOLD,
@@ -137,6 +140,141 @@ describe("updateSegment", () => {
         text: "Update failed",
         title: "net down — click to retry",
         action: "check",
+      },
+    );
+  });
+});
+
+describe("downloadPercent", () => {
+  it("returns null without a usable total", () => {
+    assert.equal(downloadPercent(0, null), null);
+    assert.equal(downloadPercent(100, 0), null);
+    assert.equal(downloadPercent(100, -5), null);
+  });
+
+  it("caps below 100% until installed", () => {
+    assert.equal(downloadPercent(512, 1024), 50);
+    assert.equal(downloadPercent(1024, 1024), 99);
+    assert.equal(downloadPercent(2048, 1024), 99);
+  });
+});
+
+describe("friendlyUpdateError", () => {
+  it("maps reachability failures to plain language", () => {
+    assert.equal(
+      friendlyUpdateError("http 404 not found"),
+      "Couldn't reach the update server (not found).",
+    );
+    assert.equal(
+      friendlyUpdateError("fetch failed: connection refused"),
+      "Couldn't reach the update server. Check your connection and retry.",
+    );
+  });
+
+  it("maps verification failures without leaking jargon", () => {
+    assert.equal(
+      friendlyUpdateError("signature verification failed"),
+      "The update couldn't be verified and was blocked for safety.",
+    );
+  });
+
+  it("falls back to the raw message or a generic line", () => {
+    assert.equal(friendlyUpdateError("teapot"), "teapot");
+    assert.equal(friendlyUpdateError(""), "Couldn't check for updates.");
+    assert.equal(friendlyUpdateError(null), "Couldn't check for updates.");
+  });
+});
+
+describe("sidebarUpdateState", () => {
+  const base = {
+    version: null as string | null,
+    downloadedBytes: 0,
+    totalBytes: null as number | null,
+    error: null as string | null,
+  };
+
+  it("stays quiet when idle", () => {
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: false }), {
+      icon: "download",
+      label: "Check for updates",
+      attention: false,
+      busy: false,
+      tone: "default",
+      progress: null,
+    });
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: true }), {
+      icon: "download",
+      label: "You're up to date — open Updates",
+      attention: false,
+      busy: false,
+      tone: "default",
+      progress: null,
+    });
+  });
+
+  it("shows a spinner while checking", () => {
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "checking", checked: false }), {
+      icon: "download",
+      label: "Checking for updates…",
+      attention: false,
+      busy: true,
+      tone: "default",
+      progress: null,
+    });
+  });
+
+  it("demands attention when an update is available or ready", () => {
+    assert.deepEqual(
+      sidebarUpdateState({ ...base, phase: "available", checked: true, version: "0.2.0" }),
+      {
+        icon: "download",
+        label: "Ubra 0.2.0 available — open Updates to install",
+        attention: true,
+        busy: false,
+        tone: "accent",
+        progress: null,
+      },
+    );
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "ready", checked: true }), {
+      icon: "refresh",
+      label: "Update installed — open Updates to restart",
+      attention: true,
+      busy: false,
+      tone: "accent",
+      progress: null,
+    });
+  });
+
+  it("reports download progress without the action badge", () => {
+    assert.deepEqual(
+      sidebarUpdateState({
+        ...base,
+        phase: "downloading",
+        checked: true,
+        downloadedBytes: 512,
+        totalBytes: 1024,
+      }),
+      {
+        icon: "download",
+        label: "Downloading update 50% — open Updates for details",
+        attention: false,
+        busy: true,
+        tone: "accent",
+        progress: 50,
+      },
+    );
+  });
+
+  it("surfaces failures with a retry hint", () => {
+    assert.deepEqual(
+      sidebarUpdateState({ ...base, phase: "error", checked: true, error: "net down" }),
+      {
+        icon: "alert",
+        label: "net down — open Updates to retry",
+        attention: true,
+        busy: false,
+        tone: "error",
+        progress: null,
       },
     );
   });

@@ -40,9 +40,145 @@ export interface UpdateSegment {
 }
 
 /**
+ * Download percent capped below 100 (100 only counts once installed);
+ * null when the total is unknown.
+ */
+export function downloadPercent(
+  downloadedBytes: number,
+  totalBytes: number | null,
+): number | null {
+  if (!totalBytes || totalBytes <= 0) return null;
+  return Math.min(99, Math.floor((downloadedBytes / totalBytes) * 100));
+}
+
+/** Plain-language update failure; falls back to the raw backend message. */
+export function friendlyUpdateError(raw: string | null): string {
+  const detail = (raw ?? "").trim();
+  if (/404|not found/i.test(detail)) {
+    return "Couldn't reach the update server (not found).";
+  }
+  if (
+    /network|fetch failed|connection|connrefused|econn|enotfound|etimedout|timed?\s?out|offline|dns/i.test(
+      detail,
+    )
+  ) {
+    return "Couldn't reach the update server. Check your connection and retry.";
+  }
+  if (/sign|verif|tamper|integrity/i.test(detail)) {
+    return "The update couldn't be verified and was blocked for safety.";
+  }
+  return detail || "Couldn't check for updates.";
+}
+
+export type SidebarUpdateTone = "default" | "accent" | "error";
+
+export interface SidebarUpdateState {
+  icon: "download" | "refresh" | "alert";
+  /** Accessible name and tooltip. */
+  label: string;
+  /** Accent treatment + dot badge while the user should act. */
+  attention: boolean;
+  /** Spinner replaces the icon. */
+  busy: boolean;
+  tone: SidebarUpdateTone;
+  /** Download percent 0-99; null when unknown or not downloading. */
+  progress: number | null;
+}
+
+export interface SidebarUpdateInput {
+  phase: UpdatePhase;
+  checked: boolean;
+  version: string | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+}
+
+/**
+ * Sidebar update button for the updater phase. The button is always rendered
+ * (stable layout, no content shift) and turns prominent only while there is
+ * something to act on. It opens Settings → App; one-click install/restart
+ * lives in Settings and the status bar.
+ */
+export function sidebarUpdateState(opts: SidebarUpdateInput): SidebarUpdateState {
+  switch (opts.phase) {
+    case "idle":
+      return opts.checked
+        ? {
+            icon: "download",
+            label: "You're up to date — open Updates",
+            attention: false,
+            busy: false,
+            tone: "default",
+            progress: null,
+          }
+        : {
+            icon: "download",
+            label: "Check for updates",
+            attention: false,
+            busy: false,
+            tone: "default",
+            progress: null,
+          };
+    case "checking":
+      return {
+        icon: "download",
+        label: "Checking for updates…",
+        attention: false,
+        busy: true,
+        tone: "default",
+        progress: null,
+      };
+    case "available":
+      return {
+        icon: "download",
+        label: opts.version
+          ? `Ubra ${opts.version} available — open Updates to install`
+          : "Update available — open Updates to install",
+        attention: true,
+        busy: false,
+        tone: "accent",
+        progress: null,
+      };
+    case "downloading": {
+      const pct = downloadPercent(opts.downloadedBytes, opts.totalBytes);
+      return {
+        icon: "download",
+        label:
+          pct === null
+            ? "Downloading update…"
+            : `Downloading update ${pct}% — open Updates for details`,
+        attention: false,
+        busy: true,
+        tone: "accent",
+        progress: pct,
+      };
+    }
+    case "ready":
+      return {
+        icon: "refresh",
+        label: "Update installed — open Updates to restart",
+        attention: true,
+        busy: false,
+        tone: "accent",
+        progress: null,
+      };
+    case "error":
+      return {
+        icon: "alert",
+        label: `${friendlyUpdateError(opts.error)} — open Updates to retry`,
+        attention: true,
+        busy: false,
+        tone: "error",
+        progress: null,
+      };
+  }
+}
+
+/**
  * Update segment for the updater phase; null when there is nothing to show
- * (up to date after a check). Updates stay manual: the bar surfaces results
- * and one-click actions, never auto-checks.
+ * (up to date after a check). Checks run in the background; the bar surfaces
+ * results and one-click actions.
  */
 export function updateSegment(opts: {
   phase: UpdatePhase;
@@ -73,10 +209,7 @@ export function updateSegment(opts: {
         action: "download",
       };
     case "downloading": {
-      const pct =
-        opts.totalBytes && opts.totalBytes > 0
-          ? Math.min(99, Math.floor((opts.downloadedBytes / opts.totalBytes) * 100))
-          : null;
+      const pct = downloadPercent(opts.downloadedBytes, opts.totalBytes);
       return {
         text: pct === null ? "Downloading update…" : `Downloading update ${pct}%`,
         title: "Downloading update…",
