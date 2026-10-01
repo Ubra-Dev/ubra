@@ -30,6 +30,17 @@ tray-unavailable smoke, use a debug build with
 switch. Native window-close, hide-failure, and warning appearance remain manual
 release checks.
 
+The tray menu is a live status surface. The frontend owns pane labels and the
+effective rollup, so it pushes a `TraySummary` via `tray_update` whenever
+agent state, layout, daemon link, or tray prefs change (debounced, with
+identical payloads skipped on both ends); the backend rebuilds the menu and
+sets the menu-bar title and tooltip. Agent rows carry `tray-agent-<node>` ids
+and route clicks back through `tray-focus-pane`, which the frontend validates
+against the current layout before revealing the pane. `set_title` renders on
+macOS and Linux and is a no-op on Windows; the menu content is the
+cross-platform surface. Disabling the agent list restores the static
+Show/Quit/Stop-Agents menu while title and tooltip keep updating.
+
 PTY geometry is validated before OS/emulator mutation: 2–1000 columns,
 1–1000 rows, at most 250,000 cells. Shutdown closes spawn admission and
 terminates ownership sets in one bounded batch, including children that outlive

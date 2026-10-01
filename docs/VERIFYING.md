@@ -48,6 +48,11 @@ The development checklist below complements, but does not replace, these gates.
   Left-click the tray icon to show it again; Quit and Stop Agents and Quit are
   available in the tray and app menus. Without a working tray, closing the
   window quits instead.
+- Tray status stays live while hidden: the menu shows an agent summary, one
+  row per agent pane, and the runtime link state; on macOS a working or
+  attention count appears next to the icon and clears when settled. Clicking
+  a row shows the window and focuses its pane. Toggling Settings → App →
+  Menu bar off restores the static menu / clears the count.
 - Quit with panes open: a dialog warns that panes keep running, with Quit &
   Keep Running, Stop Agents & Quit, and Cancel. A remembered choice skips the
   dialog and can be reset in Settings → App. Quitting with no panes skips it.
