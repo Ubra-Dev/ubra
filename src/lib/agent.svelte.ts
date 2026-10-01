@@ -1,7 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { playbackPayload, routeNotification } from "./notify";
+import {
+  describeNotifyOutcome,
+  parseNotifyOutcome,
+  playbackPayload,
+  routeNotification,
+  type NotifyOutcome,
+} from "./notify";
 import { store } from "./store.svelte";
 import { captureAgentEnded, captureAgentStarted, type AgentEndOutcome } from "./telemetry";
 import { toasts } from "./toasts.svelte.ts";
@@ -41,6 +47,8 @@ class AgentStore {
   private telemetryBaselineReady = false;
   private foreground = false;
   private started = false;
+  /** A blocked-notification toast already surfaced; reset by a success. */
+  private systemDenyNoticed = false;
   // TEMP perf instrumentation (removed after the lag audit).
   private perfLog = false;
   private perfCount = 0;
@@ -273,8 +281,28 @@ class AgentStore {
       soundEnabled: store.soundEnabled, mutedClis: store.mutedAgents,
       cli: transition.cli ?? last?.cli });
     if (route.toast) toasts.push(title, "Click to review", nodeId);
-    if (route.system) invoke("notify_agent", { title, body: "Open Ubra to review", kind }).catch(console.error);
+    if (route.system) {
+      invoke<unknown>("notify_agent", { title, body: "Open Ubra to review", kind })
+        .then((raw) => this.handleNotifyOutcome(parseNotifyOutcome(raw)))
+        .catch(console.error);
+    }
     if (route.sound) invoke("play_sound", playbackPayload(kind)).catch(console.error);
+  }
+  /**
+   * Surface actionable system-delivery failures once per session. A later
+   * success re-arms, so a re-denial informs again instead of staying silent.
+   */
+  private handleNotifyOutcome(outcome: NotifyOutcome): void {
+    const report = describeNotifyOutcome(outcome, "agent");
+    if (report.ok) {
+      this.systemDenyNoticed = false;
+      return;
+    }
+    if (!report.message) return;
+    console.error(`ubra: system notification not shown: ${report.message}`);
+    if (this.systemDenyNoticed) return;
+    this.systemDenyNoticed = true;
+    toasts.push("System notifications blocked", report.message, "");
   }
 }
 export const agent = new AgentStore();

@@ -1,10 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
-  import {
-    isPermissionGranted,
-    requestPermission,
-  } from "@tauri-apps/plugin-notification";
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
@@ -16,10 +12,14 @@
   import Spinner from "./Spinner.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
+    describeNotifyOutcome,
+    parseNotifyOutcome,
+    parseNotifyPermission,
     playbackPayload,
     routeNotification,
     testNotificationPayload,
     type NotifyDelivery,
+    type NotifyPermission,
     type ToastPosition,
   } from "./notify";
   import { cheatSheet, isMacPlatform } from "./shortcuts";
@@ -90,10 +90,11 @@
   let folderError = $state<string | null>(null);
   let appearanceTab = $state<"theme" | "text">("theme");
   /** System-notification permission: silent check on open, request on Test. */
-  let notifyPermission = $state<"granted" | "denied" | "prompt" | "unknown">(
-    "unknown",
-  );
+  let notifyPermission = $state<NotifyPermission>("unknown");
   let testNotifyError = $state<string | null>(null);
+  let testNotifyNote = $state<string | null>(null);
+  /** True while a Test is in flight; the OS prompt can keep it waiting. */
+  let testNotifyBusy = $state(false);
   const notifyPermissionLabel = $derived(
     notifyPermission === "granted"
       ? "granted"
@@ -101,7 +102,7 @@
         ? "denied — enable it in your OS settings"
         : notifyPermission === "prompt"
           ? "not decided yet — pressing Test will ask"
-          : "unknown",
+          : "unknown — this build can't query the system state",
   );
 
   /** Usage providers to show; null while detection or registry is loading. */
@@ -196,9 +197,9 @@
   // the Test button below, never from merely viewing this section.
   $effect(() => {
     if (section !== "alerts") return;
-    isPermissionGranted()
-      .then((granted) => {
-        notifyPermission = granted ? "granted" : "prompt";
+    invoke<unknown>("notification_permission")
+      .then((state) => {
+        notifyPermission = parseNotifyPermission(state);
       })
       .catch(() => {
         notifyPermission = "unknown";
@@ -276,26 +277,26 @@
 
   /**
    * Ensure system-notification permission, prompting the OS dialog when the
-   * verdict is still undecided. Returns true when showing is allowed.
+   * verdict is still undecided. Returns true when showing is allowed. The
+   * backend answers from the real OS state; only this gesture may prompt.
    */
   async function ensureNotifyPermission(): Promise<boolean> {
     try {
-      if (await isPermissionGranted()) {
-        notifyPermission = "granted";
-        return true;
-      }
+      notifyPermission = parseNotifyPermission(
+        await invoke<unknown>("notification_permission"),
+      );
     } catch (e) {
       console.error("ubra: notification permission check failed", e);
+      notifyPermission = "unknown";
+      return false;
     }
+    if (notifyPermission === "granted") return true;
+    if (notifyPermission !== "prompt") return false;
     try {
-      const verdict = await requestPermission();
-      notifyPermission =
-        verdict === "granted"
-          ? "granted"
-          : verdict === "denied"
-            ? "denied"
-            : "prompt";
-      return verdict === "granted";
+      notifyPermission = parseNotifyPermission(
+        await invoke<unknown>("request_notification_permission"),
+      );
+      return notifyPermission === "granted";
     } catch (e) {
       console.error("ubra: notification permission request failed", e);
       notifyPermission = "unknown";
@@ -309,40 +310,59 @@
    * Failures surface inline instead of only in the console.
    */
   async function sendTestNotification(): Promise<void> {
+    if (testNotifyBusy) return;
+    testNotifyBusy = true;
     testNotifyError = null;
-    const test = testNotificationPayload();
-    const route = routeNotification({
-      delivery: store.notifyDelivery,
-      soundEnabled: store.soundEnabled,
-      mutedClis: store.mutedAgents,
-      cli: test.cli,
-    });
-    if (route.toast) {
-      toasts.push(test.title, test.body, test.nodeId);
-    }
-    if (route.system) {
-      const allowed = await ensureNotifyPermission();
-      if (!allowed) {
-        testNotifyError =
-          notifyPermission === "denied"
-            ? "System notifications are blocked. Enable them in your OS settings, then try again."
-            : "Couldn't get notification permission. Try again.";
-      } else {
-        try {
-          await invoke("notify_agent", {
-            title: test.title,
-            body: test.body,
-            kind: test.kind,
-          });
-        } catch (e) {
-          console.error("ubra: test notification failed", e);
-          testNotifyError = "Couldn't show the system notification. Try again.";
+    testNotifyNote = null;
+    try {
+      const test = testNotificationPayload();
+      const route = routeNotification({
+        delivery: store.notifyDelivery,
+        soundEnabled: store.soundEnabled,
+        mutedClis: store.mutedAgents,
+        cli: test.cli,
+      });
+      if (route.toast) {
+        toasts.push(test.title, test.body, test.nodeId);
+      }
+      if (route.system) {
+        const allowed = await ensureNotifyPermission();
+        if (!allowed) {
+          testNotifyError =
+            notifyPermission === "denied"
+              ? "System notifications are blocked. Enable them in System Settings → Notifications, then try again."
+              : notifyPermission === "prompt"
+                ? "Permission isn't decided yet — answer the system prompt, then press Test again."
+                : "Couldn't check notification permission. Try again.";
+        } else {
+          try {
+            const raw = await invoke<unknown>("notify_agent", {
+              title: test.title,
+              body: test.body,
+              kind: test.kind,
+            });
+            const outcome = parseNotifyOutcome(raw);
+            if (outcome.status === "denied") notifyPermission = "denied";
+            const report = describeNotifyOutcome(outcome, "test");
+            if (report.ok) {
+              testNotifyNote = report.message;
+            } else {
+              testNotifyError = report.message;
+            }
+          } catch (e) {
+            console.error("ubra: test notification failed", e);
+            testNotifyError =
+              "Couldn't show the system notification. Try again.";
+          }
         }
       }
-    }
-    if (route.sound) {
-      invoke("play_sound", playbackPayload(test.kind))
-        .catch((e) => console.error("ubra: test sound failed", e));
+      if (route.sound) {
+        invoke("play_sound", playbackPayload(test.kind)).catch((e) =>
+          console.error("ubra: test sound failed", e),
+        );
+      }
+    } finally {
+      testNotifyBusy = false;
     }
   }
 
@@ -703,9 +723,13 @@
                 {/if}
                 <div class="row">
                   <span class="label">Test with current settings</span>
-                  <button class="btn" onclick={() => void sendTestNotification()}>
+                  <button
+                    class="btn"
+                    disabled={testNotifyBusy}
+                    onclick={() => void sendTestNotification()}
+                  >
                     <Icon name="bell" size={12} />
-                    <span>Test</span>
+                    <span>{testNotifyBusy ? "Waiting…" : "Test"}</span>
                   </button>
                 </div>
                 {#if store.notifyDelivery === "system"}
@@ -714,6 +738,10 @@
                 {#if testNotifyError}
                   <div class="hint">
                     <span class="error-hint" role="alert">{testNotifyError}</span>
+                  </div>
+                {:else if testNotifyNote}
+                  <div class="hint">
+                    <span class="ok-hint" role="status">{testNotifyNote}</span>
                   </div>
                 {/if}
               </div>
@@ -1538,6 +1566,9 @@
   }
   .error-hint {
     color: var(--error-text);
+  }
+  .ok-hint {
+    color: var(--success);
   }
   /* Theme swatches. */
   .swatches {

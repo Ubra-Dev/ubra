@@ -7,6 +7,7 @@ pub mod files;
 pub mod git;
 pub mod git_branch;
 pub mod layout_store;
+pub mod macos_notify;
 mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
@@ -257,20 +258,47 @@ fn home_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn notify_agent(
+async fn notify_agent(
     app: AppHandle,
     title: String,
     body: String,
     kind: Option<sound::SoundKind>,
-) -> Result<(), String> {
+) -> Result<macos_notify::NotifyOutcome, String> {
     if let Some(kind) = kind {
         eprintln!("ubra: agent notification ({kind:?}): {title}");
     }
-    let result = app.notification().builder().title(title).body(body).show();
+    #[cfg(target_os = "macos")]
+    if macos_notify::is_bundled() {
+        return Ok(macos_notify::notify(&title, &body).await);
+    }
+    // Legacy fire-and-forget path: macOS dev binaries (no bundle proxy for
+    // UN) and other desktop platforms. The plugin reports Ok once the payload
+    // is queued, so delivery is unconfirmed by construction.
+    let result = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
     if let Err(e) = &result {
         eprintln!("ubra: system notification failed: {e}");
+        return Ok(macos_notify::NotifyOutcome::unavailable(e.to_string()));
     }
-    result.map_err(|e| e.to_string())
+    Ok(macos_notify::NotifyOutcome::Attempted)
+}
+
+/// Query-only authorization state; never prompts. macOS dev binaries report
+/// `Unknown` (UN raises without a bundle), other platforms `Granted`.
+#[tauri::command]
+async fn notification_permission() -> macos_notify::NotifyPermission {
+    macos_notify::permission_state().await
+}
+
+/// Ask macOS for permission; shows the OS prompt only while undecided.
+/// Call only from the Settings Test button, never from an agent finish.
+#[tauri::command]
+async fn request_notification_permission() -> macos_notify::NotifyPermission {
+    macos_notify::request_permission().await
 }
 
 #[tauri::command]
@@ -515,6 +543,8 @@ pub fn run() {
             telemetry::telemetry_capture,
             telemetry::telemetry_flag,
             notify_agent,
+            notification_permission,
+            request_notification_permission,
             play_sound,
             app_info,
             home_dir

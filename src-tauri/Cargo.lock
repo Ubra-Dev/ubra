@@ -3082,7 +3082,10 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
+ "objc2-core-location",
  "objc2-foundation",
 ]
 
@@ -5567,10 +5570,14 @@ name = "ubra"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2",
  "fs2",
  "getrandom 0.3.4",
  "hmac",
  "libc",
+ "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "parking_lot",
  "portable-pty",
  "posthog-rs",
@@ -5590,6 +5597,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tokio",
  "toml 1.1.6+spec-1.1.0",
  "vt100",
  "windows-sys 0.61.2",
