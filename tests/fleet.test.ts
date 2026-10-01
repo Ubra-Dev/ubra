@@ -1,22 +1,24 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEFAULT_FLEET_STARTER_ID,
   detectedStems,
-  FLEET_MAX_PANES,
-  FLEET_STARTERS,
-  fleetStarterById,
+  FLEET_DEFAULT_PICKS,
   planFleet,
+  rollFleetPlan,
 } from "../src/lib/fleet.ts";
+import { collectPaneIds, countPanes } from "../src/lib/layout.ts";
 
 describe("planFleet", () => {
-  it("keeps the selection in order within the cap", () => {
+  it("keeps the selection in order", () => {
     assert.deepEqual(planFleet(["codex", "claude"], null), ["codex", "claude"]);
   });
 
-  it("caps the fleet at FLEET_MAX_PANES", () => {
-    assert.equal(FLEET_MAX_PANES, 3);
-    assert.deepEqual(planFleet(["a", "b", "c", "d", "e"], null), ["a", "b", "c"]);
+  it("sets no launch cap", () => {
+    assert.equal(FLEET_DEFAULT_PICKS, 4);
+    assert.deepEqual(
+      planFleet(["a", "b", "c", "d", "e", "f", "g"], null),
+      ["a", "b", "c", "d", "e", "f", "g"],
+    );
   });
 
   it("trims picks and drops blanks", () => {
@@ -48,25 +50,11 @@ describe("detectedStems", () => {
   });
 });
 
-describe("FLEET_STARTERS", () => {
-  it("has unique ids and non-empty prompts", () => {
-    const ids = FLEET_STARTERS.map((starter) => starter.id);
-    assert.equal(new Set(ids).size, ids.length);
-    for (const starter of FLEET_STARTERS) {
-      assert.ok(starter.title.trim());
-      assert.ok(starter.blurb.trim());
-      assert.ok(starter.prompt.trim());
-    }
-  });
-
-  it("keeps every prompt read-only", () => {
-    for (const starter of FLEET_STARTERS) {
-      assert.match(starter.prompt, /don't change anything/i);
-    }
-  });
-
-  it("resolves the default starter and falls back for unknown ids", () => {
-    assert.equal(fleetStarterById(DEFAULT_FLEET_STARTER_ID).id, "explain");
-    assert.equal(fleetStarterById("nope").id, "explain");
+describe("rollFleetPlan", () => {
+  it("covers every pane exactly once", () => {
+    const plan = rollFleetPlan(5, () => 0.5);
+    assert.equal(countPanes(plan.tab.root), 5);
+    assert.deepEqual(new Set(plan.order), new Set(collectPaneIds(plan.tab.root)));
   });
 });
+

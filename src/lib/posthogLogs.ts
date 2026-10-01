@@ -42,13 +42,4 @@ export const posthogLogs = {
       });
     }
   },
-
-  fleetFirstCompleted(seconds: number): void {
-    if (canExportLogs()) {
-      posthog.logger.info("fleet_first_completed", {
-        component: "onboarding",
-        seconds,
-      });
-    }
-  },
 };

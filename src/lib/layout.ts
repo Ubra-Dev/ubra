@@ -103,47 +103,50 @@ export function gridTab(name = "Tab 1"): Tab {
 }
 
 /**
- * First-run fleet tab for 1-3 panes (counts clamp into range). Two panes
- * sit side by side; three give the primary CLI the left half and stack
- * the other two on the right. Pane order from `collectPaneIds` matches
- * fleet priority: primary CLI first.
+ * First-run fleet tab for `count` panes in a random tiling. Pane priority
+ * comes from `leavesByAreaDesc`: the primary CLI takes the largest pane.
  */
-export function fleetTab(count: number, name = "Tab 1"): Tab {
-  const panes = Math.min(Math.max(Math.floor(count) || 1, 1), 3);
-  if (panes === 1) return defaultTab(name);
-  if (panes === 2) {
-    return {
-      id: newId("tab"),
-      name,
-      root: {
-        kind: "split",
-        id: newId("split"),
-        dir: "row",
-        sizes: [0.5, 0.5],
-        first: defaultPane(),
-        second: defaultPane(),
-      },
-    };
-  }
+export function fleetTab(count: number, rng: Rng, name = "Tab 1"): Tab {
+  return { id: newId("tab"), name, root: randomTiling(count, rng) };
+}
+
+/** Injectable randomness for tiling; production passes Math.random. */
+export type Rng = () => number;
+
+/** Random split ratio bounds: wide enough to surprise, never a sliver. */
+const TILE_RATIO_MIN = 0.4;
+const TILE_RATIO_MAX = 0.6;
+
+/**
+ * Random binary tiling for exactly `count` panes (counts below 1 give one).
+ * Splits recurse with a random direction, pane share, and ratio, so every
+ * first-run fleet lands in a fresh arrangement.
+ */
+export function randomTiling(count: number, rng: Rng): LayoutNode {
+  const panes = Math.max(Math.floor(count) || 1, 1);
+  if (panes === 1) return defaultPane();
+  const share = 1 + Math.floor(rng() * (panes - 1));
+  const ratio = TILE_RATIO_MIN + rng() * (TILE_RATIO_MAX - TILE_RATIO_MIN);
   return {
-    id: newId("tab"),
-    name,
-    root: {
-      kind: "split",
-      id: newId("split"),
-      dir: "row",
-      sizes: [0.5, 0.5],
-      first: defaultPane(),
-      second: {
-        kind: "split",
-        id: newId("split"),
-        dir: "col",
-        sizes: [0.5, 0.5],
-        first: defaultPane(),
-        second: defaultPane(),
-      },
-    },
+    kind: "split",
+    id: newId("split"),
+    dir: rng() < 0.5 ? "row" : "col",
+    sizes: [ratio, 1 - ratio],
+    first: randomTiling(share, rng),
+    second: randomTiling(panes - share, rng),
   };
+}
+
+/** Leaf pane ids ordered by area, largest first. */
+export function leavesByAreaDesc(node: LayoutNode): string[] {
+  return computeLayout(node)
+    .panes.slice()
+    .sort((p, q) => {
+      const [, , pw, ph] = p.rect;
+      const [, , qw, qh] = q.rect;
+      return qw * qh - pw * ph;
+    })
+    .map((pane) => pane.node.id);
 }
 
 export function defaultWorkspace(name = "Workspace 1"): Workspace {

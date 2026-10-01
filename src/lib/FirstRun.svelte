@@ -9,13 +9,14 @@
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
   import AgentCliIcon from "./AgentCliIcon.svelte";
   import AgentCliSelect from "./AgentCliSelect.svelte";
+  import Icon from "./Icon.svelte";
   import {
-    DEFAULT_FLEET_STARTER_ID,
-    FLEET_MAX_PANES,
-    FLEET_STARTERS,
-    fleetStarterById,
+    FLEET_DEFAULT_PICKS,
     planFleet,
+    rollFleetPlan,
+    type FleetLaunchPlan,
   } from "./fleet";
+  import { computeLayout } from "./layout";
   import { agentClis } from "./agentClis.svelte";
   import { posthogLogs } from "./posthogLogs";
   import { PRIVACY_URL } from "./site.ts";
@@ -39,13 +40,13 @@
   let selectEl = $state<AgentCliSelect | null>(null);
   let customEl = $state<HTMLInputElement | null>(null);
   let telemetryOptIn = $state(false);
+  let setupScrollEl = $state<HTMLDivElement | null>(null);
   let telemetrySupported = $state(false);
   let onboardingActionBusy = $state(false);
   /** First-run wizard step; revisit mode always shows the single screen. */
   let step = $state<"folder" | "fleet">("folder");
   let fleetPicks = $state<string[]>([]);
   let fleetSettled = false;
-  let starterId = $state(DEFAULT_FLEET_STARTER_ID);
   let supportedClis = $state<{ cli: string; label: string }[] | null>(null);
   let fleetShownCaptured = false;
 
@@ -54,7 +55,6 @@
   const fleetCommands = $derived(
     planFleet(fleetPicks, detected?.length === 0 ? customCommand : null),
   );
-  const fleetStarter = $derived(fleetStarterById(starterId));
   const supportedNames = $derived.by(() => {
     const list = supportedClis ?? [];
     if (list.length === 0) return "";
@@ -94,8 +94,9 @@
     else if (clis.length === 0) selection = CUSTOM_COMMAND;
   });
 
-  // Settle fleet picks once: the preferred CLI first (it takes the hero
-  // pane), then detection order, capped at the fleet size.
+  // Settle fleet picks once: the preferred CLI first (it takes the
+  // largest pane), then detection order. No cap; users pick as many as
+  // they like.
   $effect(() => {
     const clis = agentClis.clis;
     if (clis === null || fleetSettled) return;
@@ -104,8 +105,43 @@
     const ordered = [...clis].sort((a, b) =>
       a.cli === prefill ? -1 : b.cli === prefill ? 1 : 0,
     );
-    fleetPicks = ordered.slice(0, FLEET_MAX_PANES).map((entry) => entry.cli);
+    fleetPicks = ordered.slice(0, FLEET_DEFAULT_PICKS).map((entry) => entry.cli);
   });
+
+  // Rolled tiling for the current pick count. Re-rolls only when the
+  // count changes (or Shuffle is pressed), so toggling which CLIs are
+  // picked never reshuffles the preview under the user.
+  let fleetPlan = $state<FleetLaunchPlan | null>(null);
+  $effect(() => {
+    if (revisit || step !== "fleet") return;
+    const count = fleetCommands.length;
+    if (count === 0) {
+      fleetPlan = null;
+      return;
+    }
+    if (!fleetPlan || fleetPlan.order.length !== count) {
+      fleetPlan = rollFleetPlan(count, Math.random);
+    }
+  });
+
+  function shufflePlan(): void {
+    if (fleetCommands.length === 0) return;
+    fleetPlan = rollFleetPlan(fleetCommands.length, Math.random);
+  }
+
+  /** CLI per previewed pane: picks in order onto largest-first panes. */
+  const fleetAssign = $derived.by((): Map<string, string> => {
+    const assigned = new Map<string, string>();
+    if (!fleetPlan) return assigned;
+    fleetPlan.order.forEach((id, index) => {
+      const command = fleetCommands[index];
+      if (command) assigned.set(id, command);
+    });
+    return assigned;
+  });
+  const fleetPanes = $derived(
+    fleetPlan ? computeLayout(fleetPlan.tab.root).panes : [],
+  );
 
   $effect(() => {
     if (revisit || step !== "fleet") return;
@@ -132,7 +168,7 @@
   function togglePick(cli: string): void {
     if (fleetPicks.includes(cli)) {
       fleetPicks = fleetPicks.filter((pick) => pick !== cli);
-    } else if (fleetPicks.length < FLEET_MAX_PANES) {
+    } else {
       fleetPicks = [...fleetPicks, cli];
     }
   }
@@ -140,11 +176,13 @@
   function goFleet(): void {
     errorMessage = null;
     step = "fleet";
+    setupScrollEl?.scrollTo({ top: 0 });
   }
 
   function goFolder(): void {
     errorMessage = null;
     step = "folder";
+    setupScrollEl?.scrollTo({ top: 0 });
   }
 
   function onSelectChange(picked: string): void {
@@ -206,15 +244,18 @@
     if (onboardingActionBusy || !projectDirectory || fleetCommands.length === 0) {
       return;
     }
+    // The roll effect keeps the plan in sync; re-roll defensively if a
+    // pick landed after the last roll.
+    let plan = fleetPlan;
+    if (!plan || plan.order.length !== fleetCommands.length) {
+      plan = rollFleetPlan(fleetCommands.length, Math.random);
+      fleetPlan = plan;
+    }
     onboardingActionBusy = true;
     await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
       console.error("ubra: onboarding consent failed", error);
     });
-    const ids = store.completeOnboardingFleet(
-      projectDirectory,
-      fleetCommands,
-      fleetStarter.prompt,
-    );
+    const ids = store.completeOnboardingFleet(projectDirectory, fleetCommands, plan);
     if (!ids) {
       errorMessage = "Couldn't prepare the project terminals. Try skipping setup.";
       onboardingActionBusy = false;
@@ -225,25 +266,6 @@
       posthog.capture("fleet_launched", { cliCount: fleetCommands.length });
       posthogLogs.onboardingCompleted();
       posthogLogs.fleetLaunched(fleetCommands.length);
-    }
-  }
-
-  async function startSingle(): Promise<void> {
-    const primary = fleetCommands[0];
-    if (onboardingActionBusy || !projectDirectory || !primary) return;
-    onboardingActionBusy = true;
-    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
-      console.error("ubra: onboarding consent failed", error);
-    });
-    const paneId = store.completeOnboarding(projectDirectory, primary);
-    if (!paneId) {
-      errorMessage = "Couldn't prepare the project terminal. Try skipping setup.";
-      onboardingActionBusy = false;
-      return;
-    }
-    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
-      posthog.capture("onboarding_completed");
-      posthogLogs.onboardingCompleted();
     }
   }
 
@@ -281,21 +303,33 @@
         <div class="intro-copy">
           <h1 id="welcome-title">Launch your fleet.</h1>
           <p>
-            Up to three agents, side by side, starting on your first task together.
+            Your agents, side by side, each in its own terminal.
           </p>
         </div>
         <div class="fleet-preview" aria-label="Fleet layout preview">
-          {#if fleetCommands.length === 0}
+          {#if fleetCommands.length === 0 || !fleetPlan}
             <div class="fleet-empty">Pick at least one CLI to preview your fleet.</div>
           {:else}
-            <div class="fleet-grid" data-panes={fleetCommands.length}>
-              {#each fleetCommands as cmd, i (cmd)}
-                <div class="fleet-cell" class:hero={i === 0}>
-                  <span class="fleet-cell-cli">{cmd}</span>
-                  <span class="fleet-cell-task">{fleetStarter.title}</span>
+            <div class="fleet-tiling">
+              {#each fleetPanes as pane (pane.node.id)}
+                {@const cmd = fleetAssign.get(pane.node.id) ?? ""}
+                {@const [px, py, pw, ph] = pane.rect}
+                <div
+                  class="fleet-tile"
+                  class:hero={pane.node.id === fleetPlan?.order[0]}
+                  style="left: {(px * 100).toFixed(2)}%; top: {(py * 100).toFixed(2)}%; width: {(pw * 100).toFixed(2)}%; height: {(ph * 100).toFixed(2)}%;"
+                  title={cmd}
+                >
+                  <span class="fleet-tile-cli">{cmd}</span>
                 </div>
               {/each}
             </div>
+            {#if fleetCommands.length > 1}
+              <button class="shuffle-btn" type="button" onclick={shufflePlan}>
+                <Icon name="refresh" size={11} />
+                <span>Shuffle layout</span>
+              </button>
+            {/if}
           {/if}
         </div>
         <p class="intro-foot">Every agent runs in a regular terminal.</p>
@@ -332,13 +366,27 @@
         else launchFleet();
       }}
     >
-      <div class="step-label">
-        {revisit ? "Get started" : step === "folder" ? "Step 1 of 2 — Project" : "Step 2 of 2 — Fleet"}
+      <div class="step-head">
+        <div class="step-label">
+          {revisit ? "Get started" : step === "folder" ? "Step 1 of 2 — Project" : "Step 2 of 2 — Fleet"}
+        </div>
+        {#if !revisit && step === "fleet"}
+          <button
+            class="back-btn"
+            type="button"
+            onclick={goFolder}
+            disabled={onboardingActionBusy}
+            title="Back to project folder"
+            aria-label="Back to project folder"
+          >
+            <Icon name="chevron-left" size={14} />
+          </button>
+        {/if}
       </div>
       {#if !revisit && step === "fleet"}
         <h2>Choose your fleet</h2>
         <p class="description">
-          Pick the agents to launch side by side, and their first task.
+          Pick the agents to launch side by side.
         </p>
       {:else}
         <h2>Choose where to work</h2>
@@ -351,6 +399,7 @@
         </p>
       {/if}
 
+      <div class="setup-scroll" bind:this={setupScrollEl}>
       {#if revisit || step === "folder"}
       <div class="field-group">
         <span class="field-label">Project folder</span>
@@ -468,62 +517,37 @@
             {/if}
           </span>
         {:else}
-          <div class="cli-cards" role="group" aria-labelledby="fleet-label">
+          <div class="cli-chips" role="group" aria-labelledby="fleet-label">
             {#each detected as entry (entry.cli)}
               {@const picked = fleetPicks.includes(entry.cli)}
-              {@const capped = !picked && fleetPicks.length >= FLEET_MAX_PANES}
-              <label class="cli-card" class:picked class:capped>
+              <label class="cli-chip" class:picked title={`${entry.cli} — ${entry.path}`}>
                 <input
                   type="checkbox"
                   checked={picked}
-                  disabled={capped}
                   onchange={() => togglePick(entry.cli)}
                   aria-label={entry.label}
                 />
-                <AgentCliIcon cli={entry.cli} label={entry.label} size={20} />
-                <span class="cli-card-text">
-                  <span class="cli-card-label">{entry.label}</span>
-                  <span class="cli-card-path" title={entry.path}>{entry.path}</span>
-                </span>
+                <AgentCliIcon cli={entry.cli} label={entry.label} size={16} />
+                <span class="cli-chip-label">{entry.label}</span>
                 {#if fleetPicks[0] === entry.cli}
-                  <span class="cli-card-hero">Main</span>
+                  <span class="cli-chip-hero">Main</span>
                 {/if}
               </label>
             {/each}
           </div>
-          {#if detected.length > FLEET_MAX_PANES}
+          {#if fleetPicks.length > 6}
             <span class="hint">
-              +{detected.length - FLEET_MAX_PANES} more installed — add them after setup.
+              {fleetPicks.length} terminals — cozy. Deselect to slim down.
             </span>
           {/if}
         {/if}
       </div>
 
-      <div class="field-group starter-group">
-        <span class="field-label" id="starter-label">First task</span>
-        <div class="starter-list" role="radiogroup" aria-labelledby="starter-label">
-          {#each FLEET_STARTERS as starter (starter.id)}
-            <label class="starter-card" class:picked={starterId === starter.id}>
-              <input
-                type="radio"
-                name="fleet-starter"
-                checked={starterId === starter.id}
-                onchange={() => (starterId = starter.id)}
-              />
-              <span class="starter-text">
-                <span class="starter-title">{starter.title}</span>
-                <span class="starter-blurb">{starter.blurb}</span>
-              </span>
-            </label>
-          {/each}
-        </div>
-      </div>
-
       <div class="status-tip">
         <span class="status-dot" aria-hidden="true"></span>
         <span>
-          The fleet runs on your own CLI accounts. Starter tasks only read your
-          code — nothing is changed.
+          The fleet runs on your own CLI accounts. Each agent opens in its
+          own terminal, ready for your first prompt.
         </span>
       </div>
       {:else}
@@ -561,6 +585,7 @@
           </span>
         </label>
       {/if}
+      </div>
 
       <div class="actions">
         {#if revisit}
@@ -608,24 +633,6 @@
           <button
             class="skip-button"
             type="button"
-            onclick={startSingle}
-            disabled={!projectDirectory ||
-              fleetCommands.length === 0 ||
-              onboardingActionBusy}
-          >
-            Just one terminal
-          </button>
-          <button
-            class="skip-button"
-            type="button"
-            onclick={goFolder}
-            disabled={onboardingActionBusy}
-          >
-            ← Back
-          </button>
-          <button
-            class="skip-button"
-            type="button"
             onclick={skipSetup}
             disabled={onboardingActionBusy}
           >
@@ -654,6 +661,8 @@
   .card {
     width: min(900px, 100%);
     min-height: 530px;
+    /* Fixed dialog height on every step; the fleet list scrolls inside. */
+    height: min(660px, calc(100vh - 64px));
     display: grid;
     grid-template-columns: 0.88fr 1.12fr;
     background: var(--surface-bg);
@@ -665,6 +674,8 @@
   .intro {
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     padding: 32px 30px 24px;
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border);
@@ -761,14 +772,55 @@
     font-size: 11px;
   }
   .setup {
-    align-self: center;
+    display: flex;
+    flex-direction: column;
+    align-self: stretch;
+    min-width: 0;
+    min-height: 0;
     padding: 48px 46px 40px;
   }
-  .step-label {
+  /* Middle content scrolls; the step header above and actions below stay
+     pinned so the dialog keeps one height on every step. */
+  .setup-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
+    padding: 0 2px;
+  }
+  .step-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     margin-bottom: 11px;
+  }
+  .step-label {
     color: var(--accent);
     font-size: 11px;
     font-weight: 600;
+  }
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: 1px solid var(--input-border);
+    border-radius: 50%;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .back-btn:hover:not(:disabled) {
+    color: var(--text-strong);
+    border-color: var(--accent);
+  }
+  .back-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   .setup h2 {
     margin: 0;
@@ -988,103 +1040,72 @@
   .skip-button:hover {
     color: var(--text-strong);
   }
-  .cli-cards {
+  /* Wrapping toggle chips; capped so a long detection list stays a
+     tidy scroll area. Chaining to the outer region stays default so one
+     gesture keeps going. */
+  .cli-chips {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
     gap: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding: 2px;
   }
-  .cli-card {
-    display: flex;
+  .cli-chip {
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
-    min-height: 46px;
-    padding: 8px 12px;
-    border: 1px solid var(--input-border);
-    border-radius: 7px;
-    background: var(--input-bg);
+    gap: 7px;
+    max-width: 100%;
+    padding: 6px 12px 6px 9px;
+    border: 1px solid var(--separator);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
     cursor: pointer;
   }
-  .cli-card input {
-    flex: 0 0 auto;
-    accent-color: var(--accent);
+  .cli-chip:hover {
+    border-color: var(--text-subtle);
+    color: var(--text);
   }
-  .cli-card.picked {
+  .cli-chip input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+  .cli-chip:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .cli-chip.picked {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
-  }
-  .cli-card.capped {
-    opacity: 0.55;
-    cursor: not-allowed;
-  }
-  .cli-card-text {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-    line-height: 1.35;
-  }
-  .cli-card-label {
+    /* Tonal accent wash; falls back to a flat fill where color-mix
+       is unavailable. */
+    background: var(--surface-active);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--text-strong);
-    font-size: 12px;
-    font-weight: 600;
   }
-  .cli-card-path {
+  .cli-chip.picked:hover {
+    border-color: var(--accent);
+    color: var(--text-strong);
+  }
+  .cli-chip-label {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    color: var(--text-subtle);
-    font: 11px var(--font-ui);
+    font-weight: 600;
   }
-  .cli-card-hero {
+  .cli-chip-hero {
     flex: 0 0 auto;
-    padding: 2px 7px;
-    border-radius: 20px;
+    padding: 1px 7px;
+    border-radius: 999px;
     background: var(--accent);
     color: var(--app-bg);
     font-size: 10px;
     font-weight: 700;
-  }
-  .starter-group {
-    margin-top: 21px;
-  }
-  .starter-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .starter-card {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid var(--input-border);
-    border-radius: 7px;
-    background: var(--input-bg);
-    cursor: pointer;
-  }
-  .starter-card input {
-    margin-top: 2px;
-    flex: 0 0 auto;
-    accent-color: var(--accent);
-  }
-  .starter-card.picked {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
-  }
-  .starter-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    line-height: 1.4;
-  }
-  .starter-title {
-    color: var(--text-strong);
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .starter-blurb {
-    color: var(--text-subtle);
-    font-size: 11px;
   }
   .fleet-preview {
     margin-top: auto;
@@ -1101,55 +1122,49 @@
     line-height: 1.5;
     text-align: center;
   }
-  .fleet-grid {
-    display: grid;
-    gap: 6px;
-    min-height: 120px;
+  .fleet-tiling {
+    position: relative;
+    min-height: 150px;
   }
-  .fleet-grid[data-panes="1"] {
-    grid-template-columns: 1fr;
-  }
-  .fleet-grid[data-panes="2"] {
-    grid-template-columns: 1fr 1fr;
-  }
-  .fleet-grid[data-panes="3"] {
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
-  .fleet-grid[data-panes="3"] .fleet-cell.hero {
-    grid-row: span 2;
-  }
-  .fleet-cell {
+  .fleet-tile {
+    position: absolute;
+    box-sizing: border-box;
     display: flex;
-    flex-direction: column;
+    align-items: center;
     justify-content: center;
-    gap: 4px;
-    min-width: 0;
-    padding: 8px 9px;
+    overflow: hidden;
+    padding: 4px 6px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 5px;
     background: var(--surface-bg);
   }
-  .fleet-cell.hero {
+  .fleet-tile.hero {
     border-color: var(--accent);
   }
-  .fleet-cell-cli {
+  .fleet-tile-cli {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    max-width: 100%;
     color: var(--accent);
-    font: 11px var(--font-ui);
+    font-size: 10px;
     font-weight: 700;
   }
-  .fleet-cell-task {
-    overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    color: var(--text-subtle);
-    font-size: 10px;
-    line-height: 1.35;
+  .shuffle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 2px 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .shuffle-btn:hover {
+    color: var(--text-strong);
   }
   :global(.onboarding :focus-visible) {
     outline: 2px solid var(--accent);
@@ -1163,6 +1178,9 @@
     .card {
       max-width: 520px;
       grid-template-columns: 1fr;
+      /* Stacked layout sizes to content; the page scrolls instead. */
+      height: auto;
+      max-height: none;
     }
     .intro {
       padding: 22px 24px;

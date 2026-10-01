@@ -29,6 +29,7 @@
     | "chevron-up"
     | "chevron-down"
     | "chevron-right"
+    | "chevron-left"
     | "folder"
     | "file"
     | "file-text"
@@ -158,6 +159,7 @@
     "chevron-up": '<polyline points="18 15 12 9 6 15"/>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
     "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
+    "chevron-left": '<polyline points="15 18 9 12 15 6"/>',
     folder:
       '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
     file:
