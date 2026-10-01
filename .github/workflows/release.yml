@@ -188,6 +188,48 @@ jobs:
             npm run tauri build
           fi
 
+      # Tauri notarizes and staples the app bundle before creating its DMG.
+      # Sign, notarize, and staple the outer disk image as well so Gatekeeper
+      # can verify the downloaded release container without a network lookup.
+      - name: Sign, notarize, and staple macOS disk images
+        if: runner.os == 'macOS'
+        env:
+          BUNDLE_DIR: ${{ matrix.bundle_dir }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          dmg_files=("$BUNDLE_DIR"/dmg/*.dmg)
+          if [ "${#dmg_files[@]}" -eq 0 ]; then
+            echo "::error::No macOS disk image found under $BUNDLE_DIR/dmg."
+            exit 1
+          fi
+          for dmg in "${dmg_files[@]}"; do
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+            codesign --verify --verbose=2 "$dmg"
+            if [ -n "$APPLE_API_KEY_P8" ]; then
+              xcrun notarytool submit "$dmg" \
+                --key "$APPLE_API_KEY_PATH" \
+                --key-id "$APPLE_API_KEY" \
+                --issuer "$APPLE_API_ISSUER" \
+                --wait --output-format json
+            else
+              xcrun notarytool submit "$dmg" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --wait --output-format json
+            fi
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
+
       # Both macOS legs emit identically named `Ubra.app.tar.gz` updater
       # bundles; rename by arch so they survive as distinct release assets.
       - name: Disambiguate macOS updater bundle by arch
