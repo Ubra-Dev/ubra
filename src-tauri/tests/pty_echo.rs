@@ -519,9 +519,13 @@ fn invalid_geometry_preserves_a_usable_session() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
+    let mut handshake = Handshake::new();
     while !output.contains("healthy-pane") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Event::Output(_, data)) => output.push_str(&data),
+            Ok(Event::Output(got, data)) => {
+                output.push_str(&data);
+                handshake.note_output(&manager, got, &output);
+            }
             _ => panic!("rejected resize damaged session: {output:?}"),
         }
     }
@@ -580,10 +584,12 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
+    let mut handshake = Handshake::new();
     let child = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Output(id, data)) if id == parent => {
                 output.push_str(&data);
+                handshake.note_output(&manager, id, &output);
                 if let Some(line) = output.lines().find(|line| line.starts_with("CHILD:")) {
                     if let Ok(pid) = line.trim_start_matches("CHILD:").trim().parse::<i32>() {
                         break pid;
@@ -620,9 +626,14 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
         .unwrap();
     let mut output = String::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    // Separate instance: the sibling pane's ConPTY emits its own query.
+    let mut sibling_handshake = Handshake::new();
     while !output.contains("sibling-alive") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Event::Output(id, data)) if id == sibling => output.push_str(&data),
+            Ok(Event::Output(id, data)) if id == sibling => {
+                output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &output);
+            }
             Ok(_) => {}
             Err(_) => panic!("closing another pane damaged sibling: {output:?}"),
         }
