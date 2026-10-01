@@ -23,8 +23,9 @@ timing, and pane isolation must be checked on every supported platform.
 
 Tray initialization failure requests a native warning explaining that window
 close quits. A hide failure likewise warns before quitting, rather than
-silently leaving an unreachable app. Settings provides Quit independently of
-the tray. For a repeatable tray-unavailable smoke, use a debug build with
+silently leaving an unreachable app. The tray and app menus provide Quit and
+Stop Agents and Quit independently of the window. For a repeatable
+tray-unavailable smoke, use a debug build with
 `UBRA_DISABLE_TRAY=1` and a fresh `UBRA_DATA_DIR`; release builds ignore this
 switch. Native window-close, hide-failure, and warning appearance remain manual
 release checks.

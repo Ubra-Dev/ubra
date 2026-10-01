@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { canDispatch, type CommandContext, type CommandRequest } from "./appCommands";
+import { agent } from "./agent.svelte";
 import { isEditableTarget } from "./shortcuts";
 import { findPane } from "./layout";
 import { store } from "./store.svelte";
@@ -29,7 +30,7 @@ export function commandContext(): CommandContext {
   const textFocus = !terminalFocus && isEditableTarget(el);
   const pane = store.currentPane();
   const controls = terminalCommands.get(pane?.paneId);
-  const blocked = store.settingsOpen || !!store.pendingClose || store.firstRun ||
+  const blocked = store.settingsOpen || !!store.pendingClose || !!store.pendingQuit || store.firstRun ||
     store.recoveryRequired || store.recoveryBusy ||
     !!document.querySelector("[data-keyboard-overlay]");
   const writable = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
@@ -59,6 +60,12 @@ function findSavedCommand(id: string): boolean {
   const tab = store.tab();
   const pane = tab ? findPane(tab.root, id) : null;
   return !!pane?.cmd?.length && pane.cmdOnRestore === false;
+}
+
+function activeAgentCount(): number {
+  return agent
+    .activeAgents()
+    .reduce((sum, group) => sum + group.agents.length, 0);
 }
 
 async function edit(action: string): Promise<void> {
@@ -131,7 +138,7 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       case "minimize": await getCurrentWindow().minimize(); break;
       case "documentation": await openUrl(`${REPO_URL}#readme`); break;
       case "report-issue": await openUrl(`${REPO_URL}/issues`); break;
-      case "quit": await invoke("quit_app"); break;
+      case "quit": store.requestQuit(activeAgentCount()); break;
       case "quit-stop-agents": await invoke("quit_app_and_stop_agents"); break;
     }
     return true;

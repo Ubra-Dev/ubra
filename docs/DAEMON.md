@@ -75,6 +75,12 @@ takes `--state-dir`). In dev, `tauri dev` builds the `ubra-daemon`/`ubra-cli`
 sidecars first via `beforeDevCommand`; the GUI spawns the daemon sibling from
 `src-tauri/target/debug/`.
 
+Temporary diagnostic: `UBRA_LOCAL_PTY=1` disables the survival
+architecture for that launch. PTYs and the agent watcher run in-process
+(pre-survival behavior), no daemon is spawned or contacted, and quitting
+stops every pane. Restart without the variable to readopt the daemon's
+surviving sessions.
+
 ## GUI runtime
 
 On startup the GUI probes the daemon port file and spawns a detached daemon
@@ -83,8 +89,10 @@ over the same authenticated protocol. A supervisor thread forwards `pty_*`
 and `agent-state-update` events to the frontend and retries across
 disconnects; every `pty_*` Tauri command is a daemon round trip.
 
-- `Quit Ubra` detaches: the daemon keeps every agent running and reopening
-  readopts the same sessions by pane key.
+- `Quit Ubra` asks first when panes exist (rememberable in the dialog, reset
+  in Settings → App): quitting detaches, the daemon keeps every agent running,
+  and reopening readopts the same sessions by pane key. With no panes it quits
+  at once, as does a remembered choice.
 - `Stop Agents and Quit` (menus, tray) shuts the daemon down first. It
   never spawns a daemon to stop one.
 - While disconnected the GUI shows a reconnecting banner; on reconnect it
@@ -127,7 +135,7 @@ needed, and add a row to `src/lib/agentResume.ts`.
 
 ## Manual QA
 
-1. Launch, start agents in two panes, Quit, relaunch: same live sessions.
+1. Launch, start agents in two panes, Quit, confirm keep-running, relaunch: same live sessions.
 2. `Stop Agents and Quit`: processes end (`ps` shows no agents).
 3. Kill the daemon process: banner appears; GUI respawns it; panes show
    history prelude and resumed agents (claude/codex) or fresh shells.

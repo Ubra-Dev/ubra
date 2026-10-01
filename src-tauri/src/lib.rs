@@ -19,9 +19,12 @@ mod terminal_state;
 pub mod usage;
 mod window_geometry;
 
+use agent_status::AgentStatusService;
 use daemon_client::{connect_or_ensure, daemon_state_dir, DaemonClient, DaemonEvent};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
-use pty_manager::{PaneId, PtyExit, PtyOutput, PtySessionInfo, PtySnapshot};
+use pty_manager::{
+    PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySessionInfo, PtySnapshot, SpawnOptions,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -50,6 +53,138 @@ impl DaemonHandle {
             .clone()
             .filter(|client| !client.is_dead())
             .ok_or_else(|| "agent runtime is unavailable".to_string())
+    }
+}
+
+struct TauriSink(AppHandle);
+
+impl PtyEventSink for TauriSink {
+    fn output(&self, id: PaneId, data: String, sequence: u64) {
+        let _ = self.0.emit("pty-output", PtyOutput { id, data, sequence });
+    }
+
+    fn exited(&self, id: PaneId, success: bool, code: Option<i32>) {
+        let _ = self.0.emit("pty-exit", PtyExit { id, success, code });
+    }
+}
+
+/// Parse a `UBRA_*` kill-switch: exactly "1" enables.
+fn kill_switch(var: &Result<String, std::env::VarError>) -> bool {
+    matches!(var.as_deref(), Ok("1"))
+}
+
+/// Diagnostic kill-switch for the survival architecture: with
+/// `UBRA_LOCAL_PTY=1`, PTYs live in this process (pre-survival behavior)
+/// and quitting stops them. No daemon is spawned or contacted.
+fn local_pty_enabled() -> bool {
+    kill_switch(&std::env::var("UBRA_LOCAL_PTY"))
+}
+
+/// Where PTYs live. Daemon is the survival architecture; Local restores
+/// in-process PTYs for diagnosis (`UBRA_LOCAL_PTY=1`).
+enum PtyBackend {
+    Local {
+        manager: Arc<PtyManager>,
+        statuses: AgentStatusService,
+    },
+    Daemon(DaemonHandle),
+}
+
+impl PtyBackend {
+    fn is_local(&self) -> bool {
+        matches!(self, PtyBackend::Local { .. })
+    }
+
+    fn spawn(
+        &self,
+        shell: Option<String>,
+        cwd: Option<String>,
+        args: Vec<String>,
+        cols: u16,
+        rows: u16,
+        key: Option<String>,
+    ) -> Result<PaneId, String> {
+        match self {
+            PtyBackend::Local { manager, .. } => manager
+                .spawn(SpawnOptions {
+                    shell,
+                    cwd,
+                    args,
+                    cols,
+                    rows,
+                    key,
+                    headless: false,
+                })
+                .map_err(|e| e.to_string()),
+            PtyBackend::Daemon(handle) => handle.client()?.spawn(shell, cwd, args, cols, rows, key),
+        }
+    }
+
+    fn list(&self) -> Result<Vec<PtySessionInfo>, String> {
+        match self {
+            PtyBackend::Local { manager, .. } => Ok(manager.list()),
+            PtyBackend::Daemon(handle) => handle.client()?.list(),
+        }
+    }
+
+    fn write(&self, id: PaneId, data: &str) -> Result<(), String> {
+        match self {
+            PtyBackend::Local { manager, .. } => manager.write(id, data).map_err(|e| e.to_string()),
+            PtyBackend::Daemon(handle) => handle.client()?.write(id, data),
+        }
+    }
+
+    fn resize(&self, id: PaneId, cols: u16, rows: u16) -> Result<(), String> {
+        match self {
+            PtyBackend::Local { manager, .. } => {
+                manager.resize(id, cols, rows).map_err(|e| e.to_string())
+            }
+            PtyBackend::Daemon(handle) => handle.client()?.resize(id, cols, rows),
+        }
+    }
+
+    fn kill(&self, id: PaneId) -> Result<(), String> {
+        match self {
+            PtyBackend::Local { manager, .. } => manager.kill(id).map_err(|e| e.to_string()),
+            PtyBackend::Daemon(handle) => handle.client()?.kill(id),
+        }
+    }
+
+    fn snapshot(&self, id: PaneId) -> Result<PtySnapshot, String> {
+        match self {
+            PtyBackend::Local { manager, .. } => manager.snapshot(id).map_err(|e| e.to_string()),
+            PtyBackend::Daemon(handle) => handle.client()?.snapshot(id),
+        }
+    }
+
+    fn history(&self, key: &str) -> Result<Option<PtySnapshot>, String> {
+        match self {
+            // No history dir in local mode: every mount starts blank.
+            PtyBackend::Local { manager, .. } => Ok(manager.load_history(key)),
+            PtyBackend::Daemon(handle) => handle.client()?.history(key),
+        }
+    }
+
+    fn agent_states(&self) -> Result<serde_json::Value, String> {
+        match self {
+            PtyBackend::Local { statuses, .. } => {
+                let snapshot = statuses.snapshot();
+                Ok(serde_json::json!({
+                    "revision": snapshot.revision,
+                    "states": snapshot.states,
+                }))
+            }
+            PtyBackend::Daemon(handle) => handle.client()?.agent_states(),
+        }
+    }
+
+    /// Stop in-process panes. Daemon panes are never touched here.
+    fn shutdown_local(&self) {
+        if let PtyBackend::Local { manager, .. } = self {
+            if let Err(error) = manager.shutdown() {
+                eprintln!("ubra: local PTY shutdown failed: {error}");
+            }
+        }
     }
 }
 
@@ -134,7 +269,7 @@ fn supervise_daemon(
 
 #[tauri::command]
 fn pty_spawn(
-    handle: State<'_, DaemonHandle>,
+    backend: State<'_, PtyBackend>,
     shell: Option<String>,
     cwd: Option<String>,
     args: Option<Vec<String>>,
@@ -142,52 +277,47 @@ fn pty_spawn(
     rows: u16,
     key: Option<String>,
 ) -> Result<PaneId, String> {
-    handle
-        .client()?
-        .spawn(shell, cwd, args.unwrap_or_default(), cols, rows, key)
+    backend.spawn(shell, cwd, args.unwrap_or_default(), cols, rows, key)
 }
 
 #[tauri::command]
-fn pty_list(handle: State<'_, DaemonHandle>) -> Result<Vec<PtySessionInfo>, String> {
-    handle.client()?.list()
+fn pty_list(backend: State<'_, PtyBackend>) -> Result<Vec<PtySessionInfo>, String> {
+    backend.list()
 }
 
 #[tauri::command]
-fn pty_write(handle: State<'_, DaemonHandle>, id: PaneId, data: String) -> Result<(), String> {
-    handle.client()?.write(id, &data)
+fn pty_write(backend: State<'_, PtyBackend>, id: PaneId, data: String) -> Result<(), String> {
+    backend.write(id, &data)
 }
 
 #[tauri::command]
 fn pty_resize(
-    handle: State<'_, DaemonHandle>,
+    backend: State<'_, PtyBackend>,
     id: PaneId,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    handle.client()?.resize(id, cols, rows)
+    backend.resize(id, cols, rows)
 }
 
 #[tauri::command]
-fn pty_kill(handle: State<'_, DaemonHandle>, id: PaneId) -> Result<(), String> {
-    handle.client()?.kill(id)
+fn pty_kill(backend: State<'_, PtyBackend>, id: PaneId) -> Result<(), String> {
+    backend.kill(id)
 }
 
 #[tauri::command]
-fn pty_snapshot(handle: State<'_, DaemonHandle>, id: PaneId) -> Result<PtySnapshot, String> {
-    handle.client()?.snapshot(id)
+fn pty_snapshot(backend: State<'_, PtyBackend>, id: PaneId) -> Result<PtySnapshot, String> {
+    backend.snapshot(id)
 }
 
 #[tauri::command]
-fn pty_history(
-    handle: State<'_, DaemonHandle>,
-    key: String,
-) -> Result<Option<PtySnapshot>, String> {
-    handle.client()?.history(&key)
+fn pty_history(backend: State<'_, PtyBackend>, key: String) -> Result<Option<PtySnapshot>, String> {
+    backend.history(&key)
 }
 
 #[tauri::command]
-fn agent_snapshot(handle: State<'_, DaemonHandle>) -> Result<serde_json::Value, String> {
-    let snapshot = handle.client()?.agent_states()?;
+fn agent_snapshot(backend: State<'_, PtyBackend>) -> Result<serde_json::Value, String> {
+    let snapshot = backend.agent_states()?;
     Ok(serde_json::json!({
         "revision": snapshot["revision"],
         "states": snapshot["states"],
@@ -309,7 +439,8 @@ fn git_init(root: String) -> Result<String, String> {
 }
 
 /// Quit the GUI and detach: the background daemon keeps every agent
-/// running. Reopening reattaches to the same sessions.
+/// running. Reopening reattaches to the same sessions. With
+/// `UBRA_LOCAL_PTY=1` there is no daemon, so local panes stop on exit.
 #[tauri::command]
 fn quit_app(app: AppHandle) -> Result<(), String> {
     app.state::<ShellState>()
@@ -321,9 +452,10 @@ fn quit_app(app: AppHandle) -> Result<(), String> {
 
 /// Stop every agent via the daemon, then quit. The daemon connection is
 /// never spawned here: with no daemon answering there is nothing to stop.
+/// In local mode only the in-process panes stop; a stray daemon is untouched.
 #[tauri::command]
 fn quit_app_and_stop_agents(app: AppHandle) -> Result<(), String> {
-    stop_daemon();
+    stop_daemon(&app);
     app.state::<ShellState>()
         .quitting
         .store(true, Ordering::SeqCst);
@@ -331,7 +463,11 @@ fn quit_app_and_stop_agents(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn stop_daemon() {
+fn stop_daemon(app: &AppHandle) {
+    // Local panes die with us at exit; never touch a stray daemon here.
+    if app.state::<PtyBackend>().is_local() {
+        return;
+    }
     let (tx, _rx) = std::sync::mpsc::sync_channel(8);
     match DaemonClient::connect(&daemon_state_dir(), tx) {
         Ok(client) => {
@@ -464,13 +600,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),
             "quit" => {
-                app.state::<ShellState>()
-                    .quitting
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
+                // Route through the frontend so tray Quit shares the
+                // confirmation dialog (and remembered choice) with menus.
+                show_main(app);
+                let _ = app.emit("quit-requested", ());
             }
             "quit-stop" => {
-                stop_daemon();
+                stop_daemon(app);
                 app.state::<ShellState>()
                     .quitting
                     .store(true, Ordering::SeqCst);
@@ -534,7 +670,27 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            app.manage(DaemonHandle::default());
+            let rules_dir = match data_dir(app.handle()) {
+                Ok(dir) => Some(dir.join("agent-detection")),
+                Err(e) => {
+                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
+                    None
+                }
+            };
+            if local_pty_enabled() {
+                eprintln!(
+                    "ubra: UBRA_LOCAL_PTY=1: in-process PTYs without survival (diagnostic mode)"
+                );
+                let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
+                let poll_app = app.handle().clone();
+                let statuses = AgentStatusService::start(&manager, rules_dir, move |update| {
+                    let _ = poll_app.emit("agent-state-update", &update);
+                });
+                app.manage(PtyBackend::Local { manager, statuses });
+            } else {
+                app.manage(PtyBackend::Daemon(DaemonHandle::default()));
+                supervise_daemon(app.handle().clone(), daemon_state_dir(), rules_dir);
+            }
             app.manage(ShellState::default());
             app.manage(usage::UsageCache::new());
             match data_dir(app.handle()) {
@@ -551,20 +707,16 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("ubra: tray unavailable; closing quits: {e}");
                     app.dialog()
-                        .message("The system tray is unavailable. Closing this window will quit Ubra; agents keep running in the background. You can also quit from Settings.")
+                        .message(if local_pty_enabled() {
+                            "The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings."
+                        } else {
+                            "The system tray is unavailable. Closing this window will quit Ubra; agents keep running in the background. You can also quit from the app menu."
+                        })
                         .title("Tray unavailable")
                         .kind(MessageDialogKind::Warning)
                         .show(|_| {});
                 }
             }
-            let rules_dir = match data_dir(app.handle()) {
-                Ok(dir) => Some(dir.join("agent-detection")),
-                Err(e) => {
-                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
-                    None
-                }
-            };
-            supervise_daemon(app.handle().clone(), daemon_state_dir(), rules_dir);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -586,7 +738,7 @@ pub fn run() {
                                 .builder()
                                 .title("Ubra keeps running")
                                 .body(
-                                    "Agents continue in the tray. Quit from the tray or Settings.",
+                                    "Agents continue in the tray. Quit from the tray or app menu.",
                                 )
                                 .show();
                             return;
@@ -597,7 +749,11 @@ pub fn run() {
                             shell.close_warning_pending.store(true, Ordering::SeqCst);
                             let app = window.app_handle().clone();
                             app.dialog()
-                                .message("Ubra could not hide its window. Closing will quit the app; agents keep running in the background.")
+                                .message(if local_pty_enabled() {
+                                    "Ubra could not hide its window. Closing will quit the app and stop its terminals."
+                                } else {
+                                    "Ubra could not hide its window. Closing will quit the app; agents keep running in the background."
+                                })
                                 .title("Unable to hide Ubra")
                                 .kind(MessageDialogKind::Warning)
                                 .show(move |_| {
@@ -669,10 +825,136 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
-            // Exiting never stops agents: the daemon owns every PTY.
+        .run(|app, event| {
             if matches!(&event, tauri::RunEvent::Exit) {
+                // Daemon mode detaches (agents survive); local mode owns its
+                // panes, so stop them on every exit path.
+                app.state::<PtyBackend>().shutdown_local();
                 telemetry::shutdown_flush();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn kill_switch_accepts_only_one() {
+        use std::env::VarError;
+        assert!(kill_switch(&Ok("1".to_string())));
+        assert!(!kill_switch(&Ok("0".to_string())));
+        assert!(!kill_switch(&Ok("true".to_string())));
+        assert!(!kill_switch(&Ok(String::new())));
+        assert!(!kill_switch(&Err(VarError::NotPresent)));
+    }
+
+    enum Event {
+        Output(PaneId, String),
+        Exit(PaneId, bool),
+    }
+
+    struct ChannelSink {
+        tx: std::sync::mpsc::Sender<Event>,
+    }
+
+    impl PtyEventSink for ChannelSink {
+        fn output(&self, id: PaneId, data: String, _sequence: u64) {
+            let _ = self.tx.send(Event::Output(id, data));
+        }
+
+        fn exited(&self, id: PaneId, success: bool, _code: Option<i32>) {
+            let _ = self.tx.send(Event::Exit(id, success));
+        }
+    }
+
+    fn local_backend(tx: std::sync::mpsc::Sender<Event>) -> PtyBackend {
+        let manager = Arc::new(PtyManager::new(Arc::new(ChannelSink { tx })));
+        let statuses = AgentStatusService::start(&manager, None, |_| {});
+        PtyBackend::Local { manager, statuses }
+    }
+
+    fn echo_command() -> (Option<String>, Vec<String>) {
+        #[cfg(windows)]
+        return (
+            Some("cmd.exe".to_string()),
+            vec!["/C".to_string(), "echo hello-local".to_string()],
+        );
+        #[cfg(not(windows))]
+        return (
+            Some("sh".to_string()),
+            vec!["-c".to_string(), "echo hello-local".to_string()],
+        );
+    }
+
+    fn interactive_shell() -> Option<String> {
+        #[cfg(windows)]
+        return Some("cmd.exe".to_string());
+        #[cfg(not(windows))]
+        return Some("sh".to_string());
+    }
+
+    /// Local backend drives real PTYs with no daemon involved: a quick
+    /// echo pane runs to exit, a live shell lists and kills cleanly,
+    /// history stays empty, and agent states keep their wire shape.
+    #[test]
+    fn local_backend_round_trip_without_daemon() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = local_backend(tx);
+        assert!(backend.is_local());
+
+        // Quick pane: output event, then a successful exit event.
+        let (shell, args) = echo_command();
+        let quick = backend
+            .spawn(shell, None, args, 80, 24, None)
+            .expect("local spawn");
+        assert_ne!(quick, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut transcript = String::new();
+        let mut handshake_answered = false;
+        let exited_success = loop {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(timeout) {
+                Ok(Event::Output(got, data)) => {
+                    assert_eq!(got, quick);
+                    transcript.push_str(&data);
+                    // ConPTY startup query (Windows only): answer it or the
+                    // pane withholds all further output. Silent no-op on Unix.
+                    if !handshake_answered && transcript.contains("\u{1b}[6n") {
+                        handshake_answered = true;
+                        let _ = backend.write(quick, "\u{1b}[1;1R");
+                    }
+                }
+                Ok(Event::Exit(got, success)) => {
+                    assert_eq!(got, quick);
+                    break success;
+                }
+                Err(_) => panic!("timed out waiting for pane exit; got: {transcript:?}"),
+            }
+        };
+        assert!(exited_success, "pane should exit 0");
+        assert!(
+            transcript.contains("hello-local"),
+            "transcript should contain echo output, got: {transcript:?}"
+        );
+
+        // Live pane: listed while alive, gone after kill.
+        let live = backend
+            .spawn(interactive_shell(), None, Vec::new(), 80, 24, None)
+            .expect("local spawn");
+        assert!(backend.list().unwrap().iter().any(|s| s.id == live));
+        backend
+            .snapshot(live)
+            .expect("live pane snapshots while alive");
+        backend.resize(live, 100, 30).expect("local resize");
+        backend.kill(live).expect("local kill");
+        assert!(backend.snapshot(live).is_err(), "killed pane must be gone");
+
+        assert!(backend.history("pane-nothing").unwrap().is_none());
+        let states = backend.agent_states().unwrap();
+        assert!(states["revision"].as_u64().is_some());
+        assert!(states["states"].is_object());
+        backend.shutdown_local();
+    }
 }

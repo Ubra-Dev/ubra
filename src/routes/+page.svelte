@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { agent } from "$lib/agent.svelte";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+  import QuitDialog from "$lib/QuitDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
   import { matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
@@ -90,7 +91,7 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen}>
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || !!store.pendingQuit || store.onboardingOpen}>
       <div class="app">
         <Sidebar />
         <div class="main">
@@ -128,6 +129,7 @@
     <FirstRun revisit />
   {/if}
   <ConfirmDialog />
+  <QuitDialog />
   <Toasts />
 </div>
 

@@ -45,8 +45,12 @@ The development checklist below complements, but does not replace, these gates.
   panes automatically rerun their remembered agent on first spawn.
 - Workspaces can be closed from the sidebar; closing the last one resets fresh.
 - Close the window with a working tray: the app hides and panes keep running.
-  Left-click the tray icon to show it again; Quit is available in Settings and
-  the tray menu. Without a working tray, closing the window quits instead.
+  Left-click the tray icon to show it again; Quit and Stop Agents and Quit are
+  available in the tray and app menus. Without a working tray, closing the
+  window quits instead.
+- Quit with panes open: a dialog warns that panes keep running, with Quit &
+  Keep Running, Stop Agents & Quit, and Cancel. A remembered choice skips the
+  dialog and can be reset in Settings → App. Quitting with no panes skips it.
 - Agent badges use explicit CLI screen evidence: Working means a recognized
   busy indicator, Blocked means an approval/question prompt or a suspended
   process, and Idle means a recognized ready prompt before an observed task.

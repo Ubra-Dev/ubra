@@ -66,11 +66,8 @@ mod imp {
     /// without depending on how the test runner itself was launched.
     pub fn is_bundled_exe(exe: &Path) -> bool {
         // A bundled executable lives at `.../Ubra.app/Contents/MacOS/ubra`.
-        exe.components().any(|c| {
-            c.as_os_str()
-                .to_str()
-                .is_some_and(|s| s.ends_with(".app"))
-        })
+        exe.components()
+            .any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with(".app")))
     }
 
     pub fn is_bundled() -> bool {
@@ -257,7 +254,9 @@ mod tests {
         assert!(!super::imp::is_bundled_exe(Path::new(
             "/Users/test/herdr-desktop/src-tauri/target/debug/ubra"
         )));
-        assert!(!super::imp::is_bundled_exe(Path::new("/usr/local/bin/ubra")));
+        assert!(!super::imp::is_bundled_exe(Path::new(
+            "/usr/local/bin/ubra"
+        )));
     }
 
     #[test]
@@ -268,8 +267,7 @@ mod tests {
         assert_eq!(value, serde_json::json!({"status": "denied"}));
         let value = serde_json::to_value(NotifyOutcome::Attempted).unwrap();
         assert_eq!(value, serde_json::json!({"status": "attempted"}));
-        let value =
-            serde_json::to_value(NotifyOutcome::unavailable("not-determined")).unwrap();
+        let value = serde_json::to_value(NotifyOutcome::unavailable("not-determined")).unwrap();
         assert_eq!(
             value,
             serde_json::json!({"status": "unavailable", "reason": "not-determined"})

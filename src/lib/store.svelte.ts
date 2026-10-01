@@ -39,6 +39,13 @@ import {
 } from "./layout";
 import { implicitLaunchCommand } from "./agentLaunch";
 import { restoreCommandFor } from "./agentResume";
+import {
+  countLayoutPanes,
+  parseQuitAction,
+  QUIT_ACTION_KEY,
+  resolveQuitRequest,
+  type QuitAction,
+} from "./quitConfirm";
 import { PendingCommands } from "./pendingCommands";
 import type { PtySessionInfo } from "./terminalLifecycle";
 import { toasts } from "./toasts.svelte.ts";
@@ -83,6 +90,11 @@ export interface PendingClose {
   name: string;
   tabs: number;
   panes: number;
+}
+
+export interface PendingQuit {
+  panes: number;
+  agents: number;
 }
 
 export const DEFAULT_TERM_FONT_SIZE = 13;
@@ -141,6 +153,10 @@ class AppStore {
   paneRenameTarget = $state<string | null>(null);
   /** Close awaiting confirmation in the alert dialog; null when idle. */
   pendingClose = $state<PendingClose | null>(null);
+  /** Quit awaiting confirmation; null when idle. */
+  pendingQuit = $state<PendingQuit | null>(null);
+  /** Remembered Quit choice; `ask` shows the confirmation dialog. */
+  quitAction = $state<QuitAction>("ask");
   /** Pane node id whose terminal should take keyboard focus; cleared on take. */
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
@@ -237,6 +253,7 @@ class AppStore {
       if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
       const savedAutoLaunch = window.localStorage.getItem("ubra.autoLaunchAgent");
       if (savedAutoLaunch !== null) this.autoLaunchAgent = savedAutoLaunch === "true";
+      this.quitAction = parseQuitAction(window.localStorage.getItem(QUIT_ACTION_KEY));
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -951,6 +968,52 @@ class AppStore {
 
   cancelPendingClose(): void {
     this.pendingClose = null;
+  }
+
+  /**
+   * Quit request from menus, shortcuts, or the tray. Panes survive a quit
+   * via the daemon, so warn unless there is nothing to survive or the user
+   * remembered a choice. `agents` is the attached-agent count for the dialog.
+   */
+  requestQuit(agents: number): void {
+    if (this.pendingQuit) return;
+    const panes = countLayoutPanes(this.layout);
+    const resolved = resolveQuitRequest(this.quitAction, panes);
+    if (resolved === "dialog") {
+      this.pendingQuit = { panes, agents };
+      return;
+    }
+    void this.quitNow(resolved);
+  }
+
+  cancelQuit(): void {
+    this.pendingQuit = null;
+  }
+
+  confirmQuitKeep(remember: boolean): void {
+    if (remember) this.setQuitAction("keep");
+    this.pendingQuit = null;
+    void this.quitNow("keep");
+  }
+
+  confirmQuitStop(remember: boolean): void {
+    if (remember) this.setQuitAction("stop");
+    this.pendingQuit = null;
+    void this.quitNow("stop");
+  }
+
+  private async quitNow(how: "keep" | "stop"): Promise<void> {
+    try {
+      await invoke(how === "stop" ? "quit_app_and_stop_agents" : "quit_app");
+    } catch (e) {
+      console.error("ubra: quit failed", e);
+      toasts.push("Couldn't quit Ubra", String(e), "", { kind: "copy" });
+    }
+  }
+
+  setQuitAction(action: QuitAction): void {
+    this.quitAction = action;
+    this.savePref(QUIT_ACTION_KEY, action);
   }
 
   renamePane(paneId: string, name: string): void {
