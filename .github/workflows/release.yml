@@ -156,7 +156,7 @@ jobs:
           mv Ubra.app.tar.gz.sig "Ubra_${VER}_${ARCH}.app.tar.gz.sig"
 
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.bundle_dir }}
