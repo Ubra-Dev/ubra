@@ -383,7 +383,16 @@ struct ShellState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = if std::env::var_os("TAURI_WEBDRIVER_PORT").is_some() {
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    } else {
+        builder
+    };
+    #[cfg(target_os = "windows")]
+    let builder = builder;
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
@@ -435,11 +444,16 @@ pub fn run() {
                     .store(true, Ordering::SeqCst),
                 Err(e) => {
                     eprintln!("ubra: tray unavailable; closing quits: {e}");
-                    app.dialog()
-                        .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
-                        .title("Tray unavailable")
-                        .kind(MessageDialogKind::Warning)
-                        .show(|_| {});
+                    // Native smoke runners may not provide a tray host (notably
+                    // Xvfb on Linux). Keep the warning for users, but don't let
+                    // a native dialog block automated WebDriver interaction.
+                    if std::env::var_os("UBRA_NATIVE_SMOKE").is_none() {
+                        app.dialog()
+                            .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
+                            .title("Tray unavailable")
+                            .kind(MessageDialogKind::Warning)
+                            .show(|_| {});
+                    }
                 }
             }
             Ok(())
