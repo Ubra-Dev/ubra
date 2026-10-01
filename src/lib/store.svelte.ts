@@ -61,6 +61,7 @@ import {
 } from "./uiFonts";
 import { DEFAULT_UI_SCALE, UI_SCALE_STEP, clampUiScale } from "./uiScale";
 import {
+  DEFAULT_RIGHT_PANEL_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
   DEFAULT_SPLIT_RATIO,
   clampSidebarWidth,
@@ -99,6 +100,7 @@ class AppStore {
   saving = $state(false);
   rightPanelOpen = $state(true);
   rightPanelView = $state<RightPanelView>("explorer");
+  rightPanelWidth = $state<number>(DEFAULT_RIGHT_PANEL_WIDTH);
   leftPanelOpen = $state(true);
   recoveryRequired = $state(false);
   recoveryBusy = $state(false);
@@ -208,6 +210,13 @@ class AppStore {
       window.localStorage.removeItem("ubra.soundStyle");
       const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
       if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
+      const savedPanelWidth = window.localStorage.getItem("ubra.rightPanelWidth");
+      if (savedPanelWidth !== null) {
+        this.rightPanelWidth = clampSidebarWidth(
+          Number(savedPanelWidth),
+          DEFAULT_RIGHT_PANEL_WIDTH,
+        );
+      }
       const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
       if (savedLeftOpen !== null) this.leftPanelOpen = savedLeftOpen !== "false";
       const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
@@ -388,6 +397,17 @@ class AppStore {
       window.localStorage.setItem("ubra.sidebarWidth", String(clamped));
     } catch (e) {
       console.error("ubra: failed to save sidebar width", e);
+    }
+  }
+
+  setRightPanelWidth(px: number): void {
+    const clamped = clampSidebarWidth(px);
+    if (clamped === this.rightPanelWidth) return;
+    this.rightPanelWidth = clamped;
+    try {
+      window.localStorage.setItem("ubra.rightPanelWidth", String(clamped));
+    } catch (e) {
+      console.error("ubra: failed to save right panel width", e);
     }
   }
 

@@ -4,6 +4,7 @@ import {
   changeCount,
   dirName,
   isClean,
+  shortWorktreePath,
   statusLabel,
   worktreeLabel,
   type GitStatus,
@@ -71,6 +72,29 @@ describe("dirName", () => {
     assert.equal(dirName("src/lib/x.ts"), "src/lib");
     assert.equal(dirName("x.ts"), "");
     assert.equal(dirName("sub/"), "sub");
+  });
+});
+
+describe("shortWorktreePath", () => {
+  it("keeps the last two segments of long paths", () => {
+    assert.equal(
+      shortWorktreePath("/Users/me/repo/.worktrees/foo"),
+      "…/.worktrees/foo",
+    );
+    assert.equal(shortWorktreePath("/a/b/c"), "…/b/c");
+  });
+
+  it("passes short paths through unchanged", () => {
+    assert.equal(shortWorktreePath("/repo"), "/repo");
+    assert.equal(shortWorktreePath("/a/b"), "/a/b");
+    assert.equal(shortWorktreePath(""), "");
+    assert.equal(shortWorktreePath("/"), "/");
+  });
+
+  it("handles trailing slashes and windows separators", () => {
+    assert.equal(shortWorktreePath("/a/b/"), "/a/b");
+    assert.equal(shortWorktreePath("C:\\repo\\.worktrees\\foo"), "…/.worktrees/foo");
+    assert.equal(shortWorktreePath("C:\\repo"), "C:\\repo");
   });
 });
 

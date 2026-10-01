@@ -1,75 +1,54 @@
 <script lang="ts">
-  import { cliBrand } from "./agentCliIcons";
+  import { cliBrand, glyphColor } from "./agentCliIcons";
 
   interface Props {
     /** Agent CLI id (e.g. "claude"); matching is case-insensitive. */
     cli: string;
     /** Display label; seeds the monogram fallback when no logo exists. */
     label?: string;
-    /** Tile edge length in pixels. */
+    /** Glyph edge length in pixels. */
     size?: number;
   }
   let { cli, label, size = 16 }: Props = $props();
 
-  const logo = $derived.by(() => {
-    const brand = cliBrand(cli, label);
-    return brand.kind === "logo" ? brand : null;
-  });
-  const mono = $derived.by(() => {
-    const brand = cliBrand(cli, label);
-    return brand.kind === "mono" ? brand : null;
-  });
-  const radius = $derived(Math.max(2, Math.round(size / 4)));
+  const brand = $derived(cliBrand(cli, label));
+  const paint = $derived(
+    brand.kind === "logo" ? glyphColor(brand.hex) : glyphColor(brand.color),
+  );
 </script>
 
-{#if logo}
-  <span
-    class="tile logo"
+{#if brand.kind === "logo"}
+  <svg
+    viewBox="0 0 24 24"
+    width={size}
+    height={size}
+    fill={paint}
     aria-hidden="true"
-    style:width={size + "px"}
-    style:height={size + "px"}
-    style:border-radius={radius + "px"}
+    class="mark"
   >
-    <svg
-      viewBox="0 0 24 24"
-      width={Math.round(size * 0.66)}
-      height={Math.round(size * 0.66)}
-      fill={"#" + logo.hex}
-    >
-      <path d={logo.path} />
-    </svg>
-  </span>
-{:else if mono}
+    <path d={brand.path} />
+  </svg>
+{:else}
   <span
-    class="tile mono"
+    class="mono"
     aria-hidden="true"
-    style:width={size + "px"}
-    style:height={size + "px"}
-    style:border-radius={radius + "px"}
-    style:background={mono.bg}
-    style:font-size={Math.round(size * 0.62) + "px"}
+    style:color={paint}
+    style:font-size={Math.round(size * 0.8) + "px"}
   >
-    {mono.letter}
+    {brand.letter}
   </span>
 {/if}
 
 <style>
-  .tile {
-    display: inline-flex;
+  .mark {
     flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
     vertical-align: middle;
   }
-  .tile.logo {
-    box-sizing: border-box;
-    background: #ffffff;
-    border: 1px solid var(--border);
-  }
-  .tile.mono {
-    color: #ffffff;
-    font-weight: 700;
+  .mono {
+    flex: 0 0 auto;
+    font-weight: 800;
     font-family: var(--font-ui);
     line-height: 1;
+    vertical-align: middle;
   }
 </style>

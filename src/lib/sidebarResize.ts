@@ -1,4 +1,5 @@
 export const DEFAULT_SIDEBAR_WIDTH = 190;
+export const DEFAULT_RIGHT_PANEL_WIDTH = 250;
 export const MIN_SIDEBAR_WIDTH = 140;
 export const MAX_SIDEBAR_WIDTH = 400;
 export const SIDEBAR_WIDTH_KEY_STEP = 10;
@@ -7,8 +8,11 @@ export const DEFAULT_SPLIT_RATIO = 0.5;
 export const MIN_SPLIT_PANE_PX = 80;
 export const SPLIT_RATIO_KEY_STEP = 0.05;
 
-export function clampSidebarWidth(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_SIDEBAR_WIDTH;
+export function clampSidebarWidth(
+  value: number,
+  fallback: number = DEFAULT_SIDEBAR_WIDTH,
+): number {
+  if (!Number.isFinite(value)) return fallback;
   return Math.min(
     MAX_SIDEBAR_WIDTH,
     Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)),

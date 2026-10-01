@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cliBrand, type CliBrand } from "../src/lib/agentCliIcons.ts";
+import { cliBrand, glyphColor, type CliBrand } from "../src/lib/agentCliIcons.ts";
 
 type Logo = Extract<CliBrand, { kind: "logo" }>;
 type Mono = Extract<CliBrand, { kind: "mono" }>;
@@ -51,10 +51,10 @@ describe("cliBrand", () => {
     assert.equal(cliBrand("  GEMINI ").kind, "logo");
   });
 
-  it("falls back to a monogram tile for unmapped CLIs", () => {
+  it("falls back to a monogram for unmapped CLIs", () => {
     const brand = expectMono("codex", "Codex");
     assert.equal(brand.letter, "C");
-    assert.equal(brand.bg, "#10A37F");
+    assert.equal(brand.color, "#10A37F");
   });
 
   it("derives the monogram letter from the label, then the id", () => {
@@ -68,21 +68,40 @@ describe("cliBrand", () => {
     for (const cli of ["", "   "]) {
       const brand = expectMono(cli);
       assert.equal(brand.letter, "?");
-      assert.match(brand.bg, /^#[0-9A-F]{6}$/);
+      assert.match(brand.color, /^#[0-9A-F]{6}$/);
     }
   });
 
   it("assigns deterministic palette colors to unmapped CLIs", () => {
     const first = expectMono("goose");
     const second = expectMono("GOOSE", "Goose");
-    assert.equal(first.bg, second.bg);
-    assert.match(first.bg, /^#[0-9A-F]{6}$/);
+    assert.equal(first.color, second.color);
+    assert.match(first.color, /^#[0-9A-F]{6}$/);
   });
 
   it("resolves every known agent stem without crashing", () => {
     for (const stem of KNOWN_STEMS) {
       const brand = cliBrand(stem);
       assert.ok(brand.kind === "logo" || brand.kind === "mono");
+    }
+  });
+});
+
+describe("glyphColor", () => {
+  it("keeps legible brand colors and drops near-black marks to currentColor", () => {
+    assert.equal(glyphColor("8E75B2"), "#8e75b2");
+    assert.equal(glyphColor("6950EF"), "#6950ef");
+    assert.equal(glyphColor("#10A37F"), "#10a37f");
+    assert.equal(glyphColor("#C2410C"), "#c2410c");
+    assert.equal(glyphColor("191919"), "currentColor");
+    assert.equal(glyphColor("000000"), "currentColor");
+    assert.equal(glyphColor("18181B"), "currentColor");
+    assert.equal(glyphColor("#334155"), "currentColor");
+  });
+
+  it("falls back to currentColor on malformed input", () => {
+    for (const bad of ["", "   ", "zzz", "#12345", "1234567", "#gggggg"]) {
+      assert.equal(glyphColor(bad), "currentColor");
     }
   });
 });

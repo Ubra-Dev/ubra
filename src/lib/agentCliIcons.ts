@@ -5,13 +5,14 @@
  * https://github.com/simple-icons/simple-icons, v16.33.0) so the app needs
  * no extra dependency and works offline. Only icons whose upstream title and
  * source match the agent vendor are included; everything else (including
- * Codex, whose vendor has no Simple Icons entry) falls back to a colored
- * monogram tile.
+ * Codex, whose vendor has no Simple Icons entry) falls back to a monogram
+ * letter. Marks render as bare glyphs with no tile or background; see
+ * glyphColor for how near-black brand colors stay visible.
  */
 
 export type CliBrand =
   | { kind: "logo"; hex: string; path: string }
-  | { kind: "mono"; letter: string; bg: string };
+  | { kind: "mono"; letter: string; color: string };
 
 /** Vendored Simple Icons marks: slug -> brand color + 24x24 fill path. */
 const BRAND_MARKS: Record<string, { hex: string; path: string }> = {
@@ -35,12 +36,12 @@ const CLI_TO_SLUG: Record<string, string> = {
   kimi: "kimi",
 };
 
-/** Curated monogram tile colors for flagships without a vendored logo. */
-const CURATED_BG: Record<string, string> = {
+/** Curated monogram colors for flagships without a vendored logo. */
+const CURATED_COLOR: Record<string, string> = {
   codex: "#10A37F",
 };
 
-/** Monogram tile palette; every entry keeps white letters readable. */
+/** Monogram palette; dark entries fall back to currentColor via glyphColor. */
 const MONO_COLORS = [
   "#C2410C",
   "#0E7490",
@@ -58,7 +59,7 @@ const MONO_COLORS = [
 
 /**
  * Resolve the brand artwork for an agent CLI id. Matching is
- * case-insensitive; unknown ids get a deterministic monogram tile derived
+ * case-insensitive; unknown ids get a deterministic monogram derived
  * from the display label (or the id when no label is given).
  */
 export function cliBrand(cli: string, label?: string): CliBrand {
@@ -68,7 +69,25 @@ export function cliBrand(cli: string, label?: string): CliBrand {
   if (mark) return { kind: "logo", hex: mark.hex, path: mark.path };
   const name = (label ?? cli).trim();
   const letter = (name.match(/[A-Za-z0-9]/)?.[0] ?? "?").toUpperCase();
-  return { kind: "mono", letter, bg: CURATED_BG[key] ?? monoColor(key) };
+  return { kind: "mono", letter, color: CURATED_COLOR[key] ?? monoColor(key) };
+}
+
+/**
+ * Glyph paint for a brand hex color: the brand color itself when it stays
+ * legible as a bare glyph, else currentColor so near-black marks remain
+ * visible on dark themes. Accepts "#rrggbb" or "rrggbb".
+ */
+export function glyphColor(hex: string): string {
+  const match = /^#?([\da-f]{6})$/i.exec(hex.trim());
+  if (!match) return "currentColor";
+  const value = Number.parseInt(match[1], 16);
+  const channel = (shift: number) => {
+    const c = ((value >> shift) & 0xff) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  const luminance =
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+  return luminance >= 0.12 ? `#${match[1].toLowerCase()}` : "currentColor";
 }
 
 function monoColor(key: string): string {

@@ -83,6 +83,18 @@ export function worktreeLabel(w: GitWorktree): string {
   return "(detached HEAD)";
 }
 
+/**
+ * Display path for a worktree row: the last two segments with a "…/" prefix
+ * when longer, so panel-width ellipsis never eats the distinctive tail.
+ * Short paths pass through unchanged; the full path stays in the tooltip.
+ */
+export function shortWorktreePath(path: string): string {
+  const trimmed = path.replace(/[/\\]+$/, "");
+  const parts = trimmed.split(/[/\\]+/).filter((part) => part !== "");
+  if (parts.length <= 2) return trimmed || path;
+  return `…/${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+}
+
 export function gitSwitch(root: string, branch: string): Promise<string> {
   return invoke<string>("git_switch", { root, branch });
 }

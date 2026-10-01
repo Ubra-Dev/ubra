@@ -24,12 +24,14 @@
     gitUnstage,
     gitWorktrees,
     isClean,
+    shortWorktreePath,
     statusLabel,
     worktreeLabel,
     type GitStatus,
     type GitWorktree,
   } from "./git";
   import { baseName } from "./layout";
+  import { fileIconFor } from "./fileIcons";
   import { toasts } from "./toasts.svelte.ts";
 
   interface Props {
@@ -482,6 +484,7 @@
             {/if}
           </div>
           {#each group.rows as row (row.path + "|" + group.id)}
+            {@const fic = fileIconFor(baseName(row.path) || row.path, false)}
             <div class="row">
               <button
                 class="main"
@@ -491,6 +494,9 @@
               >
                 <span class={"badge " + badgeClass(row.status)} title={statusLabel(row.status)}>
                   {row.status}
+                </span>
+                <span class="fic" style:color={fic.color}>
+                  <Icon name={fic.name} size={14} />
                 </span>
                 <span class="fname">{baseName(row.path) || row.path}</span>
                 {#if dirName(row.path)}
@@ -556,9 +562,13 @@
           {:else}
             {#each worktrees as w (w.path)}
               <div class="wt-row" title={w.path}>
-                <Icon name="git-branch" size={12} />
-                <span class="fname">{worktreeLabel(w)}</span>
-                <span class="fdir">{w.path}</span>
+                <span class="wt-icon">
+                  <Icon name="git-branch" size={12} />
+                </span>
+                <span class="wt-text">
+                  <span class="fname">{worktreeLabel(w)}</span>
+                  <span class="fdir">{shortWorktreePath(w.path)}</span>
+                </span>
                 {#if w.locked !== null}
                   <span class="flag" title={w.locked === "" ? "Locked" : `Locked: ${w.locked}`}>
                     locked
@@ -868,6 +878,10 @@
   .st-other {
     color: var(--text-subtle);
   }
+  .fic {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
   .fname {
     flex: 0 1 auto;
     min-width: 0;
@@ -961,11 +975,23 @@
   }
   .wt-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
     padding: 3px 6px 3px 10px;
     border-radius: 4px;
     white-space: nowrap;
+  }
+  .wt-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    margin-top: 2px;
+  }
+  .wt-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 1px;
   }
   .wt-row.current {
     color: var(--text-strong);

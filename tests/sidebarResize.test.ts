@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_RIGHT_PANEL_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
   DEFAULT_SPLIT_RATIO,
   MAX_SIDEBAR_WIDTH,
@@ -18,6 +19,12 @@ describe("clampSidebarWidth", () => {
   it("falls back to the default for non-finite values", () => {
     assert.equal(clampSidebarWidth(NaN), DEFAULT_SIDEBAR_WIDTH);
     assert.equal(clampSidebarWidth(Infinity), DEFAULT_SIDEBAR_WIDTH);
+  });
+
+  it("accepts a custom fallback for other panels", () => {
+    assert.equal(clampSidebarWidth(NaN, DEFAULT_RIGHT_PANEL_WIDTH), 250);
+    assert.equal(clampSidebarWidth(250, DEFAULT_RIGHT_PANEL_WIDTH), 250);
+    assert.equal(clampSidebarWidth(9999, DEFAULT_RIGHT_PANEL_WIDTH), MAX_SIDEBAR_WIDTH);
   });
 
   it("clamps to the min/max width", () => {

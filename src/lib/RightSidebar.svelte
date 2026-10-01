@@ -2,6 +2,11 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import ExplorerView from "./ExplorerView.svelte";
   import Icon from "./Icon.svelte";
+  import {
+    MAX_SIDEBAR_WIDTH,
+    MIN_SIDEBAR_WIDTH,
+    stepSidebarWidth,
+  } from "./sidebarResize";
   import SourceControlView from "./SourceControlView.svelte";
   import { store } from "./store.svelte";
 
@@ -34,11 +39,55 @@
     store.setRightPanelView(view);
     store.setRightPanelOpen(true);
   }
+
+  // Width resize mirrors the left sidebar: the handle sits on the panel's
+  // inner (left) edge, so dragging left widens and ArrowLeft steps wider.
+  let widthDrag: { startX: number; startWidth: number } | null = null;
+
+  function primaryButton(e: PointerEvent): boolean {
+    return e.pointerType !== "mouse" || e.button === 0;
+  }
+
+  function startWidthDrag(e: PointerEvent): void {
+    if (!primaryButton(e)) return;
+    widthDrag = { startX: e.clientX, startWidth: store.rightPanelWidth };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveWidthDrag(e: PointerEvent): void {
+    if (!widthDrag) return;
+    store.setRightPanelWidth(widthDrag.startWidth - (e.clientX - widthDrag.startX));
+  }
+
+  function endWidthDrag(): void {
+    widthDrag = null;
+  }
+
+  function onWidthKey(e: KeyboardEvent): void {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      store.setRightPanelWidth(stepSidebarWidth(store.rightPanelWidth, 1));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      store.setRightPanelWidth(stepSidebarWidth(store.rightPanelWidth, -1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      store.setRightPanelWidth(MIN_SIDEBAR_WIDTH);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      store.setRightPanelWidth(MAX_SIDEBAR_WIDTH);
+    }
+  }
 </script>
 
 {#if store.layout && ws}
   {#if store.rightPanelOpen}
-    <aside class="rightbar" aria-label="Explorer and source control">
+    <aside
+      class="rightbar"
+      aria-label="Explorer and source control"
+      style="width: {store.rightPanelWidth}px"
+    >
       <div class="tabs" role="tablist" aria-label="Right sidebar views">
         <button
           role="tab"
@@ -86,6 +135,22 @@
           </div>
         {/if}
       </div>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="resize-x"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize right sidebar width"
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuemax={MAX_SIDEBAR_WIDTH}
+        aria-valuenow={store.rightPanelWidth}
+        tabindex="0"
+        onpointerdown={startWidthDrag}
+        onpointermove={moveWidthDrag}
+        onpointerup={endWidthDrag}
+        onpointercancel={endWidthDrag}
+        onkeydown={onWidthKey}
+      ></div>
     </aside>
   {:else}
     <div class="rail" aria-label="Right sidebar">
@@ -109,10 +174,10 @@
 
 <style>
   .rightbar {
+    position: relative;
     display: flex;
     flex-direction: column;
-    width: 250px;
-    flex: 0 0 250px;
+    flex: 0 0 auto;
     min-height: 0;
     overflow: hidden;
     background: var(--sidebar-bg);
@@ -120,6 +185,29 @@
     font: 12px system-ui, sans-serif;
     color: var(--text);
     user-select: none;
+  }
+  .resize-x {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 8px;
+    cursor: ew-resize;
+    touch-action: none;
+    z-index: 1;
+  }
+  .resize-x::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 3px;
+    width: 1px;
+  }
+  .resize-x:hover::after,
+  .resize-x:focus-visible::after,
+  .resize-x:active::after {
+    background: var(--accent);
   }
   .tabs {
     display: flex;

@@ -18,6 +18,7 @@
     truncatePreview,
   } from "./clipboard";
   import { baseName } from "./layout";
+  import { fileIconFor } from "./fileIcons";
   import {
     childRel,
     isHiddenName,
@@ -138,6 +139,14 @@
     return out;
   });
 
+  // Left offsets for the VSCode-style indent guides: one per ancestor level,
+  // centered under that level's twisty (rows indent 14px from a 6px gutter).
+  function guideOffsets(depth: number): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < depth; i++) out.push(12 + i * 14);
+    return out;
+  }
+
   function activate(rel: string, entry: DirEntry): void {
     selected = rel;
     if (entry.isDir) toggle(rel);
@@ -244,6 +253,7 @@
     {#each rows as row (row.rel + "|" + row.status)}
       {#if row.entry}
         {@const entry = row.entry}
+        {@const fic = fileIconFor(row.name, entry.isDir)}
         <button
           role="treeitem"
           class="row"
@@ -264,6 +274,9 @@
           }}
           oncontextmenu={(e) => openMenu(e, row.rel)}
         >
+          {#each guideOffsets(row.depth) as left (left)}
+            <span class="guide" style:left={left + "px"} aria-hidden="true"></span>
+          {/each}
           {#if entry.isDir}
             <span class="twisty" class:open={expanded.has(row.rel)}>
               <Icon name="chevron-right" size={12} />
@@ -271,7 +284,9 @@
           {:else}
             <span class="twisty-sp"></span>
           {/if}
-          <Icon name={entry.isDir ? "folder" : "file"} size={13} />
+          <span class="fic" style:color={fic.color}>
+            <Icon name={fic.name} size={14} />
+          </span>
           <span class="name">{row.name}</span>
         </button>
       {:else if row.status === "loading"}
@@ -368,6 +383,7 @@
     scrollbar-width: thin;
   }
   .row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -403,6 +419,19 @@
   .twisty-sp {
     flex: 0 0 auto;
     width: 12px;
+  }
+  .guide {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--separator);
+    opacity: 0.65;
+    pointer-events: none;
+  }
+  .fic {
+    display: inline-flex;
+    flex: 0 0 auto;
   }
   .name {
     flex: 1 1 auto;

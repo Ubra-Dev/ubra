@@ -31,6 +31,21 @@
     | "chevron-right"
     | "folder"
     | "file"
+    | "file-text"
+    | "code"
+    | "image"
+    | "music"
+    | "video"
+    | "archive"
+    | "database"
+    | "globe"
+    | "package"
+    | "terminal"
+    | "lock"
+    | "key"
+    | "book"
+    | "tool"
+    | "type"
     | "git-branch"
     | "download"
     | "upload"
@@ -148,6 +163,60 @@
     file:
       '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>' +
       '<polyline points="13 2 13 9 20 9"/>',
+    "file-text":
+      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
+      '<polyline points="14 2 14 8 20 8"/>' +
+      '<line x1="16" y1="13" x2="8" y2="13"/>' +
+      '<line x1="16" y1="17" x2="8" y2="17"/>' +
+      '<polyline points="10 9 9 9 8 9"/>',
+    code:
+      '<polyline points="16 18 22 12 16 6"/>' +
+      '<polyline points="8 6 2 12 8 18"/>',
+    image:
+      '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>' +
+      '<circle cx="8.5" cy="8.5" r="1.5"/>' +
+      '<polyline points="21 15 16 10 5 21"/>',
+    music:
+      '<path d="M9 18V5l12-2v13"/>' +
+      '<circle cx="6" cy="18" r="3"/>' +
+      '<circle cx="18" cy="16" r="3"/>',
+    video:
+      '<polygon points="23 7 16 12 23 17 23 7"/>' +
+      '<rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>',
+    archive:
+      '<polyline points="21 8 21 21 3 21 3 8"/>' +
+      '<rect x="1" y="3" width="22" height="5"/>' +
+      '<line x1="10" y1="12" x2="14" y2="12"/>',
+    database:
+      '<ellipse cx="12" cy="5" rx="9" ry="3"/>' +
+      '<path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>' +
+      '<path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+    globe:
+      '<circle cx="12" cy="12" r="10"/>' +
+      '<line x1="2" y1="12" x2="22" y2="12"/>' +
+      '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    package:
+      '<path d="M16.5 9.4L7.55 4.24"/>' +
+      '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>' +
+      '<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>' +
+      '<line x1="12" y1="22.08" x2="12" y2="12"/>',
+    terminal:
+      '<polyline points="4 17 10 11 4 5"/>' +
+      '<line x1="12" y1="19" x2="20" y2="19"/>',
+    lock:
+      '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>' +
+      '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    key:
+      '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>',
+    book:
+      '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>' +
+      '<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+    tool:
+      '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+    type:
+      '<polyline points="4 7 4 4 20 4 20 7"/>' +
+      '<line x1="9" y1="20" x2="15" y2="20"/>' +
+      '<line x1="12" y1="4" x2="12" y2="20"/>',
     "git-branch":
       '<line x1="6" y1="3" x2="6" y2="15"/>' +
       '<circle cx="18" cy="6" r="3"/>' +
