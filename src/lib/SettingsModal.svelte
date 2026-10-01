@@ -1504,6 +1504,21 @@
     padding: 18px 20px 24px;
     overflow-y: auto;
   }
+  /* Section swap: the newly shown section fades in with a slight rise.
+     Each branch mounts a fresh <section>, so this replays on every switch. */
+  .content > section {
+    animation: ubra-section-in var(--motion-fast) var(--motion-ease-out);
+  }
+  @keyframes ubra-section-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
   h2 {
     font-size: 20px;
     font-weight: 700;
@@ -1844,6 +1859,9 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .content > section {
+      animation: none;
+    }
     .switch .track,
     .switch .thumb {
       transition: none;
