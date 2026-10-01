@@ -441,11 +441,16 @@ pub fn run() {
                     .store(true, Ordering::SeqCst),
                 Err(e) => {
                     eprintln!("ubra: tray unavailable; closing quits: {e}");
-                    app.dialog()
-                        .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
-                        .title("Tray unavailable")
-                        .kind(MessageDialogKind::Warning)
-                        .show(|_| {});
+                    // Native smoke runners may not provide a tray host (notably
+                    // Xvfb on Linux). Keep the warning for users, but don't let
+                    // a native dialog block automated WebDriver interaction.
+                    if std::env::var_os("TAURI_WEBDRIVER_PORT").is_none() {
+                        app.dialog()
+                            .message("The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings.")
+                            .title("Tray unavailable")
+                            .kind(MessageDialogKind::Warning)
+                            .show(|_| {});
+                    }
                 }
             }
             Ok(())
