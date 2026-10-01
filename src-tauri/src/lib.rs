@@ -266,17 +266,8 @@ fn notify_agent(
 }
 
 #[tauri::command]
-fn play_sound(
-    kind: sound::SoundKind,
-    style: Option<sound::ChimeStyle>,
-    file: Option<String>,
-) -> Result<(), String> {
-    sound::play(kind, style.unwrap_or_default(), file.as_deref()).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn check_sound_file(path: String) -> bool {
-    sound::file_decodes(&path)
+fn play_sound(kind: sound::SoundKind, file: Option<String>) -> Result<(), String> {
+    sound::play(kind, file.as_deref()).map_err(|e| e.to_string())
 }
 
 #[derive(Default)]
@@ -516,7 +507,6 @@ pub fn run() {
             telemetry::telemetry_flag,
             notify_agent,
             play_sound,
-            check_sound_file,
             app_info,
             home_dir
         ])

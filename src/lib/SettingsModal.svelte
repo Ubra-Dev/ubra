@@ -13,9 +13,9 @@
   import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import Spinner from "./Spinner.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
-    CUSTOM_CHIME_ID,
     playbackPayload,
     routeNotification,
     testNotificationPayload,
@@ -81,17 +81,13 @@
   let telemetryError = $state<string | null>(null);
   let appName = $state("Ubra");
   let appVersion = $state("");
-  let soundFile = $state(store.soundFile);
   let fontQuery = $state("");
-  /** null = blank (default chime) or unchecked; otherwise backend verdict. */
-  let soundFileValid = $state<boolean | null>(null);
   /** Workspace-section draft: "" = off, a CLI id, or CUSTOM_COMMAND. */
   let cliSelection = $state("");
   let cliCustom = $state("");
   let cliDraftReady = $state(false);
   let folderPicking = $state(false);
   let folderError = $state<string | null>(null);
-  let soundFileChecking = $state(false);
   let appearanceTab = $state<"theme" | "text">("theme");
   /** System-notification permission: silent check on open, request on Test. */
   let notifyPermission = $state<"granted" | "denied" | "prompt" | "unknown">(
@@ -345,7 +341,7 @@
       }
     }
     if (route.sound) {
-      invoke("play_sound", playbackPayload(test.kind, store.soundStyle, store.soundFile))
+      invoke("play_sound", playbackPayload(test.kind))
         .catch((e) => console.error("ubra: test sound failed", e));
     }
   }
@@ -375,33 +371,9 @@
     store.setSoundEnabled((e.target as HTMLInputElement).checked);
   }
 
-  function onSoundFileChange(): void {
-    store.setSoundFile(soundFile);
-    if (soundFile.trim() === "") {
-      soundFileValid = null;
-      soundFileChecking = false;
-      return;
-    }
-    soundFileValid = null;
-    soundFileChecking = true;
-    invoke<boolean>("check_sound_file", { path: soundFile })
-      .then((ok) => {
-        soundFileValid = ok;
-        soundFileChecking = false;
-      })
-      .catch(() => {
-        soundFileValid = false;
-        soundFileChecking = false;
-      });
-  }
-
   function onTestSound(): void {
-    invoke("play_sound", playbackPayload("done", store.soundStyle, store.soundFile))
+    invoke("play_sound", playbackPayload("done"))
       .catch((e) => console.error("ubra: test sound failed", e));
-  }
-
-  function onSoundStyleChange(e: Event): void {
-    store.setSoundStyle((e.target as HTMLSelectElement).value);
   }
 
   const REPO_URL = "https://github.com/stackwares/ubra-tauri";
@@ -763,55 +735,6 @@
                     <span class="thumb"></span>
                   </span>
                 </label>
-                <label class="row">
-                  <span class="label">Chime</span>
-                  <span class="select-wrap">
-                    <select
-                      value={store.soundStyle}
-                      onchange={onSoundStyleChange}
-                      aria-label="Notification chime"
-                    >
-                      <option value="default">Default chime</option>
-                      <option value="bright">Bright</option>
-                      <option value="soft">Soft</option>
-                      <option value="pop">Pop</option>
-                      <option value={CUSTOM_CHIME_ID}>
-                        Custom audio file…
-                      </option>
-                    </select>
-                  </span>
-                </label>
-                {#if store.soundStyle === CUSTOM_CHIME_ID}
-                  <label class="row">
-                    <span class="label">Custom sound</span>
-                    <input
-                      type="text"
-                      bind:value={soundFile}
-                      onchange={onSoundFileChange}
-                      placeholder="~/Music/chime.mp3"
-                      aria-label="Custom sound file path"
-                      aria-invalid={soundFileValid === false}
-                      aria-describedby={soundFile.trim() !== ""
-                        ? "sound-hint"
-                        : undefined}
-                      class="file-input"
-                    />
-                  </label>
-                  {#if soundFile.trim() !== ""}
-                    <div class="hint" id="sound-hint">
-                      {#if soundFileChecking}
-                        <span class="checking">Checking file…</span>
-                      {:else if soundFileValid === false}
-                        <span class="error-hint" role="alert">
-                          File not found or not playable audio; default chime
-                          is used.
-                        </span>
-                      {:else if soundFileValid === true}
-                        <span class="ok-hint">Custom sound ready.</span>
-                      {/if}
-                    </div>
-                  {/if}
-                {/if}
                 <div class="row">
                   <span class="label">Preview</span>
                   <button class="btn" onclick={onTestSound}>
@@ -911,7 +834,11 @@
                         updater.phase === "downloading"}
                       onclick={() => void updater.checkForUpdates()}
                     >
-                      <Icon name="refresh" size={12} />
+                      {#if updater.phase === "checking"}
+                        <Spinner size={12} />
+                      {:else}
+                        <Icon name="refresh" size={12} />
+                      {/if}
                       <span>
                         {updater.phase === "checking"
                           ? "Checking…"
@@ -1055,15 +982,6 @@
                         >
                           {folderPicking ? "Opening…" : "Change…"}
                         </button>
-                        {#if ws.defaultCwd}
-                          <button
-                            class="btn"
-                            onclick={() =>
-                              store.setWorkspaceDefaultCwd(ws.id, null)}
-                          >
-                            Clear
-                          </button>
-                        {/if}
                       </span>
                     </div>
                     <div class="folder-path" title={ws.defaultCwd ?? ""}>
@@ -1094,14 +1012,17 @@
               {#if usageShowable && usageShowable.length > 0}
                 <button
                   class="btn btn-icon"
-                  class:spinning={usageAnyLoading}
                   title="Refresh all usage"
                   aria-label="Refresh all usage"
                   aria-busy={usageAnyLoading}
                   disabled={usageAnyLoading}
                   onclick={refreshAllUsage}
                 >
-                  <Icon name="refresh" size={12} />
+                  {#if usageAnyLoading}
+                    <Spinner size={12} />
+                  {:else}
+                    <Icon name="refresh" size={12} />
+                  {/if}
                 </button>
               {/if}
             </div>
@@ -1557,19 +1478,6 @@
   .btn-icon {
     padding: 5px 8px;
   }
-  .btn-icon.spinning > :global(svg) {
-    animation: btn-spin 0.9s linear infinite;
-  }
-  @keyframes btn-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .btn-icon.spinning > :global(svg) {
-      animation: none;
-    }
-  }
   .file-input {
     border: 1px solid var(--input-border);
     border-radius: 6px;
@@ -1578,9 +1486,6 @@
     color: var(--text);
     font: inherit;
     width: 220px;
-  }
-  .file-input[aria-invalid="true"] {
-    border-color: var(--error-text);
   }
   /* Capped dropdown width so the row label keeps its natural width. */
   .cli-select {
@@ -1633,12 +1538,6 @@
   }
   .error-hint {
     color: var(--error-text);
-  }
-  .checking {
-    color: var(--text-muted);
-  }
-  .ok-hint {
-    color: var(--success);
   }
   /* Theme swatches. */
   .swatches {

@@ -274,7 +274,7 @@ class AgentStore {
       cli: transition.cli ?? last?.cli });
     if (route.toast) toasts.push(title, "Click to review", nodeId);
     if (route.system) invoke("notify_agent", { title, body: "Open Ubra to review", kind }).catch(console.error);
-    if (route.sound) invoke("play_sound", playbackPayload(kind, store.soundStyle, store.soundFile)).catch(console.error);
+    if (route.sound) invoke("play_sound", playbackPayload(kind)).catch(console.error);
   }
 }
 export const agent = new AgentStore();

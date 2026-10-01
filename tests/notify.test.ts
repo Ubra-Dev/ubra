@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chimeStyleParam,
-  parseChimeStyle,
+  FIXED_CHIME_FILE,
   parseDelivery,
   parseToastPosition,
   playbackPayload,
@@ -74,36 +73,16 @@ describe("routeNotification", () => {
   });
 });
 
-describe("chime styles", () => {
-  it("parses persisted selections, falling back to default", () => {
-    assert.equal(parseChimeStyle("bright"), "bright");
-    assert.equal(parseChimeStyle("custom"), "custom");
-    assert.equal(parseChimeStyle("nope"), "default");
-    assert.equal(parseChimeStyle(null), "default");
-    assert.equal(parseChimeStyle(undefined), "default");
-  });
-
-  it("maps selections to backend params without ever sending custom", () => {
-    assert.equal(chimeStyleParam("soft"), "soft");
-    assert.equal(chimeStyleParam("custom"), null);
-    assert.equal(chimeStyleParam("nope"), "default");
-  });
-});
-
 describe("playback selection", () => {
-  it("ignores a retained custom path for every built-in style and restores it on return to custom", () => {
-    const file = "/sounds/my chime.wav";
-    assert.deepEqual(playbackPayload("done", "custom", file), { kind: "done", style: null, file });
-    for (const style of ["default", "bright", "soft", "pop"]) {
-      assert.deepEqual(playbackPayload("done", style, file), { kind: "done", style, file: null });
-    }
-    assert.deepEqual(playbackPayload("request", "custom", file), { kind: "request", style: null, file });
-  });
-
-  it("uses the backend fallback for a blank or invalid custom file without leaking it to built-ins", () => {
-    assert.deepEqual(playbackPayload("done", "custom", "  "), { kind: "done", style: null, file: null });
-    assert.deepEqual(playbackPayload("done", "custom", "/missing.wav"), { kind: "done", style: null, file: "/missing.wav" });
-    assert.deepEqual(playbackPayload("done", "unknown", "/missing.wav"), { kind: "done", style: "default", file: null });
+  it("always plays the fixed chime file", () => {
+    assert.deepEqual(playbackPayload("done"), {
+      kind: "done",
+      file: FIXED_CHIME_FILE,
+    });
+    assert.deepEqual(playbackPayload("request"), {
+      kind: "request",
+      file: FIXED_CHIME_FILE,
+    });
   });
 });
 

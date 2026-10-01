@@ -37,10 +37,8 @@ import { PendingCommands } from "./pendingCommands";
 import { toasts } from "./toasts.svelte.ts";
 import { StartupCommands } from "./startupCommands";
 import {
-  DEFAULT_CHIME_STYLE,
   DEFAULT_DELIVERY,
   DEFAULT_TOAST_POSITION,
-  parseChimeStyle,
   parseDelivery,
   parseToastPosition,
   type NotifyDelivery,
@@ -121,10 +119,6 @@ class AppStore {
   soundEnabled = $state<boolean>(true);
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
-  /** Custom notification sound file (blank = synthesized default chime). */
-  soundFile = $state<string>("");
-  /** Selected chime: a built-in id or "custom" (uses soundFile). */
-  soundStyle = $state<string>(DEFAULT_CHIME_STYLE);
   settingsOpen = $state(false);
   /** Revisit-mode onboarding opened from Settings (independent of firstRun). */
   onboardingOpen = $state(false);
@@ -202,10 +196,9 @@ class AppStore {
       } catch {
         // Keep the default mute list when the saved value is corrupt.
       }
-      const savedFile = window.localStorage.getItem("ubra.soundFile");
-      if (savedFile !== null) this.soundFile = savedFile;
-      const savedStyle = window.localStorage.getItem("ubra.soundStyle");
-      if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
+      // The chime is fixed; drop any selection persisted by older versions.
+      window.localStorage.removeItem("ubra.soundFile");
+      window.localStorage.removeItem("ubra.soundStyle");
       const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
       if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
       const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
@@ -449,16 +442,6 @@ class AppStore {
   setSoundEnabled(enabled: boolean): void {
     this.soundEnabled = enabled;
     this.savePref("ubra.soundEnabled", String(enabled));
-  }
-
-  setSoundFile(path: string): void {
-    this.soundFile = path;
-    this.savePref("ubra.soundFile", path);
-  }
-
-  setSoundStyle(style: string): void {
-    this.soundStyle = parseChimeStyle(style);
-    this.savePref("ubra.soundStyle", this.soundStyle);
   }
 
   setAgentMuted(cli: string, muted: boolean): void {

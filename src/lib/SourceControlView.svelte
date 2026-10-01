@@ -8,6 +8,7 @@
   import posthog from "posthog-js";
   import { onMount } from "svelte";
   import Icon from "./Icon.svelte";
+  import Spinner from "./Spinner.svelte";
   import { COPY_TOAST_DISMISS_MS } from "./clipboard";
   import {
     dirName,
@@ -352,7 +353,11 @@
         disabled={busy !== null}
         onclick={() => void runAction("pull", () => gitPull(root))}
       >
-        <Icon name={busy === "pull" ? "refresh" : "download"} size={13} />
+        {#if busy === "pull"}
+          <Spinner size={13} />
+        {:else}
+          <Icon name="download" size={13} />
+        {/if}
       </button>
       <button
         class="icon-btn"
@@ -363,7 +368,11 @@
         disabled={busy !== null}
         onclick={() => void runAction("push", () => gitPush(root))}
       >
-        <Icon name={busy === "push" ? "refresh" : "upload"} size={13} />
+        {#if busy === "push"}
+          <Spinner size={13} />
+        {:else}
+          <Icon name="upload" size={13} />
+        {/if}
       </button>
       <button
         class="icon-btn"
@@ -374,7 +383,11 @@
         disabled={busy !== null}
         onclick={() => void refresh()}
       >
-        <Icon name="refresh" size={13} />
+        {#if busy === "refresh"}
+          <Spinner size={13} />
+        {:else}
+          <Icon name="refresh" size={13} />
+        {/if}
       </button>
     </div>
     {#if showBranches}
@@ -680,22 +693,9 @@
     opacity: 0.5;
     cursor: default;
   }
-  /* The running action keeps full opacity with a spinning glyph. */
+  /* The running action keeps full opacity while its spinner runs. */
   .icon-btn.busy {
     opacity: 1;
-  }
-  .icon-btn.busy > :global(svg) {
-    animation: sc-spin 0.9s linear infinite;
-  }
-  @keyframes sc-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .icon-btn.busy > :global(svg) {
-      animation: none;
-    }
   }
   .branches {
     flex: 0 0 auto;

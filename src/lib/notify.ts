@@ -17,38 +17,14 @@ export type SoundKind = "done" | "request";
 export const DEFAULT_DELIVERY: NotifyDelivery = "system";
 export const DEFAULT_TOAST_POSITION: ToastPosition = "bottom-right";
 
-/** Built-in chime ids (backend ChimeStyle) plus the custom-file pseudo-id. */
-export const CHIME_STYLE_IDS = ["default", "bright", "soft", "pop"] as const;
-export type ChimeStyleId = (typeof CHIME_STYLE_IDS)[number];
-export const CUSTOM_CHIME_ID = "custom";
-export const DEFAULT_CHIME_STYLE = "default";
-
-/** Persisted chime selection: a built-in id, "custom", or "default". */
-export function parseChimeStyle(value: unknown): string {
-  if (value === CUSTOM_CHIME_ID) return CUSTOM_CHIME_ID;
-  return (CHIME_STYLE_IDS as readonly string[]).includes(value as string)
-    ? (value as string)
-    : DEFAULT_CHIME_STYLE;
-}
-
-/**
- * Style param for play_sound: built-ins pass through, "custom" becomes null
- * so the custom file wins, and anything unexpected becomes "default".
- * Never sends "custom" itself: the backend enum would reject it.
- */
-export function chimeStyleParam(style: string): string | null {
-  if (style === CUSTOM_CHIME_ID) return null;
-  return (CHIME_STYLE_IDS as readonly string[]).includes(style)
-    ? style
-    : DEFAULT_CHIME_STYLE;
-}
+/** The only notification chime; there is no picker for it. */
+export const FIXED_CHIME_FILE = "/Users/nemoryoliver/Downloads/notification.mp3";
 
 /** One selection contract for preview, test, and real notification playback. */
-export function playbackPayload(kind: SoundKind, style: string, retainedFile: string) {
+export function playbackPayload(kind: SoundKind) {
   return {
     kind,
-    style: chimeStyleParam(style),
-    file: style === CUSTOM_CHIME_ID && retainedFile.trim() !== "" ? retainedFile : null,
+    file: FIXED_CHIME_FILE,
   };
 }
 

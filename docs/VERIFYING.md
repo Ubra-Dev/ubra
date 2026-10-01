@@ -16,7 +16,7 @@ Never point destructive probes at your normal layout or running daemon.
 3. Quit/relaunch to check persistence. In a separate scratch data directory,
    load corrupt and unsupported layouts: recovery must preserve the original
    until explicit reset, with retry/export errors visible.
-4. Verify Settings, custom-to-built-in chimes, notification delivery, terminal
+4. Verify Settings, the notification chime, notification delivery, terminal
    clipboard, clickable links, and packaged webview console/CSP diagnostics.
 5. Use keyboard-only onboarding, dialogs and context menus; focus must remain
    inside overlays and return on dismissal. Check navigation with many tabs,
