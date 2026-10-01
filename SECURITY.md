@@ -10,7 +10,7 @@
 
 **Do not open a public issue.** Instead, open a
 [private security advisory](https://github.com/stackwares/ubra-tauri/security/advisories/new)
-or email `nemoryoliver@gmail.com`.
+or email `dev@stackwares.com`.
 
 Include: what you did, what you expected, what happened, and the OS / app
 version details if available. Expect an initial response within 7 days.
