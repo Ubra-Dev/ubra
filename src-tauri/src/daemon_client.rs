@@ -461,12 +461,30 @@ mod tests {
         (client, rx)
     }
 
-    fn next_output(rx: &mpsc::Receiver<DaemonEvent>, needle: &str) -> (PaneId, u64) {
+    fn next_output(
+        client: &DaemonClient,
+        rx: &mpsc::Receiver<DaemonEvent>,
+        pane: PaneId,
+        needle: &str,
+    ) -> (PaneId, u64) {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut transcript = String::new();
+        let mut handshake_answered = false;
         loop {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(DaemonEvent::PtyOutput { id, data, sequence }) if data.contains(needle) => {
-                    return (id, sequence);
+                Ok(DaemonEvent::PtyOutput { id, data, sequence }) => {
+                    // ConPTY startup query (Windows only): answer it or the
+                    // pane withholds all further output. In production xterm.js
+                    // answers; here the test plays the terminal itself.
+                    // Silent no-op on Unix, where the query never arrives.
+                    transcript.push_str(&data);
+                    if !handshake_answered && transcript.contains("\u{1b}[6n") {
+                        handshake_answered = true;
+                        let _ = client.write(pane, "\u{1b}[1;1R");
+                    }
+                    if data.contains(needle) {
+                        return (id, sequence);
+                    }
                 }
                 Ok(_) => continue,
                 Err(_) => panic!("timed out waiting for output containing {needle:?}"),
@@ -522,7 +540,7 @@ mod tests {
         );
 
         client.write(pane, "echo marker-client-7\n").unwrap();
-        let (got, _) = next_output(&rx, "marker-client-7");
+        let (got, _) = next_output(&client, &rx, pane, "marker-client-7");
         assert_eq!(got, pane);
 
         let snap = client.snapshot(pane).unwrap();
@@ -559,7 +577,7 @@ mod tests {
             )
             .unwrap();
         client.write(pane, "echo marker-hist-client\n").unwrap();
-        next_output(&rx, "marker-hist-client");
+        next_output(&client, &rx, pane, "marker-hist-client");
         client.kill(pane).unwrap();
         next_exit(&rx, pane);
         let deadline = Instant::now() + Duration::from_secs(10);

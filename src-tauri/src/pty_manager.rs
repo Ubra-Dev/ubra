@@ -106,7 +106,10 @@ pub struct SpawnOptions {
 }
 
 struct Session {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// `None` once the pane is reaped: on Windows the exit reaper takes the
+    /// master so dropping it runs ClosePseudoConsole, which releases the
+    /// reader blocked in a pipe read that ConPTY never EOFs.
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PID of the process spawned directly in the PTY (0 when unknown).
@@ -117,6 +120,10 @@ struct Session {
     screen: Mutex<ScreenState>,
     size: Mutex<(u16, u16)>,
     deliberate_close: AtomicBool,
+    /// Exit bookkeeping (registry removal, history save, exit event) runs
+    /// exactly once: on Windows the reader and the exit reaper race, and
+    /// whoever claims this first finishes while the other stands down.
+    exit_done: AtomicBool,
     owner: crate::process_tree::ProcessOwner,
     headless: bool,
     screen_revision: AtomicU64,
@@ -299,7 +306,7 @@ impl PtyManager {
             }
         };
         let session = Arc::new(Session {
-            master: Mutex::new(pair.master),
+            master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             root_pid,
@@ -309,6 +316,7 @@ impl PtyManager {
             screen: Mutex::new(ScreenState::new(rows, cols)),
             size: Mutex::new((cols, rows)),
             deliberate_close: AtomicBool::new(false),
+            exit_done: AtomicBool::new(false),
             screen_revision: AtomicU64::new(0),
             key,
         });
@@ -342,6 +350,38 @@ impl PtyManager {
             return Err(e.into());
         }
 
+        // Windows exit detection cannot rely on pipe EOF (see reaper_loop),
+        // so each pane also gets a reaper polling the child handle. Unix
+        // keeps the reader-only path: EOF there already reports every exit.
+        #[cfg(windows)]
+        {
+            let reaper_session = Arc::clone(&session);
+            let reaper_sessions = Arc::clone(&self.sessions);
+            let reaper_sink = Arc::clone(&self.sink);
+            let reaper_activity = self.activity.clone();
+            let reaper_exits = self.exits.clone();
+            if let Err(e) = thread::Builder::new()
+                .name(format!("ubra-pty-reaper-{id}"))
+                .spawn(move || {
+                    reaper_loop(
+                        id,
+                        &reaper_session,
+                        &reaper_sessions,
+                        &reaper_sink,
+                        &reaper_activity,
+                        &reaper_exits,
+                    )
+                })
+            {
+                self.sessions.lock().remove(&id);
+                let _ = session.owner.terminate();
+                let mut child = session.child.lock();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        }
+
         self.wake_status();
         Ok(id)
     }
@@ -369,12 +409,17 @@ impl PtyManager {
         if *size == (cols, rows) {
             return Ok(());
         }
-        session.master.lock().resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        session
+            .master
+            .lock()
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("pane exited"))?
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })?;
         session
             .screen
             .lock()
@@ -676,6 +721,14 @@ fn reader_loop(
         if status.is_none() {
             status = session.child.lock().try_wait().ok().flatten();
         }
+    }
+    // Whoever observes the exit first finishes it: on Windows the reaper
+    // below races this reader, so an already-claimed exit stands down here.
+    // (Unix has no reaper, so this always proceeds there.)
+    if session.exit_done.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if !session.deliberate_close.load(Ordering::SeqCst) {
         sessions.lock().remove(&id);
     }
     let (success, code) = match status {
@@ -698,6 +751,69 @@ fn reader_loop(
     }
     let _ = activity.try_send(());
     sink.exited(id, success, code);
+}
+
+/// Windows-only exit reaper: ConPTY does not reliably EOF the output pipe
+/// when the last client dies (fast `cmd /C` commands, job kills), which
+/// would leave the reader blocked forever with no exit event and no
+/// history save. Polling the child handle instead reports every exit;
+/// whoever observes it first (reader or reaper) finishes it exactly once
+/// via `exit_done`, and the reaper additionally drops the master so
+/// ClosePseudoConsole releases the reader's blocked pipe read.
+#[cfg(windows)]
+fn reaper_loop(
+    id: PaneId,
+    session: &Session,
+    sessions: &Mutex<HashMap<PaneId, Arc<Session>>>,
+    sink: &Arc<dyn PtyEventSink>,
+    activity: &mpsc::SyncSender<()>,
+    exits: &Mutex<VecDeque<AgentExit>>,
+) {
+    loop {
+        thread::sleep(Duration::from_millis(50));
+        if session.exit_done.load(Ordering::SeqCst) {
+            return; // Reader observed EOF first and finished.
+        }
+        // GetExitCodeProcess is cheap. A 259 (STILL_ACTIVE) exit code reads
+        // as alive and simply keeps polling, falling back to the reader.
+        let status = session.child.lock().try_wait().ok().flatten();
+        let Some(status) = status else { continue };
+        let deliberate = session.deliberate_close.load(Ordering::SeqCst);
+        // Mirror the reader: natural exits release the whole ownership set.
+        // Best-effort here, never fail-closed: the process is verifiably
+        // dead, so the exit event must fire even if this errors.
+        if !deliberate {
+            let _ = session.owner.terminate();
+        }
+        if session.exit_done.swap(true, Ordering::SeqCst) {
+            return; // Reader won the race.
+        }
+        if !deliberate {
+            sessions.lock().remove(&id);
+        }
+        let (success, code) = (status.success(), Some(status.exit_code() as i32));
+        if !deliberate {
+            record_exit(
+                exits,
+                AgentExit {
+                    id,
+                    root_pid: session.root_pid,
+                    success: code.map(|_| success),
+                    deliberate: false,
+                },
+            );
+        }
+        if let (Some(dir), Some(key)) = (session.history_dir.clone(), session.key.clone()) {
+            save_history_file(&dir, &key, &session.screen.lock().snapshot());
+        }
+        let _ = activity.try_send(());
+        sink.exited(id, success, code);
+        // Tear down ConPTY so the reader's pending read completes and its
+        // thread exits; without this the reader (and session) leaks.
+        let master = session.master.lock().take();
+        drop(master);
+        return;
+    }
 }
 
 /// Advertise a fixed color-capable terminal to pane processes.
