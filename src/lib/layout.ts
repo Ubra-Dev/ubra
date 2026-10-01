@@ -16,6 +16,8 @@ export interface PaneNode {
   cmd?: string[];
   /** false requires explicit launch authorization; absence keeps legacy auto-run. */
   cmdOnRestore?: boolean;
+  /** Last agent CLI launched in this pane; rerun when it spawns fresh. */
+  agentCli?: string;
 }
 
 export interface SplitNode {
@@ -138,6 +140,26 @@ export function preferredAgentCli(
 
 export function countPanes(node: LayoutNode): number {
   return node.kind === "pane" ? 1 : countPanes(node.first) + countPanes(node.second);
+}
+
+/**
+ * Remember the agent CLI queued to run in a pane, so a fresh spawn after a
+ * restart can rerun it. False when the command is blank or the pane is gone;
+ * the stamp persists with the layout until the pane closes or another
+ * CLI is queued.
+ */
+export function stampPaneAgentCli(
+  layout: Layout,
+  paneId: string,
+  command: string,
+): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  const found = findTabByPane(layout, paneId);
+  const node = found ? findPane(found.tab.root, paneId) : null;
+  if (!node) return false;
+  node.agentCli = trimmed;
+  return true;
 }
 
 export function findTabByPane(
@@ -422,7 +444,7 @@ function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNo
   const id = identity(value["id"], context);
   if (value["kind"] === "pane") {
     const node: PaneNode = { kind: "pane", id };
-    for (const key of ["cwd", "title"] as const) {
+    for (const key of ["cwd", "title", "agentCli"] as const) {
       if (value[key] !== undefined) {
         if (typeof value[key] !== "string") throw new Error(`Invalid saved pane ${key}.`);
         node[key] = value[key];

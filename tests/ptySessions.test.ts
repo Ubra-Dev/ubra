@@ -48,6 +48,15 @@ describe("pane session ownership", () => {
     assert.deepEqual(killed, [10, 11]);
   });
 
+  it("leases start unattached with restore delivery unconsumed", async () => {
+    const kill = async () => {};
+    const lease = acquireSession("flags", async () => 21, kill);
+    assert.equal(await lease.ready, 21);
+    assert.equal(lease.attached, false);
+    assert.equal(lease.restoreTaken, false);
+    closeSession("flags");
+  });
+
   it("failed spawn permits retry, while stale failure cannot clear replacement", async () => {
     const pending = deferred();
     const kill = async () => {};

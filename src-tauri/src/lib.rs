@@ -18,7 +18,9 @@ mod window_geometry;
 
 use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
-use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySnapshot};
+use pty_manager::{
+    PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySessionInfo, PtySnapshot,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -49,10 +51,16 @@ fn pty_spawn(
     args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
+    key: Option<String>,
 ) -> Result<PaneId, String> {
     manager
-        .spawn(shell, cwd, args.unwrap_or_default(), cols, rows)
+        .spawn(shell, cwd, args.unwrap_or_default(), cols, rows, key)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pty_list(manager: State<'_, Arc<PtyManager>>) -> Vec<PtySessionInfo> {
+    manager.list()
 }
 
 #[tauri::command]
@@ -471,6 +479,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
+            pty_list,
             pty_write,
             pty_resize,
             pty_kill,

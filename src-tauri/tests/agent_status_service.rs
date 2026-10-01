@@ -62,6 +62,7 @@ done
                 vec![],
                 80,
                 24,
+                None,
             )
             .unwrap();
         Self {

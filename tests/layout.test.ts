@@ -35,6 +35,7 @@ import {
   swapPanesInTab,
   setZoomedPane,
   splitPaneInTab,
+  stampPaneAgentCli,
   type Tab,
 } from "../src/lib/layout.ts";
 
@@ -391,6 +392,33 @@ describe("sanitizeLayout", () => {
     const root = layout.workspaces[0].tabs[0].root;
     assert.equal(root.kind, "pane");
     if (root.kind === "pane") assert.deepEqual(root.cmd, ["claude", "--resume"]);
+  });
+
+  it("preserves pane agent CLIs for restore", () => {
+    const layout = sanitizeLayout({
+      version: 2,
+      activeWorkspaceId: "w",
+      workspaces: [
+        {
+          id: "w",
+          name: "w",
+          activeTabId: "t",
+          tabs: [
+            {
+              id: "t",
+              name: "t",
+              root: { kind: "pane", id: "p", agentCli: "claude" },
+            },
+          ],
+        },
+      ],
+    });
+    const root = layout.workspaces[0].tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind === "pane") assert.equal(root.agentCli, "claude");
+    const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
+    raw.workspaces[0].tabs[0].root.agentCli = ["claude"];
+    assert.throws(() => sanitizeLayout(raw), /Invalid saved pane agentCli/);
   });
 });
 
@@ -941,5 +969,31 @@ describe("resolveWorkspaceRoot", () => {
     if (root.kind !== "pane") throw new Error("Expected pane");
     root.cwd = "";
     assert.equal(resolveWorkspaceRoot(ws, root.id), undefined);
+  });
+});
+
+describe("stampPaneAgentCli", () => {
+  it("stamps the queued CLI and survives a sanitize round trip", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentCli(layout, root.id, "  claude  "), true);
+    assert.equal(root.agentCli, "claude");
+    const reloaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    const again = reloaded.workspaces[0].tabs[0].root;
+    if (again.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(again.agentCli, "claude");
+    // A later queue overwrites the stamp.
+    assert.equal(stampPaneAgentCli(layout, root.id, "droid"), true);
+    assert.equal(root.agentCli, "droid");
+  });
+
+  it("refuses blank commands and missing panes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentCli(layout, root.id, "   "), false);
+    assert.equal(root.agentCli, undefined);
+    assert.equal(stampPaneAgentCli(layout, "missing-pane", "claude"), false);
   });
 });

@@ -43,6 +43,14 @@ pub struct PtySnapshot {
     pub cols: u16,
     pub rows: u16,
 }
+
+/// Live session identity for frontend reattach and orphan sweeps.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PtySessionInfo {
+    pub id: PaneId,
+    pub key: Option<String>,
+}
 /// Receives pane events. Implemented by the Tauri event bridge in production
 /// and by an in-memory channel in tests.
 pub trait PtyEventSink: Send + Sync + 'static {
@@ -76,6 +84,10 @@ struct Session {
     owner: crate::process_tree::ProcessOwner,
     headless: bool,
     screen_revision: AtomicU64,
+    /// Stable frontend pane identity (`pane-<uuid>`). Survives frontend-only
+    /// restarts so a remount can reattach instead of spawning a replacement.
+    /// `None` for daemon panes, which address sessions by numeric id.
+    key: Option<String>,
 }
 
 /// Lifecycle evidence consumed once by the status worker, never by queries.
@@ -137,6 +149,12 @@ impl PtyManager {
     }
 
     /// Spawn a pane running `shell` (or the platform default) with `args`.
+    ///
+    /// `key` is the caller's stable identity for later reattach (the GUI
+    /// passes its pane node id). Keys are advisory, never exclusive: a
+    /// duplicate key spawns a second session rather than killing the first,
+    /// since killing on collision could destroy a live agent during a
+    /// double-mount race. Reattach picks the lowest id for a key.
     pub fn spawn(
         &self,
         shell: Option<String>,
@@ -144,6 +162,7 @@ impl PtyManager {
         args: Vec<String>,
         cols: u16,
         rows: u16,
+        key: Option<String>,
     ) -> anyhow::Result<PaneId> {
         validate_dimensions(cols, rows)?;
         if let Some(cwd) = &cwd {
@@ -211,6 +230,7 @@ impl PtyManager {
             size: Mutex::new((cols, rows)),
             deliberate_close: AtomicBool::new(false),
             screen_revision: AtomicU64::new(0),
+            key,
         });
         self.sessions.lock().insert(id, Arc::clone(&session));
 
@@ -311,6 +331,24 @@ impl PtyManager {
                 .screen_revision
                 .load(Ordering::Acquire),
         )
+    }
+
+    /// Snapshot of live sessions and their stable keys. The frontend uses
+    /// this after a restart to adopt its surviving sessions (reattach) and
+    /// to reap sessions whose keys are no longer in the layout (orphans).
+    /// Daemon panes report `key: None` and are never adopted or swept.
+    pub fn list(&self) -> Vec<PtySessionInfo> {
+        let mut sessions: Vec<PtySessionInfo> = self
+            .sessions
+            .lock()
+            .iter()
+            .map(|(id, s)| PtySessionInfo {
+                id: *id,
+                key: s.key.clone(),
+            })
+            .collect();
+        sessions.sort_by_key(|s| s.id);
+        sessions
     }
 
     /// Snapshot of live panes and their root PIDs for the agent watcher.

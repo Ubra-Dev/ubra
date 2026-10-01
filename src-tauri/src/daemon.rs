@@ -1047,6 +1047,7 @@ fn dispatch_connected(core: &DaemonCore, req: &Request, socket: Option<&TcpStrea
                 req.args.clone().unwrap_or_default(),
                 req.cols.unwrap_or(80),
                 req.rows.unwrap_or(24),
+                None,
             ) {
                 Ok(pane) => respond(serde_json::json!({"ok":true,"pane":pane})),
                 Err(e) => Action::Respond(err(id, e)),

@@ -18,7 +18,7 @@
   } from "./clipboard";
   import { findTabByPane } from "./layout";
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
-  import { TerminalAttachment, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
+  import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
   import { toasts } from "./toasts.svelte.ts";
@@ -38,7 +38,12 @@
     /** Scrollback lines kept. */
     scrollback: number;
     onExit?: () => void;
-    onSpawn?: (liveId: number) => void;
+    /**
+     * Fired once the live PTY id is known. `attached` means a surviving
+     * backend session was adopted (never rerun the agent); `firstDelivery`
+     * is true only for the first mount delivering this lease.
+     */
+    onSpawn?: (liveId: number, attached: boolean, firstDelivery: boolean) => void;
     onDispose?: (liveId: number) => void;
   }
   let {
@@ -252,14 +257,37 @@
           invoke("pty_write", { id: paneId, data }).catch(console.error);
         }
       });
-      lease = acquireSession(sessionKey, () => {
+      lease = acquireSession(sessionKey, async () => {
         const argv = store.commandForSpawn(sessionKey);
+        // Adopt a surviving backend session with our stable key (e.g. after
+        // a webview reload with the backend alive) instead of spawning a
+        // blank replacement and orphaning the old process.
+        try {
+          const sessions = await invoke<PtySessionInfo[]>("pty_list");
+          const owned = sessions
+            .filter((s) => s.key === sessionKey)
+            .map((s) => s.id)
+            .sort((a, b) => a - b);
+          for (const candidate of owned) {
+            try {
+              await invoke("pty_snapshot", { id: candidate });
+              lease!.attached = true;
+              return candidate;
+            } catch {
+              // Exited between list and adopt; try the next duplicate.
+            }
+          }
+        } catch (error) {
+          console.error("ubra: session adopt failed, spawning", error);
+        }
+        lease!.attached = false;
         return invoke<number>("pty_spawn", {
           shell: argv?.[0] ?? null,
           cwd: cwd ?? null,
           args: argv?.slice(1) ?? null,
           cols: Math.max(term.cols, 2),
           rows: Math.max(term.rows, 1),
+          key: sessionKey,
         });
       }, (id) => invoke("pty_kill", { id }));
       const id = await lease.ready;
@@ -273,7 +301,9 @@
       }
       if (disposed || lease.cancelled) return;
       paneId = id;
-      onSpawn?.(id);
+      const firstDelivery = !lease.restoreTaken;
+      lease.restoreTaken = true;
+      onSpawn?.(id, lease.attached, firstDelivery);
       if (snapshot) term.resize(snapshot.cols, snapshot.rows);
       const restored = attachment.restore(id, snapshot);
       for (const chunk of restored.chunks) term.write(chunk);
@@ -304,8 +334,11 @@
       host.removeEventListener("mouseup", onMouseUp);
       resizeObserver.disconnect();
       unlistens.forEach((u) => u());
+      // A null layout (boot/recovery/HMR windows) proves nothing: only a
+      // loaded layout missing the pane is a true close that may kill.
+      const layout = store.layout;
       const stillPlaced =
-        store.layout !== null && findTabByPane(store.layout, sessionKey) !== null;
+        layout === null || findTabByPane(layout, sessionKey) !== null;
       if (!stillPlaced) {
         if (paneId !== null) onDispose?.(paneId);
         closeSession(sessionKey);

@@ -39,6 +39,10 @@ The development checklist below complements, but does not replace, these gates.
 - Split a pane running a live process (e.g. `sleep 300`): the original pane
   keeps running after the split, and closing one side never kills the other.
   Panes also survive tab/workspace switches untouched.
+- Reload the webview (devtools reload in `tauri dev`) with an agent running:
+  each pane reattaches to its live session with history intact instead of
+  respawning, and no orphaned backend processes remain. After quit/relaunch,
+  panes automatically rerun their remembered agent on first spawn.
 - Workspaces can be closed from the sidebar; closing the last one resets fresh.
 - Close the window with a working tray: the app hides and panes keep running.
   Left-click the tray icon to show it again; Quit is available in Settings and

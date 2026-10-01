@@ -150,6 +150,14 @@
 
   const title = $derived(paneDisplayTitle(node));
 
+  const respawnLabel = $derived(
+    node.cmd?.length && node.cmdOnRestore === false
+      ? "Run saved command"
+      : node.agentCli?.trim()
+        ? `Restart ${node.agentCli.trim().split(/\s+/)[0]}`
+        : "Restart terminal",
+  );
+
   function focus(el: HTMLInputElement): void {
     el.focus();
     el.select();
@@ -170,9 +178,13 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
-  function onTerminalSpawn(id: number): void {
+  function onTerminalSpawn(id: number, attached: boolean, firstDelivery: boolean): void {
     agent.register(id, node.id);
-    const command = store.takePendingTerminalCommand(node.id);
+    // Session queue wins; otherwise a fresh (non-attached) first delivery
+    // reruns the pane's persisted agent. Attached sessions already run it.
+    const command =
+      store.takePendingTerminalCommand(node.id) ??
+      (!attached && firstDelivery ? store.takeRestoreAgent(node.id) : null);
     if (!command) return;
     invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
       console.error("ubra: failed to start onboarding command", error);
@@ -320,7 +332,7 @@
         }}
       >
         <Icon name="refresh" size={12} />
-        <span>{node.cmd?.length && node.cmdOnRestore === false ? "Run saved command" : "Restart terminal"}</span>
+        <span>{respawnLabel}</span>
       </button>
     {/if}
   </div>

@@ -37,7 +37,12 @@ their root shell after closing terminal handles.
 Moved terminals restore an atomic output watermark, primary/alternate buffers,
 cursor and supported input modes, including unfinished escape input; only newer
 chunks replay. Pending spawns belong to stable pane identities and are adopted
-across component remounts.
+across component remounts. Backend sessions carry their stable pane key, so a
+restarted frontend adopts its survivors via `pty_list` instead of spawning
+replacements; sessions whose keys left the layout are reaped on load, and
+unmounts while the layout is unloaded never kill. Snapshots replay scrollback
+history before the visible screen. Panes persist their last agent CLI and
+rerun it on fresh spawns; adopted sessions never rerun.
 
 Layout recovery blocks autosave until Retry succeeds or an explicit Reset
 preserves the original in an exact-byte backup. Export copies the original

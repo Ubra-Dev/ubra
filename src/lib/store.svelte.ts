@@ -26,6 +26,7 @@ import {
   sanitizeLayout,
   setZoomedPane,
   splitPaneInTab,
+  stampPaneAgentCli,
   swapPanesInTab,
   type Direction,
   type Layout,
@@ -34,6 +35,7 @@ import {
   type Workspace,
 } from "./layout";
 import { PendingCommands } from "./pendingCommands";
+import type { PtySessionInfo } from "./terminalLifecycle";
 import { toasts } from "./toasts.svelte.ts";
 import { StartupCommands } from "./startupCommands";
 import {
@@ -235,6 +237,7 @@ class AppStore {
       this.recoveryRequired = false;
       this.loadError = null;
       this.saveError = null;
+      void this.sweepOrphanedPtys();
     } catch (e) {
       this.loadError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -272,6 +275,7 @@ class AppStore {
       this.recoveryRequired = false;
       this.loadError = null;
       this.saveError = null;
+      void this.sweepOrphanedPtys();
     } catch (e) {
       this.recoveryError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -562,7 +566,7 @@ class AppStore {
     for (const id of collectPaneIds(tab.root)) {
       const node = findPane(tab.root, id);
       if (node) node.cwd = projectDirectory;
-      this.pendingTerminalCommands.queue(id, command ?? "");
+      this.queueAgentCommand(id, command ?? "");
     }
     const first = collectPaneIds(tab.root)[0];
     const pane = first ? findPane(tab.root, first) : null;
@@ -732,7 +736,7 @@ class AppStore {
       const source = findPane(found.tab.root, paneId);
       const cwd = source?.cwd ?? found.ws.defaultCwd;
       if (cwd) sibling.cwd = cwd;
-      if (found.ws.defaultCli) this.pendingTerminalCommands.queue(sibling.id, found.ws.defaultCli);
+      if (found.ws.defaultCli) this.queueAgentCommand(sibling.id, found.ws.defaultCli);
       // The new pane takes focus (outline + keyboard).
       this.focusedPaneId = sibling.id;
       this.paneFocusTarget = sibling.id;
@@ -745,7 +749,7 @@ class AppStore {
   /** Stamp a fresh pane with its workspace defaults (cwd + auto-run command). */
   private applyWorkspaceDefaults(ws: Workspace, node: PaneNode): void {
     if (ws.defaultCwd) node.cwd = ws.defaultCwd;
-    if (ws.defaultCli) this.pendingTerminalCommands.queue(node.id, ws.defaultCli);
+    if (ws.defaultCli) this.queueAgentCommand(node.id, ws.defaultCli);
   }
 
   setWorkspaceDefaultCli(id: string, cli: string | null): void {
@@ -784,7 +788,7 @@ class AppStore {
   /** Split and queue an agent command to run in the new sibling pane. */
   splitPaneWithCommand(paneId: string, dir: "row" | "col", command: string): void {
     const siblingId = this.splitPane(paneId, dir);
-    if (siblingId) this.pendingTerminalCommands.queue(siblingId, command);
+    if (siblingId) this.queueAgentCommand(siblingId, command);
   }
 
   requestClosePane(paneId: string): void {
@@ -916,7 +920,7 @@ class AppStore {
         workspace.root = projectDirectory;
       }
     }
-    this.pendingTerminalCommands.queue(pane.id, command ?? "");
+    this.queueAgentCommand(pane.id, command ?? "");
 
     if (workspace && command?.trim()) {
       workspace.defaultCli = command.trim();
@@ -982,6 +986,56 @@ class AppStore {
 
   takePendingTerminalCommand(paneId: string): string | null {
     return this.pendingTerminalCommands.take(paneId);
+  }
+
+  /**
+   * Queue an agent command to type on the pane's next spawn, and stamp the
+   * pane so a fresh spawn after a restart can rerun it. Callers save.
+   */
+  private queueAgentCommand(paneId: string, command: string): void {
+    this.pendingTerminalCommands.queue(paneId, command);
+    if (this.layout) stampPaneAgentCli(this.layout, paneId, command);
+  }
+
+  /**
+   * The pane's persisted agent CLI for a fresh (non-attached) spawn. Unlike
+   * the pending queue this is not consumed: rerunning the same agent on
+   * every fresh spawn is the point. Null when the pane never ran an agent.
+   */
+  takeRestoreAgent(paneId: string): string | null {
+    if (!this.layout) return null;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    const cli = node?.agentCli?.trim();
+    return cli ? cli : null;
+  }
+
+  /**
+   * Reap backend sessions no layout pane can adopt: keys from panes that no
+   * longer exist (or pre-reattach orphans). Keyless daemon-style sessions
+   * are left alone. Best-effort; failures only log.
+   */
+  private async sweepOrphanedPtys(): Promise<void> {
+    const layout = this.layout;
+    if (!layout) return;
+    try {
+      const sessions = await invoke<PtySessionInfo[]>("pty_list");
+      const placed = new Set<string>();
+      for (const ws of layout.workspaces) {
+        for (const tab of ws.tabs) {
+          for (const id of collectPaneIds(tab.root)) placed.add(id);
+        }
+      }
+      for (const session of sessions) {
+        if (session.key !== null && session.key !== undefined && !placed.has(session.key)) {
+          await invoke("pty_kill", { id: session.id }).catch((error) => {
+            console.error("ubra: orphan reap failed", error);
+          });
+        }
+      }
+    } catch (error) {
+      console.error("ubra: orphan sweep failed", error);
+    }
   }
 
   cycleTab(dir: 1 | -1): void {
