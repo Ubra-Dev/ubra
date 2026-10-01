@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import {
   changeCount,
   dirName,
+  gitSummaryTitle,
+  gitSyncLabel,
   isClean,
   shortWorktreePath,
   statusLabel,
+  summarizeStatus,
   worktreeLabel,
   type GitStatus,
   type GitWorktree,
@@ -38,6 +41,96 @@ describe("changeCount", () => {
     });
     assert.equal(changeCount(status), 4);
     assert.equal(changeCount(statusWith({})), 0);
+  });
+});
+
+describe("summarizeStatus", () => {
+  it("reduces a status to sidebar counts", () => {
+    const summary = summarizeStatus(
+      statusWith({
+        staged: [{ path: "a.txt", status: "A", oldPath: null }],
+        unstaged: [{ path: "b.txt", status: "M", oldPath: null }],
+        untracked: ["c.txt", "d.txt"],
+        ahead: 2,
+        behind: 1,
+        truncated: true,
+      }),
+    );
+    assert.deepEqual(summary, {
+      changed: 4,
+      staged: 1,
+      unstaged: 1,
+      untracked: 2,
+      ahead: 2,
+      behind: 1,
+      truncated: true,
+    });
+  });
+});
+
+describe("gitSummaryTitle", () => {
+  it("says clean without changes", () => {
+    assert.equal(gitSummaryTitle(summarizeStatus(statusWith({}))), "Clean");
+  });
+
+  it("breaks down dirty files with singular grammar", () => {
+    assert.equal(
+      gitSummaryTitle(
+        summarizeStatus(
+          statusWith({ unstaged: [{ path: "b.txt", status: "M", oldPath: null }] }),
+        ),
+      ),
+      "1 changed file (1 unstaged)",
+    );
+    assert.equal(
+      gitSummaryTitle(
+        summarizeStatus(
+          statusWith({
+            staged: [{ path: "a.txt", status: "A", oldPath: null }],
+            unstaged: [{ path: "b.txt", status: "M", oldPath: null }],
+            untracked: ["c.txt"],
+          }),
+        ),
+      ),
+      "3 changed files (1 staged · 1 unstaged · 1 untracked)",
+    );
+  });
+
+  it("marks truncated counts as lower bounds", () => {
+    assert.equal(
+      gitSummaryTitle(
+        summarizeStatus(statusWith({ unstaged: [{ path: "b.txt", status: "M", oldPath: null }], truncated: true })),
+      ),
+      "1+ changed file (1 unstaged)",
+    );
+  });
+
+  it("appends ahead and behind", () => {
+    assert.equal(
+      gitSummaryTitle(summarizeStatus(statusWith({ ahead: 2, behind: 1 }))),
+      "Clean · ↑2 ahead · ↓1 behind",
+    );
+  });
+});
+
+describe("gitSyncLabel", () => {
+  it("is empty when synced", () => {
+    assert.equal(gitSyncLabel(summarizeStatus(statusWith({}))), "");
+  });
+
+  it("shows ahead and behind arrows", () => {
+    assert.equal(
+      gitSyncLabel(summarizeStatus(statusWith({ ahead: 2 }))),
+      "↑2",
+    );
+    assert.equal(
+      gitSyncLabel(summarizeStatus(statusWith({ behind: 1 }))),
+      "↓1",
+    );
+    assert.equal(
+      gitSyncLabel(summarizeStatus(statusWith({ ahead: 2, behind: 1 }))),
+      "↑2 ↓1",
+    );
   });
 });
 

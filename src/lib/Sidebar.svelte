@@ -1,7 +1,7 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
-  import AgentCliIcon from "./AgentCliIcon.svelte";
+  import { gitSummaryTitle, gitSyncLabel } from "./git";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import {
@@ -218,6 +218,8 @@
     {#each store.layout.workspaces as ws (ws.id)}
       {@const rollup = agent.workspaceRollup(ws)}
       {@const branch = workspaceGit.branchFor(ws.id)}
+      {@const git = workspaceGit.summaryFor(ws.id)}
+      {@const sync = git ? gitSyncLabel(git) : ""}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="ws"
@@ -267,6 +269,17 @@
               <span class="ws-branch">
                 <Icon name="git-branch" size={10} />
                 <span class="ws-branch-name">{branch}</span>
+                {#if git && (git.changed > 0 || sync)}
+                  <span class="ws-git-divider" aria-hidden="true">|</span>
+                  {#if git.changed > 0}
+                    <span class="ws-git-dirty" title={gitSummaryTitle(git)}>
+                      <span class="ws-git-dot" aria-hidden="true"></span>{git.changed}{git.truncated ? "+" : ""}
+                    </span>
+                  {/if}
+                  {#if sync}
+                    <span class="ws-git-sync" title={gitSummaryTitle(git)}>{sync}</span>
+                  {/if}
+                {/if}
               </span>
             {/if}
           </button>
@@ -357,7 +370,6 @@
               {#if a.cli}
                 <span class="agent-cli">
                   {a.cli}
-                  <AgentCliIcon cli={a.cli} size={14} />
                 </span>
               {/if}
             </button>
@@ -589,6 +601,30 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ws-git-divider {
+    flex: 0 0 auto;
+    color: var(--text-subtle);
+    opacity: 0.6;
+  }
+  .ws-git-dirty {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 3px;
+    color: var(--attention);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ws-git-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--attention);
+  }
+  .ws-git-sync {
+    flex: 0 0 auto;
     white-space: nowrap;
   }
   .close {

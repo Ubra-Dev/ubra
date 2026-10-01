@@ -113,6 +113,58 @@ export function isClean(status: GitStatus): boolean {
   return changeCount(status) === 0;
 }
 
+/** Compact per-workspace git state for sidebar subtitles. */
+export interface GitSummary {
+  changed: number;
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  ahead: number;
+  behind: number;
+  /** True when the backend capped the lists; counts are lower bounds. */
+  truncated: boolean;
+}
+
+/** Reduce a full status to sidebar counts. */
+export function summarizeStatus(status: GitStatus): GitSummary {
+  return {
+    changed: changeCount(status),
+    staged: status.staged.length,
+    unstaged: status.unstaged.length,
+    untracked: status.untracked.length,
+    ahead: status.ahead,
+    behind: status.behind,
+    truncated: status.truncated,
+  };
+}
+
+/** Compact ahead/behind label for sidebar rows, e.g. "↑2 ↓1". Empty when synced. */
+export function gitSyncLabel(summary: GitSummary): string {
+  const parts: string[] = [];
+  if (summary.ahead > 0) parts.push(`↑${summary.ahead}`);
+  if (summary.behind > 0) parts.push(`↓${summary.behind}`);
+  return parts.join(" ");
+}
+
+/** Tooltip for the sidebar summary: breakdown plus ahead/behind. */
+export function gitSummaryTitle(summary: GitSummary): string {
+  const parts: string[] = [];
+  if (summary.changed === 0) {
+    parts.push("Clean");
+  } else {
+    const bits: string[] = [];
+    if (summary.staged > 0) bits.push(`${summary.staged} staged`);
+    if (summary.unstaged > 0) bits.push(`${summary.unstaged} unstaged`);
+    if (summary.untracked > 0) bits.push(`${summary.untracked} untracked`);
+    const plus = summary.truncated ? "+" : "";
+    const files = summary.changed === 1 ? "file" : "files";
+    parts.push(`${summary.changed}${plus} changed ${files} (${bits.join(" · ")})`);
+  }
+  if (summary.ahead > 0) parts.push(`↑${summary.ahead} ahead`);
+  if (summary.behind > 0) parts.push(`↓${summary.behind} behind`);
+  return parts.join(" · ");
+}
+
 /** Human label for a porcelain status letter. */
 export function statusLabel(status: string): string {
   switch (status) {
