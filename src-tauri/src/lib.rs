@@ -14,6 +14,7 @@ pub mod sound;
 pub mod telemetry;
 mod terminal_state;
 pub mod usage;
+mod window_geometry;
 
 use agent_status::{AgentStatusService, AgentUpdate};
 use layout_store::{data_dir, load_layout_from, save_layout_to};
@@ -22,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -363,6 +365,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Err(error) = window_geometry::keep_main_window_on_screen(&webview.window()) {
+                    eprintln!("ubra: could not normalize main window bounds: {error}");
+                }
+            }
+        })
         .setup(|app| {
             let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
             app.manage(manager.clone());
