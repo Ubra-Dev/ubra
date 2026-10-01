@@ -401,6 +401,14 @@
     store.setAutoLaunchAgent((e.target as HTMLInputElement).checked);
   }
 
+  function onTrayTitleChange(e: Event): void {
+    store.setTrayTitleEnabled((e.target as HTMLInputElement).checked);
+  }
+
+  function onTrayMenuListChange(e: Event): void {
+    store.setTrayMenuListEnabled((e.target as HTMLInputElement).checked);
+  }
+
   function quitActionLabel(): string {
     if (store.quitAction === "keep") return "Always quit and keep running";
     if (store.quitAction === "stop") return "Always stop agents and quit";
@@ -861,6 +869,38 @@
               <div class="hint">
                 When on, new panes, tabs, and workspaces launch the default
                 agent automatically.
+              </div>
+            </div>
+            <div class="group">
+              <h3 class="group-label">Menu bar</h3>
+              <div class="card">
+                <label class="row switch">
+                  <span class="label">Show agent count in menu bar</span>
+                  <input
+                    type="checkbox"
+                    checked={store.trayTitleEnabled}
+                    onchange={onTrayTitleChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row switch">
+                  <span class="label">Show agents in tray menu</span>
+                  <input
+                    type="checkbox"
+                    checked={store.trayMenuListEnabled}
+                    onchange={onTrayMenuListChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="hint">
+                The tray menu lists running agents; picking one shows the
+                window and focuses its pane. The count appears next to the
+                tray icon on macOS and Linux.
               </div>
             </div>
             <div class="group">

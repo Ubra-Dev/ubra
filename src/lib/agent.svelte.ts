@@ -116,6 +116,12 @@ class AgentStore {
     this.foreground = await win.isFocused();
     // Subscribe before fetching: startup snapshots cannot overwrite newer events.
     await listen<AgentUpdate>("agent-state-update", (event) => this.onUpdate(event.payload));
+    await listen<string>("tray-focus-pane", (event) => {
+      // The backend already showed the window; ignore ids from a stale menu.
+      if (store.layout && findTabByPane(store.layout, event.payload)) {
+        this.jumpToPane(event.payload);
+      }
+    });
     document.addEventListener("visibilitychange", () => this.acknowledgeFocused());
     const snapshot = await invoke<AgentUpdate>("agent_snapshot");
     this.onUpdate({ ...snapshot, transitions: [] });

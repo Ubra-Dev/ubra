@@ -16,6 +16,7 @@ pub mod screen_rules;
 pub mod sound;
 pub mod telemetry;
 mod terminal_state;
+pub mod tray;
 pub mod usage;
 mod window_geometry;
 
@@ -27,13 +28,12 @@ use pty_manager::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
+use tray::{build_tray, show_main, TrayState};
 
 /// Live daemon connection owned by the supervisor thread. Commands fail
 /// fast while disconnected; the frontend remounts terminals on reconnect.
@@ -455,30 +455,12 @@ fn quit_app(app: AppHandle) -> Result<(), String> {
 /// In local mode only the in-process panes stop; a stray daemon is untouched.
 #[tauri::command]
 fn quit_app_and_stop_agents(app: AppHandle) -> Result<(), String> {
-    stop_daemon(&app);
+    tray::stop_daemon(&app);
     app.state::<ShellState>()
         .quitting
         .store(true, Ordering::SeqCst);
     app.exit(0);
     Ok(())
-}
-
-fn stop_daemon(app: &AppHandle) {
-    // Local panes die with us at exit; never touch a stray daemon here.
-    if app.state::<PtyBackend>().is_local() {
-        return;
-    }
-    let (tx, _rx) = std::sync::mpsc::sync_channel(8);
-    match DaemonClient::connect(&daemon_state_dir(), tx) {
-        Ok(client) => {
-            if let Err(error) = client.shutdown_daemon() {
-                eprintln!("ubra: daemon shutdown failed: {error}");
-            }
-        }
-        Err(error) => {
-            eprintln!("ubra: no daemon to stop: {error}");
-        }
-    }
 }
 
 #[tauri::command]
@@ -572,79 +554,6 @@ struct ShellState {
     close_warning_pending: AtomicBool,
 }
 
-fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    #[cfg(debug_assertions)]
-    if std::env::var_os("UBRA_DISABLE_TRAY").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return Err(std::io::Error::other("tray disabled for development smoke").into());
-    }
-    let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
-    let quit_stop =
-        MenuItem::with_id(app, "quit-stop", "Stop Agents and Quit", true, None::<&str>)?;
-    let menu = Menu::new(app)?;
-    menu.append(&show)?;
-    menu.append(&quit)?;
-    menu.append(&quit_stop)?;
-
-    let mut builder = TrayIconBuilder::new()
-        .menu(&menu)
-        .tooltip("Ubra")
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => show_main(app),
-            "quit" => {
-                // Route through the frontend so tray Quit shares the
-                // confirmation dialog (and remembered choice) with menus.
-                show_main(app);
-                let _ = app.emit("quit-requested", ());
-            }
-            "quit-stop" => {
-                stop_daemon(app);
-                app.state::<ShellState>()
-                    .quitting
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    match window.is_visible() {
-                        Ok(true) => {
-                            let _ = window.hide();
-                        }
-                        _ => show_main(app),
-                    }
-                }
-            }
-        });
-
-    match app.default_window_icon() {
-        Some(icon) => {
-            builder = builder.icon(icon.clone());
-        }
-        None => {
-            eprintln!("ubra: no default window icon available; tray icon will be blank");
-        }
-    }
-    builder.build(app)?;
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -692,6 +601,7 @@ pub fn run() {
                 supervise_daemon(app.handle().clone(), daemon_state_dir(), rules_dir);
             }
             app.manage(ShellState::default());
+            app.manage(TrayState::default());
             app.manage(usage::UsageCache::new());
             match data_dir(app.handle()) {
                 Ok(dir) => {
@@ -820,6 +730,7 @@ pub fn run() {
             notification_permission,
             request_notification_permission,
             play_sound,
+            tray::tray_update,
             app_info,
             home_dir
         ])

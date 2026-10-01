@@ -140,6 +140,10 @@ class AppStore {
   soundEnabled = $state<boolean>(true);
   /** Global auto-launch for implicit agent starts; explicit picks bypass it. */
   autoLaunchAgent = $state<boolean>(false);
+  /** Menu-bar agent count next to the tray icon (macOS/Linux; no-op on Windows). */
+  trayTitleEnabled = $state<boolean>(true);
+  /** Live agent list in the tray menu; when off the menu stays static. */
+  trayMenuListEnabled = $state<boolean>(true);
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
   settingsOpen = $state(false);
@@ -253,6 +257,10 @@ class AppStore {
       if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
       const savedAutoLaunch = window.localStorage.getItem("ubra.autoLaunchAgent");
       if (savedAutoLaunch !== null) this.autoLaunchAgent = savedAutoLaunch === "true";
+      const savedTrayTitle = window.localStorage.getItem("ubra.trayTitle");
+      if (savedTrayTitle !== null) this.trayTitleEnabled = savedTrayTitle === "true";
+      const savedTrayMenuList = window.localStorage.getItem("ubra.trayMenuList");
+      if (savedTrayMenuList !== null) this.trayMenuListEnabled = savedTrayMenuList === "true";
       this.quitAction = parseQuitAction(window.localStorage.getItem(QUIT_ACTION_KEY));
     } catch {
       // The app can still start with its defaults if storage is unavailable.
@@ -573,6 +581,16 @@ class AppStore {
   setAutoLaunchAgent(enabled: boolean): void {
     this.autoLaunchAgent = enabled;
     this.savePref("ubra.autoLaunchAgent", String(enabled));
+  }
+
+  setTrayTitleEnabled(enabled: boolean): void {
+    this.trayTitleEnabled = enabled;
+    this.savePref("ubra.trayTitle", String(enabled));
+  }
+
+  setTrayMenuListEnabled(enabled: boolean): void {
+    this.trayMenuListEnabled = enabled;
+    this.savePref("ubra.trayMenuList", String(enabled));
   }
 
   setAgentMuted(cli: string, muted: boolean): void {

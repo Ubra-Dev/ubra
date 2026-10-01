@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { agent } from "$lib/agent.svelte";
+  import { buildTrayPayload, createTraySync } from "$lib/traySync";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import QuitDialog from "$lib/QuitDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
@@ -42,6 +44,24 @@
   // Keep the native titlebar on the app theme's scheme (boot + every pick).
   $effect(() => {
     void syncWindowTheme(store.theme.ui.colorScheme);
+  });
+
+  const traySync = createTraySync((payload) => {
+    invoke("tray_update", { summary: payload }).catch((error: unknown) => {
+      console.error("ubra: tray update failed", error);
+    });
+  });
+
+  // Push agent status to the menu-bar/tray icon (debounced, deduped).
+  $effect(() => {
+    if (!store.loaded) return;
+    traySync.queue(
+      buildTrayPayload(agent.activeAgents(), {
+        daemonConnected: store.daemonConnected,
+        showTitle: store.trayTitleEnabled,
+        showAgents: store.trayMenuListEnabled,
+      }),
+    );
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
