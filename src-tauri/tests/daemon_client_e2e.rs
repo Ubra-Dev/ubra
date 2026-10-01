@@ -90,9 +90,24 @@ fn ensure_spawns_detached_daemon_and_gui_roundtrips() {
 
     client.write(pane, "echo marker-bridge-9\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut transcript = String::new();
+    let mut handshake_answered = false;
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(DaemonEvent::PtyOutput { data, .. }) if data.contains("marker-bridge-9") => break,
+            Ok(DaemonEvent::PtyOutput { data, .. }) => {
+                // ConPTY startup query (Windows only): answer it or the pane
+                // withholds all further output. In production xterm.js answers;
+                // here the test plays the terminal itself. Silent no-op on
+                // Unix, where the query never arrives.
+                transcript.push_str(&data);
+                if !handshake_answered && transcript.contains("\u{1b}[6n") {
+                    handshake_answered = true;
+                    let _ = client.write(pane, "\u{1b}[1;1R");
+                }
+                if data.contains("marker-bridge-9") {
+                    break;
+                }
+            }
             Ok(_) => continue,
             Err(_) => panic!("timed out waiting for daemon output event"),
         }
