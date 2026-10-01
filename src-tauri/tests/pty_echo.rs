@@ -646,10 +646,22 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     );
     manager.kill(parent).unwrap();
     let mut processes = sysinfo::System::new();
-    processes.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    assert!(processes
-        .process(sysinfo::Pid::from_u32(child as u32))
-        .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie));
+    let child_pid = sysinfo::Pid::from_u32(child as u32);
+    let termination_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        processes.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        if processes
+            .process(child_pid)
+            .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < termination_deadline,
+            "child process {child} remained alive after closing its pane"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let warmup_deadline = Instant::now() + Duration::from_secs(2);
     loop {
