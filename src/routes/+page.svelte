@@ -6,6 +6,7 @@
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import QuitDialog from "$lib/QuitDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
+  import FleetWatch from "$lib/FleetWatch.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
   import { matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import NativeMenus from "$lib/NativeMenus.svelte";
@@ -151,6 +152,7 @@
   <ConfirmDialog />
   <QuitDialog />
   <Toasts />
+  <FleetWatch />
 </div>
 
 <style>

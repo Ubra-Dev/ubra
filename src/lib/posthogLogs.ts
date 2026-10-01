@@ -24,4 +24,31 @@ export const posthogLogs = {
       posthog.logger.info("onboarding_skipped", { component: "onboarding" });
     }
   },
+
+  fleetShown(detectedClis: number): void {
+    if (canExportLogs()) {
+      posthog.logger.info("fleet_shown", {
+        component: "onboarding",
+        detectedClis,
+      });
+    }
+  },
+
+  fleetLaunched(cliCount: number): void {
+    if (canExportLogs()) {
+      posthog.logger.info("fleet_launched", {
+        component: "onboarding",
+        cliCount,
+      });
+    }
+  },
+
+  fleetFirstCompleted(seconds: number): void {
+    if (canExportLogs()) {
+      posthog.logger.info("fleet_first_completed", {
+        component: "onboarding",
+        seconds,
+      });
+    }
+  },
 };

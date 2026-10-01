@@ -102,6 +102,50 @@ export function gridTab(name = "Tab 1"): Tab {
   };
 }
 
+/**
+ * First-run fleet tab for 1-3 panes (counts clamp into range). Two panes
+ * sit side by side; three give the primary CLI the left half and stack
+ * the other two on the right. Pane order from `collectPaneIds` matches
+ * fleet priority: primary CLI first.
+ */
+export function fleetTab(count: number, name = "Tab 1"): Tab {
+  const panes = Math.min(Math.max(Math.floor(count) || 1, 1), 3);
+  if (panes === 1) return defaultTab(name);
+  if (panes === 2) {
+    return {
+      id: newId("tab"),
+      name,
+      root: {
+        kind: "split",
+        id: newId("split"),
+        dir: "row",
+        sizes: [0.5, 0.5],
+        first: defaultPane(),
+        second: defaultPane(),
+      },
+    };
+  }
+  return {
+    id: newId("tab"),
+    name,
+    root: {
+      kind: "split",
+      id: newId("split"),
+      dir: "row",
+      sizes: [0.5, 0.5],
+      first: defaultPane(),
+      second: {
+        kind: "split",
+        id: newId("split"),
+        dir: "col",
+        sizes: [0.5, 0.5],
+        first: defaultPane(),
+        second: defaultPane(),
+      },
+    },
+  };
+}
+
 export function defaultWorkspace(name = "Workspace 1"): Workspace {
   const tab = defaultTab();
   return { id: newId("ws"), name, tabs: [tab], activeTabId: tab.id };

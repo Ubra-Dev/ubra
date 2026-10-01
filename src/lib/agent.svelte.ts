@@ -142,6 +142,10 @@ class AgentStore {
     const live = Object.entries(this.liveToNode).find(([, node]) => node === nodeId)?.[0];
     return live === undefined ? undefined : Number(live);
   }
+  /** Live PTY id behind a pane node, for fleet prompt delivery. */
+  liveIdForNode(nodeId: string): number | undefined {
+    return this.liveForNode(nodeId);
+  }
   paneStatus(nodeId: string): Rollup {
     const live = this.liveForNode(nodeId);
     return effectiveAgentStatus(this.paneState(nodeId), live === undefined ? undefined : this.model.unread[live]);

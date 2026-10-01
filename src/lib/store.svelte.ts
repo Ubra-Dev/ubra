@@ -20,6 +20,7 @@ import {
   findPane,
   findTabByPane,
   findWorkspaceByRoot,
+  fleetTab,
   gridTab,
   moveWorkspace,
   preferredAgentCli as pickPreferredAgentCli,
@@ -47,6 +48,7 @@ import {
   type QuitAction,
 } from "./quitConfirm";
 import { PendingCommands } from "./pendingCommands";
+import { FLEET_MAX_PANES } from "./fleet";
 import type { PtySessionInfo } from "./terminalLifecycle";
 import { toasts } from "./toasts.svelte.ts";
 import { StartupCommands } from "./startupCommands";
@@ -184,6 +186,10 @@ class AppStore {
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
+  /** Fleet starter prompts awaiting CLI boot; memory-only, never serialized. */
+  private fleetPrompts = new PendingCommands();
+  /** Armed fleet launch watched for prompt delivery + first completion. */
+  fleet = $state<{ launchedAt: number; nodeIds: string[] } | null>(null);
 
   get theme() {
     return THEMES[this.themeId];
@@ -832,6 +838,7 @@ class AppStore {
     if (closing) {
       for (const tab of closing.tabs) {
         this.pendingTerminalCommands.dropMany(collectPaneIds(tab.root));
+        this.fleetPrompts.dropMany(collectPaneIds(tab.root));
       }
     }
     this.layout.workspaces = this.layout.workspaces.filter((w) => w.id !== id);
@@ -873,6 +880,7 @@ class AppStore {
       ws.tabs.length <= 1 ? ws.tabs : ws.tabs.filter((t) => t.id === id);
     for (const tab of closing) {
       this.pendingTerminalCommands.dropMany(collectPaneIds(tab.root));
+      this.fleetPrompts.dropMany(collectPaneIds(tab.root));
     }
     if (ws.tabs.length <= 1) {
       ws.tabs = [defaultTab()];
@@ -986,6 +994,7 @@ class AppStore {
 
   private doClosePane(paneId: string): void {
     this.pendingTerminalCommands.drop(paneId);
+    this.fleetPrompts.drop(paneId);
     if (!this.layout) return;
     const found = findTabByPane(this.layout, paneId);
     if (found && closePaneInTab(found.tab, paneId)) {
@@ -1183,6 +1192,51 @@ class AppStore {
     return paneId;
   }
 
+  /**
+   * First-run fleet launch: one workspace tab with a distinct agent CLI
+   * per pane, every pane in the project folder, and the starter prompt
+   * queued for delivery once each CLI boots. The primary CLI takes the
+   * first pane and becomes the workspace default. Returns the fleet pane
+   * ids in priority order, or null when there is no layout to build in.
+   */
+  completeOnboardingFleet(
+    projectDirectory: string,
+    commands: string[],
+    prompt: string,
+  ): string[] | null {
+    if (!this.layout) return null;
+    if (this.layout.workspaces.length > 0 && !this.firstRun) return null;
+    const planned = commands
+      .map((command) => command.trim())
+      .filter(Boolean)
+      .slice(0, FLEET_MAX_PANES);
+    if (planned.length === 0) return null;
+    const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
+    const tab = fleetTab(planned.length);
+    workspace.tabs = [tab];
+    workspace.activeTabId = tab.id;
+    workspace.defaultCwd = projectDirectory;
+    workspace.root = projectDirectory;
+    this.layout.workspaces.push(workspace);
+    this.layout.activeWorkspaceId = workspace.id;
+    const ids = collectPaneIds(tab.root);
+    const starter = prompt.trim();
+    ids.forEach((id, index) => {
+      const node = findPane(tab.root, id);
+      if (node) node.cwd = projectDirectory;
+      this.queueAgentCommand(id, planned[index] ?? planned[0]);
+      if (starter) this.fleetPrompts.queue(id, starter);
+    });
+    workspace.defaultCli = planned[0];
+    this.lastUsedAgentCli = planned[0];
+    this.savePref("ubra.lastAgentCli", planned[0]);
+    this.paneFocusTarget = ids[0];
+    this.fleet = { launchedAt: Date.now(), nodeIds: [...ids] };
+    this.firstRun = false;
+    this.saveSoon(true);
+    return [...ids];
+  }
+
   async skipOnboarding(): Promise<void> {
     if (this.firstRun) {
       this.firstRun = false;
@@ -1215,6 +1269,16 @@ class AppStore {
 
   takePendingTerminalCommand(paneId: string): string | null {
     return this.pendingTerminalCommands.take(paneId);
+  }
+
+  /** Take the queued fleet starter prompt for a pane, clearing it. */
+  takeFleetPrompt(paneId: string): string | null {
+    return this.fleetPrompts.take(paneId);
+  }
+
+  /** Disarm the fleet watch after the payoff (or when it fizzles). */
+  disarmFleet(): void {
+    this.fleet = null;
   }
 
   /**

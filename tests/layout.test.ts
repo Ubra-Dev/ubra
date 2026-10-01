@@ -20,6 +20,7 @@ import {
   findSplit,
   findTabByPane,
   findWorkspaceByRoot,
+  fleetTab,
   gridTab,
   isActiveAgentState,
   moveWorkspace,
@@ -104,6 +105,54 @@ describe("gridTab", () => {
   it("preserves the grid when saving and restoring a layout", () => {
     const layout = defaultLayout();
     const tab = gridTab("Grid");
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
+  });
+});
+
+describe("fleetTab", () => {
+  it("builds a single pane for one CLI", () => {
+    const tab = fleetTab(1);
+    assert.equal(tab.root.kind, "pane");
+    assert.equal(collectPaneIds(tab.root).length, 1);
+  });
+
+  it("lays two panes side by side", () => {
+    const tab = fleetTab(2);
+    assert.equal(countPanes(tab.root), 2);
+    assert.deepEqual(
+      computeLayout(tab.root).panes.map((p) => p.rect),
+      [
+        [0, 0, 0.5, 1],
+        [0.5, 0, 0.5, 1],
+      ],
+    );
+  });
+
+  it("gives the primary CLI the left half and stacks the other two", () => {
+    const tab = fleetTab(3);
+    assert.equal(countPanes(tab.root), 3);
+    assert.equal(new Set(collectPaneIds(tab.root)).size, 3);
+    assert.deepEqual(
+      computeLayout(tab.root).panes.map((p) => p.rect),
+      [
+        [0, 0, 0.5, 1],
+        [0.5, 0, 0.5, 0.5],
+        [0.5, 0.5, 0.5, 0.5],
+      ],
+    );
+  });
+
+  it("clamps counts into 1..3", () => {
+    assert.equal(countPanes(fleetTab(0).root), 1);
+    assert.equal(countPanes(fleetTab(-4).root), 1);
+    assert.equal(countPanes(fleetTab(9).root), 3);
+  });
+
+  it("preserves the fleet tab when saving and restoring a layout", () => {
+    const layout = defaultLayout();
+    const tab = fleetTab(3, "Fleet");
     layout.workspaces[0].tabs = [tab];
     layout.workspaces[0].activeTabId = tab.id;
     assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);

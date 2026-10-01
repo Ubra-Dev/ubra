@@ -36,6 +36,9 @@ Two lanes share one PostHog project and one consent record:
 |---|---|---|---|
 | `application_booted` | posthog-js log | `component` | identified |
 | `onboarding_completed` / `onboarding_skipped` | posthog-js log | `component` | identified |
+| `fleet_shown` | posthog-js log | `component`, `detectedClis` | identified |
+| `fleet_launched` | posthog-js log | `component`, `cliCount` | identified |
+| `fleet_first_completed` | posthog-js log | `component`, `seconds` to first fleet done | identified |
 | JS `$exception` | posthog-js exception capture | SDK standard | identified |
 | `git_repository_initialized`, `git_commit_created`, `git_pull_completed`, `git_push_completed`, `git_branch_switched` | Source Control | none | identified |
 | `git_changes_staged`, `git_changes_unstaged` | Source Control | `scope` (`single` or `all`) | identified |
@@ -98,7 +101,8 @@ or a proxy).
 
 - **Crash-spike alert:** alert on `$exception` volume surge after releases.
 - **Dashboards:** funnel `application_booted` → `onboarding_completed`
-  → first `agent_cli_started`; agent mix by `cli`; end outcomes.
+  → first `agent_cli_started`; onboarding fleet funnel `fleet_shown` →
+  `fleet_launched` → `fleet_first_completed`; agent mix by `cli`; end outcomes.
 - **Annotations:** mark each release.
 - **Follow-ups:** release debug-symbol uploads (release builds are
   stripped, so production Rust frames need symbols); Sentry if

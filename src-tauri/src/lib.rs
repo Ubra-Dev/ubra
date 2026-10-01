@@ -349,6 +349,11 @@ fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
 }
 
 #[tauri::command]
+fn supported_agent_clis() -> Vec<agent_clis::SupportedCli> {
+    agent_clis::supported()
+}
+
+#[tauri::command]
 fn supported_usage_clis() -> Vec<usage::SupportedCli> {
     usage::supported_clis()
 }
@@ -711,6 +716,7 @@ pub fn run() {
             pty_backend,
             agent_snapshot,
             detect_agent_clis,
+            supported_agent_clis,
             supported_usage_clis,
             cli_usage,
             git_branch,
