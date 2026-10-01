@@ -154,22 +154,38 @@ pub fn open_private_file(path: &Path, append: bool, create: bool) -> io::Result<
     if let Some(parent) = path.parent() {
         secure_state_dir(parent)?;
     }
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(append || create)
-        .append(append)
-        .create(create);
-    #[cfg(unix)]
-    options
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     #[cfg(windows)]
-    {
+    let file = {
         use std::os::windows::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(append || create).append(append);
         options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options.open(path)?;
+        match options.open(path) {
+            Ok(file) => file,
+            Err(e) if create && e.kind() == io::ErrorKind::NotFound => {
+                match windows_security::create_private_file(path) {
+                    Ok(file) => file,
+                    // Lost a creation race: the winner's file is there now.
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => options.open(path)?,
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    #[cfg(unix)]
+    let file = {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(append || create)
+            .append(append)
+            .create(create);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.open(path)?
+    };
     validate_private(&file, false)?;
     Ok(file)
 }
@@ -282,14 +298,18 @@ fn write_private_file(path: &Path, contents: &str) -> io::Result<()> {
         secure_state_dir(parent)?;
     }
     let tmp = path.with_file_name(format!(".runtime-{}.tmp", new_auth_token()?));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     let result = (|| {
-        let mut file = options.open(&tmp)?;
+        #[cfg(windows)]
+        let mut file = windows_security::create_private_file(&tmp)?;
+        #[cfg(unix)]
+        let mut file = {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            options.open(&tmp)?
+        };
         validate_private(&file, false)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
@@ -521,9 +541,15 @@ pub fn acquire_startup_lock(state_dir: &Path) -> io::Result<StartupLock> {
 mod windows_security {
     use super::*;
     use std::ffi::c_void;
-    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt, io::AsRawHandle};
+    use std::os::windows::{
+        ffi::OsStrExt,
+        fs::MetadataExt,
+        io::{AsRawHandle, FromRawHandle},
+    };
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         GetSecurityInfo, SE_FILE_OBJECT,
@@ -534,7 +560,8 @@ mod windows_security {
         SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateDirectoryW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -612,6 +639,63 @@ mod windows_security {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
+        }
+    }
+
+    /// Create a runtime file with an explicit current-user owner and DACL.
+    /// OpenOptions cannot pass a security descriptor, and files created
+    /// without one take the default owner — the Administrators group for
+    /// admin users — which validate() then rejects. GENERIC_READ rides
+    /// along because validate() queries owner/DACL through this handle,
+    /// and a write-only handle cannot observe the ACL.
+    pub(super) fn create_private_file(path: &Path) -> io::Result<File> {
+        unsafe {
+            let token = user_token()?;
+            let sid = (*(token.as_ptr().cast::<TOKEN_USER>())).User.Sid;
+            let mut text = null_mut();
+            if ConvertSidToStringSidW(sid, &mut text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _text = LocalAllocation(text.cast());
+            let mut length = 0;
+            while *text.add(length) != 0 {
+                length += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+            let sddl: Vec<u16> = format!("O:{sid}D:P(A;;FA;;;{sid})")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let _descriptor = LocalAllocation(descriptor);
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let handle = CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(File::from_raw_handle(handle))
         }
     }
 

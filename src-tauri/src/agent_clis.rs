@@ -122,7 +122,9 @@ fn scan_path(
 }
 
 fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
+    // metadata() follows symlinks: version-manager shims and `sh` itself
+    // are links, and rejecting them blinds detection on Ubuntu and friends.
+    let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
     if !meta.is_file() {
@@ -313,6 +315,18 @@ mod tests {
         let found = parse_probe_output(stdout.as_bytes(), &["codex", "nope", "claude"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found.get("codex"), Some(&target));
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_follows_symlinks_to_executables() {
+        let bin = temp_bin("link");
+        let target = write_bin(&bin, "real", true);
+        let link = bin.join("codex");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let found = scan_path(&["codex"], &join_path(std::slice::from_ref(&bin)), &[]);
+        assert_eq!(found.get("codex"), Some(&link));
         let _ = std::fs::remove_dir_all(&bin);
     }
 
