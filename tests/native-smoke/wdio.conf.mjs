@@ -7,7 +7,9 @@ export const config = {
   reporters: ["spec"],
   services: [["@wdio/tauri-service", {
     appBinaryPath: process.env.APP_BINARY,
-    driverProvider: "embedded",
+    driverProvider: process.platform === "win32" ? "external" : "embedded",
+    autoInstallTauriDriver: process.platform === "win32",
+    autoDownloadEdgeDriver: process.platform === "win32",
     embeddedPort: 4445,
     appArgs: [],
   }]],

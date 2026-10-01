@@ -286,6 +286,10 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Setup Rust for Windows WebDriver
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -351,11 +355,15 @@ jobs:
         working-directory: tests/native-smoke
         env:
           TAURI_WEBDRIVER_PORT: 4445
+          UBRA_NATIVE_SMOKE: "1"
 
       - name: Run packaged app smoke suite (Linux WebDriver configuration)
         if: runner.os == 'Linux'
         run: xvfb-run -a dbus-run-session -- env TAURI_WEBDRIVER_PORT=4445 npm run smoke
         working-directory: tests/native-smoke
+        env:
+          UBRA_NATIVE_SMOKE: "1"
+          TAURI_WEBDRIVER_PORT: 4445
 
       - name: Record native smoke evidence
         if: always()

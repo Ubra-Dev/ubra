@@ -19,6 +19,10 @@ behavior, and updater installation still need manual QA. The `release`
 environment can additionally require maintainer approval. WebDriver dependencies
 are isolated under `tests/native-smoke` so they do not enter the shipped app's
 dependency graph or its existing application dependency audit.
+The packaged smoke suite uses the embedded WebDriver on macOS and Linux, and
+Tauri's external driver with a matching EdgeDriver on Windows. The embedded
+plugin is excluded from Windows builds because its current WebView2 bindings
+do not match the versions used by Tauri on Windows.
 
 ## Release signing and updates (one-time maintainer setup)
 
