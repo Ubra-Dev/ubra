@@ -15,8 +15,12 @@
       {
         "label": "main",
         "title": "Ubra",
-        "width": 1484,
-        "height": 946,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
         "theme": "Dark",
         "transparent": false
       }
