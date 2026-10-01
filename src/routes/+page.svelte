@@ -18,6 +18,7 @@
   import { syncTelemetryToConsent } from "$lib/telemetrySync";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
+  import { syncWindowTheme } from "$lib/windowTheme";
   import "$lib/uiFontFaces";
   import { uiFontStyle } from "$lib/uiFonts";
   import { uiZoomStyle } from "$lib/uiScale";
@@ -29,6 +30,11 @@
     agent.start();
     workspaceGit.start();
     void agentClis.ensure();
+  });
+
+  // Keep the native titlebar on the app theme's scheme (boot + every pick).
+  $effect(() => {
+    void syncWindowTheme(store.theme.ui.colorScheme);
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
