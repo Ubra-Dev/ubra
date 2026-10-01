@@ -1,11 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
-  import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import { paneDisplayTitle, type PaneNode } from "./layout";
@@ -120,6 +120,7 @@
   }
   const agentLabel = $derived(agent.paneAgentLabel(node.id));
   const agentStatus = $derived(agent.paneStatus(node.id));
+  const agentCli = $derived(agent.paneCli(node.id));
 
   // F2 rename: the matching pane takes the request and clears it.
   $effect(() => {
@@ -260,8 +261,16 @@
       </span>
     {/if}
     {#if agentLabel}
-      <span class={"agent " + agentStatus} title={agent.paneStatusTitle(node.id)}>
-        {agentLabel} · {agentStatusLabel(agentStatus)}
+      <span class="agent" title={agent.paneStatusTitle(node.id)}>
+        {#if agentStatus === "done"}
+          <span class="done-check"><Icon name="check" size={10} /></span>
+        {:else}
+          <span class={"dot " + agentStatus}></span>
+        {/if}
+        {#if agentCli}
+          <AgentCliIcon cli={agentCli} label={agentLabel} size={14} />
+        {/if}
+        <span class="agent-label">{agentLabel}</span>
       </span>
     {/if}
     {#if zoomed}
@@ -419,29 +428,45 @@
     padding: 1px 6px;
   }
   .agent {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: 11px;
-    color: var(--agent-text);
-    background: var(--agent-bg);
-    border: none;
-    padding: 1px 8px;
-    border-radius: 8px;
+    color: var(--text-subtle);
     white-space: nowrap;
-    cursor: pointer;
   }
-  .agent.blocked {
-    color: var(--error-text);
-    background: var(--error-bg);
+  .agent-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .agent.attention {
-    color: var(--attention);
-    background: var(--attention-bg);
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
   }
-  .agent.done {
+  .dot.working {
+    background: var(--success);
+  }
+  .dot.blocked {
+    background: var(--error-text);
+  }
+  .dot.unknown {
+    background: var(--text-subtle);
+  }
+  .dot.attention {
+    background: var(--attention);
+  }
+  .dot.idle {
+    background: transparent;
+    border: 1px solid var(--text-subtle);
+    box-sizing: border-box;
+  }
+  .done-check {
+    display: inline-flex;
     color: var(--success);
-  }
-  .agent.idle,
-  .agent.unknown {
-    color: var(--text-muted);
+    flex: 0 0 auto;
   }
   .zoomed {
     border: 0;

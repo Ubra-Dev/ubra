@@ -129,6 +129,9 @@ class AgentStore {
   paneAgentLabel(nodeId: string): string | undefined {
     return this.paneState(nodeId)?.agent ?? this.lastAgent[nodeId]?.agent;
   }
+  paneCli(nodeId: string): string | undefined {
+    return this.paneState(nodeId)?.cli ?? this.lastAgent[nodeId]?.cli;
+  }
   private liveForNode(nodeId: string): number | undefined {
     const live = Object.entries(this.liveToNode).find(([, node]) => node === nodeId)?.[0];
     return live === undefined ? undefined : Number(live);
