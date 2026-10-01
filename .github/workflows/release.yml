@@ -139,12 +139,16 @@ jobs:
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
 
       - name: Verify App Store Connect API credentials
-        if: runner.os == 'macOS' && secrets.APPLE_API_KEY_P8 != ''
+        if: runner.os == 'macOS'
         env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         shell: bash
         run: |
+          if [ -z "$APPLE_API_KEY_P8" ]; then
+            exit 0
+          fi
           xcrun notarytool history \
             --key "$APPLE_API_KEY_PATH" \
             --key-id "$APPLE_API_KEY" \
