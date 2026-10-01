@@ -259,3 +259,67 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Regenerate Casks/ubra.rb in Ubra-Dev/homebrew-tap from the published
+  # release DMGs. Skips (without failing the release) when the tap token
+  # is not configured; creates the cask on first run, updates it after.
+  tap-update:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check tap token
+        id: token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.token.outputs.skip != 'true'
+
+      - name: Setup Node
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Download macOS DMGs
+        if: steps.token.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dmg
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.dmg' --dir dmg
+          ls dmg
+
+      - name: Render cask
+        if: steps.token.outputs.skip != 'true'
+        run: >
+          node scripts/update-cask.mjs --tag "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY" --dir dmg --out /tmp/ubra.rb
+
+      - name: Push to tap
+        if: steps.token.outputs.skip != 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          rm -rf tap
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/Ubra-Dev/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp /tmp/ubra.rb tap/Casks/ubra.rb
+          cd tap
+          git config user.name "ubra-release"
+          git config user.email "release@getubra.com"
+          git add Casks/ubra.rb
+          if git diff --cached --quiet; then
+            echo "Cask already current."
+            exit 0
+          fi
+          git commit -m "ubra ${GITHUB_REF_NAME#v}"
+          git push -u origin HEAD

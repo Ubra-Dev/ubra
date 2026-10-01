@@ -40,7 +40,13 @@ and [xterm.js](https://xtermjs.org/) for terminal rendering.
 
 ## Install
 
-Download the latest bundle for your OS from
+On macOS, via Homebrew:
+
+```sh
+brew install --cask ubra-dev/tap/ubra
+```
+
+Or download the latest bundle for your OS from
 [Releases](https://github.com/Ubra-Dev/ubra/releases).
 
 Or build from source:
