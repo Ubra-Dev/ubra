@@ -351,6 +351,7 @@
         focusToken={focusToken}
         findToken={findToken}
         scrollback={store.termScrollback}
+        gpuEnabled={store.termGpu}
         onExit={() => { exited = true; terminalCommands.changed(); }}
         onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}

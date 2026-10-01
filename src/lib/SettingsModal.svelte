@@ -397,6 +397,10 @@
     store.setSoundEnabled((e.target as HTMLInputElement).checked);
   }
 
+  function onTermGpuChange(e: Event): void {
+    store.setTermGpu((e.target as HTMLInputElement).checked);
+  }
+
   function onAutoLaunchAgentChange(e: Event): void {
     store.setAutoLaunchAgent((e.target as HTMLInputElement).checked);
   }
@@ -701,6 +705,18 @@
                     <span class="value">{store.termOpacity}%</span>
                   </span>
                 </div>
+                <label class="row switch">
+                  <span class="label">Hardware-accelerated terminal rendering</span>
+                  <input
+                    type="checkbox"
+                    checked={store.termGpu}
+                    onchange={onTermGpuChange}
+                    aria-label="Hardware-accelerated terminal rendering"
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
               </div>
             </div>
             {/if}
