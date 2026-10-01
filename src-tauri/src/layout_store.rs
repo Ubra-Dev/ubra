@@ -39,9 +39,10 @@ pub fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
 }
 
 fn validate_doc_version(value: &serde_json::Value, spec: &DocumentSpec) -> anyhow::Result<()> {
-    let version = value.as_object().and_then(|obj| obj.get("version")).and_then(
-        |version| version.as_u64(),
-    );
+    let version = value
+        .as_object()
+        .and_then(|obj| obj.get("version"))
+        .and_then(|version| version.as_u64());
     anyhow::ensure!(
         version.is_some_and(|version| spec
             .readable_versions
@@ -347,5 +348,4 @@ mod tests {
         assert_eq!(fs::read(&backups[0]).unwrap(), original);
         let _ = fs::remove_dir_all(&dir);
     }
-
 }

@@ -16,6 +16,11 @@ jobs:
           - os: ubuntu-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}
+    # $env/static/public requires these keys at build time. Empty keeps
+    # telemetry compiled-in but disabled, matching the guarded local flow.
+    env:
+      PUBLIC_POSTHOG_HOST: ""
+      PUBLIC_POSTHOG_PROJECT_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
 
