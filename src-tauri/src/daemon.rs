@@ -14,7 +14,7 @@
 use crate::agent_status::AgentStatusService;
 use crate::pty_manager::{PaneId, PtyEventSink, PtyManager};
 use fs2::FileExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use parking_lot::Mutex;
 use sha2::Sha256;
 use std::collections::HashMap;
