@@ -391,6 +391,10 @@
     store.setSoundEnabled((e.target as HTMLInputElement).checked);
   }
 
+  function onAutoLaunchAgentChange(e: Event): void {
+    store.setAutoLaunchAgent((e.target as HTMLInputElement).checked);
+  }
+
   function onTestSound(): void {
     invoke("play_sound", playbackPayload("done"))
       .catch((e) => console.error("ubra: test sound failed", e));
@@ -810,12 +814,27 @@
                     {autostartError}
                   </div>
                 {/if}
+                <label class="row switch">
+                  <span class="label">Auto-launch agent in new terminals</span>
+                  <input
+                    type="checkbox"
+                    checked={store.autoLaunchAgent}
+                    onchange={onAutoLaunchAgentChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
                 <div class="row">
                   <span class="label">Setup walkthrough</span>
                   <button class="btn" onclick={openOnboarding}>
                     <span>Open onboarding</span>
                   </button>
                 </div>
+              </div>
+              <div class="hint">
+                When on, new panes, tabs, and workspaces launch the default
+                agent automatically.
               </div>
             </div>
             <div class="group">
@@ -1025,8 +1044,8 @@
                   {/if}
                 </div>
                 <div class="hint">
-                  The default CLI runs automatically in new tabs and panes.
-                  Applies to new panes only.
+                  When auto-launch is on, the default CLI runs automatically
+                  in new tabs and panes. Applies to new panes only.
                 </div>
               </div>
             {:else}

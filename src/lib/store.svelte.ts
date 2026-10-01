@@ -34,6 +34,7 @@ import {
   type Tab,
   type Workspace,
 } from "./layout";
+import { implicitLaunchCommand } from "./agentLaunch";
 import { PendingCommands } from "./pendingCommands";
 import type { PtySessionInfo } from "./terminalLifecycle";
 import { toasts } from "./toasts.svelte.ts";
@@ -119,6 +120,8 @@ class AppStore {
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
   toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
   soundEnabled = $state<boolean>(true);
+  /** Global auto-launch for implicit agent starts; explicit picks bypass it. */
+  autoLaunchAgent = $state<boolean>(false);
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
   settingsOpen = $state(false);
@@ -211,6 +214,8 @@ class AppStore {
       }
       const savedAgentCli = window.localStorage.getItem("ubra.lastAgentCli");
       if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
+      const savedAutoLaunch = window.localStorage.getItem("ubra.autoLaunchAgent");
+      if (savedAutoLaunch !== null) this.autoLaunchAgent = savedAutoLaunch === "true";
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -448,6 +453,11 @@ class AppStore {
     this.savePref("ubra.soundEnabled", String(enabled));
   }
 
+  setAutoLaunchAgent(enabled: boolean): void {
+    this.autoLaunchAgent = enabled;
+    this.savePref("ubra.autoLaunchAgent", String(enabled));
+  }
+
   setAgentMuted(cli: string, muted: boolean): void {
     const lower = cli.toLowerCase();
     this.mutedAgents = muted
@@ -542,7 +552,11 @@ class AppStore {
       });
       return;
     }
-    this.createWorkspace(dir, this.lastUsedAgentCli || null, withGrid);
+    this.createWorkspace(
+      dir,
+      implicitLaunchCommand(this.autoLaunchAgent, this.lastUsedAgentCli || null),
+      withGrid,
+    );
   }
 
   /** Build a workspace for a folder; every pane starts in that directory. */
@@ -736,7 +750,8 @@ class AppStore {
       const source = findPane(found.tab.root, paneId);
       const cwd = source?.cwd ?? found.ws.defaultCwd;
       if (cwd) sibling.cwd = cwd;
-      if (found.ws.defaultCli) this.queueAgentCommand(sibling.id, found.ws.defaultCli);
+      const siblingCli = implicitLaunchCommand(this.autoLaunchAgent, found.ws.defaultCli);
+      if (siblingCli) this.queueAgentCommand(sibling.id, siblingCli);
       // The new pane takes focus (outline + keyboard).
       this.focusedPaneId = sibling.id;
       this.paneFocusTarget = sibling.id;
@@ -749,7 +764,8 @@ class AppStore {
   /** Stamp a fresh pane with its workspace defaults (cwd + auto-run command). */
   private applyWorkspaceDefaults(ws: Workspace, node: PaneNode): void {
     if (ws.defaultCwd) node.cwd = ws.defaultCwd;
-    if (ws.defaultCli) this.queueAgentCommand(node.id, ws.defaultCli);
+    const cli = implicitLaunchCommand(this.autoLaunchAgent, ws.defaultCli);
+    if (cli) this.queueAgentCommand(node.id, cli);
   }
 
   setWorkspaceDefaultCli(id: string, cli: string | null): void {
@@ -976,7 +992,10 @@ class AppStore {
       this.addBlankWorkspace();
       return;
     }
-    const command = (await agentClis.ensure())[0]?.cli ?? null;
+    const command = implicitLaunchCommand(
+      this.autoLaunchAgent,
+      (await agentClis.ensure())[0]?.cli ?? null,
+    );
     this.createWorkspace(home, command, false);
     if (command) {
       this.lastUsedAgentCli = command;
@@ -1002,8 +1021,17 @@ class AppStore {
    * the pending queue this is not consumed: rerunning the same agent on
    * every fresh spawn is the point. Null when the pane never ran an agent.
    */
+  /** Explicit relaunch for the respawn button; bypasses the auto-launch gate. */
+  relaunchPaneAgent(paneId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    const cli = node?.agentCli?.trim();
+    if (cli) this.queueAgentCommand(paneId, cli);
+  }
+
   takeRestoreAgent(paneId: string): string | null {
-    if (!this.layout) return null;
+    if (!this.layout || !this.autoLaunchAgent) return null;
     const found = findTabByPane(this.layout, paneId);
     const node = found ? findPane(found.tab.root, paneId) : null;
     const cli = node?.agentCli?.trim();

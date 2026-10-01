@@ -336,6 +336,7 @@
         class="respawn"
         onclick={() => {
           store.authorizePaneCommand(node.id);
+          store.relaunchPaneAgent(node.id);
           exited = false;
           runId += 1;
         }}
