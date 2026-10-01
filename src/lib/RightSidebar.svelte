@@ -8,6 +8,7 @@
     stepSidebarWidth,
   } from "./sidebarResize";
   import SourceControlView from "./SourceControlView.svelte";
+  import { frameCoalescer } from "./schedule";
   import { store } from "./store.svelte";
 
   const ws = $derived(store.workspace());
@@ -55,13 +56,20 @@
     e.preventDefault();
   }
 
+  // The drag coalesces to one layout update per frame and persists once
+  // on release, so pointermove bursts never queue layout + storage work.
+  const widthFrame = frameCoalescer();
+
   function moveWidthDrag(e: PointerEvent): void {
     if (!widthDrag) return;
-    store.setRightPanelWidth(widthDrag.startWidth - (e.clientX - widthDrag.startX));
+    const width = widthDrag.startWidth - (e.clientX - widthDrag.startX);
+    widthFrame.schedule(() => store.setRightPanelWidthLive(width));
   }
 
   function endWidthDrag(): void {
     widthDrag = null;
+    widthFrame.flush();
+    store.saveRightPanelWidth();
   }
 
   function onWidthKey(e: KeyboardEvent): void {

@@ -18,6 +18,7 @@
   } from "./clipboard";
   import { findTabByPane } from "./layout";
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
+  import { frameCoalescer, trailingDebouncer } from "./schedule";
   import { terminalCommands } from "./terminalCommands";
   import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
@@ -212,8 +213,33 @@
 
     // Hidden panes (inactive tabs/workspaces) have zero size: skip fitting
     // until visible. The ResizeObserver fires on show.
-    let lastResize: { id: number; cols: number; rows: number } | null = null;
-    const ensureFit = () => {
+    //
+    // Resize bursts (window/sidebar/pane drags) collapse in two stages: the
+    // canvas refits at most once per frame for smooth visuals, while the
+    // backend PTY resize fires once the burst goes quiet. Shells and CLIs
+    // then see one stable size instead of a resize storm.
+    const PTY_RESIZE_DEBOUNCE_MS = 120;
+    const fitFrame = frameCoalescer();
+    const ptyResize = trailingDebouncer(PTY_RESIZE_DEBOUNCE_MS);
+    let lastSent: { id: number; cols: number; rows: number } | null = null;
+    const sendPtyResize = (): void => {
+      if (disposed || paneId === null) return;
+      const cols = term.cols;
+      const rows = term.rows;
+      if (
+        lastSent?.id === paneId &&
+        lastSent.cols === cols &&
+        lastSent.rows === rows
+      )
+        return;
+      const size = { id: paneId, cols, rows };
+      lastSent = size;
+      invoke("pty_resize", size).catch((error) => {
+        if (lastSent === size) lastSent = null;
+        console.error(error);
+      });
+    };
+    const doFit = (): void => {
       if (
         disposed ||
         !container ||
@@ -222,15 +248,10 @@
       )
         return;
       fit.fit();
-      if (paneId !== null && (lastResize?.id !== paneId ||
-        lastResize.cols !== term.cols || lastResize.rows !== term.rows)) {
-        const size = { id: paneId, cols: term.cols, rows: term.rows };
-        lastResize = size;
-        invoke("pty_resize", size).catch((error) => {
-          if (lastResize === size) lastResize = null;
-          console.error(error);
-        });
-      }
+      ptyResize.schedule(sendPtyResize);
+    };
+    const ensureFit = (): void => {
+      fitFrame.schedule(doFit);
     };
     ensureFit();
     refit = ensureFit;
@@ -368,6 +389,8 @@
       terminal = null;
       refit = null;
       searchAddon = null;
+      fitFrame.cancel();
+      ptyResize.cancel();
       if (copyTimer) clearTimeout(copyTimer);
       selectionDispose.dispose();
       menuSelectionDispose.dispose();

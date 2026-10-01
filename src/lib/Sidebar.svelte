@@ -4,6 +4,7 @@
   import { gitSummaryTitle, gitSyncLabel } from "./git";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
+  import { frameCoalescer } from "./schedule";
   import {
     MAX_SIDEBAR_WIDTH,
     MIN_SIDEBAR_WIDTH,
@@ -87,18 +88,24 @@
     e.preventDefault();
   }
 
+  // Drags coalesce to one layout update per frame and persist once on
+  // release, so pointermove bursts never queue layout + storage work.
+  const splitFrame = frameCoalescer();
+  const widthFrame = frameCoalescer();
+
   function moveSplitDrag(e: PointerEvent): void {
     if (!splitDrag) return;
-    store.setSidebarSplit(
-      effectiveSplitRatio(
-        ratioFromPointer(e.clientY, splitDrag.top, splitDrag.height),
-        splitDrag.height,
-      ),
+    const ratio = effectiveSplitRatio(
+      ratioFromPointer(e.clientY, splitDrag.top, splitDrag.height),
+      splitDrag.height,
     );
+    splitFrame.schedule(() => store.setSidebarSplitLive(ratio));
   }
 
   function endSplitDrag(): void {
     splitDrag = null;
+    splitFrame.flush();
+    store.saveSidebarSplit();
   }
 
   function onSplitKey(e: KeyboardEvent): void {
@@ -131,11 +138,14 @@
 
   function moveWidthDrag(e: PointerEvent): void {
     if (!widthDrag) return;
-    store.setSidebarWidth(widthDrag.startWidth + (e.clientX - widthDrag.startX));
+    const width = widthDrag.startWidth + (e.clientX - widthDrag.startX);
+    widthFrame.schedule(() => store.setSidebarWidthLive(width));
   }
 
   function endWidthDrag(): void {
     widthDrag = null;
+    widthFrame.flush();
+    store.saveSidebarWidth();
   }
 
   function onWidthKey(e: KeyboardEvent): void {

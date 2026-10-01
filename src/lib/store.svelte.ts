@@ -431,33 +431,70 @@ class AppStore {
   }
 
   setSidebarWidth(px: number): void {
+    if (!this.setSidebarWidthLive(px)) return;
+    this.saveSidebarWidth();
+  }
+
+  /**
+   * Live drag update without persistence; drag handlers persist once on
+   * release via `saveSidebarWidth` so sync storage writes stay off the
+   * pointermove path. Returns true when the value changed.
+   */
+  setSidebarWidthLive(px: number): boolean {
     const clamped = clampSidebarWidth(px);
-    if (clamped === this.sidebarWidth) return;
+    if (clamped === this.sidebarWidth) return false;
     this.sidebarWidth = clamped;
+    return true;
+  }
+
+  saveSidebarWidth(): void {
     try {
-      window.localStorage.setItem("ubra.sidebarWidth", String(clamped));
+      window.localStorage.setItem("ubra.sidebarWidth", String(this.sidebarWidth));
     } catch (e) {
       console.error("ubra: failed to save sidebar width", e);
     }
   }
 
   setRightPanelWidth(px: number): void {
-    const clamped = clampSidebarWidth(px);
-    if (clamped === this.rightPanelWidth) return;
+    if (!this.setRightPanelWidthLive(px)) return;
+    this.saveRightPanelWidth();
+  }
+
+  /** Live drag update without persistence; see `setSidebarWidthLive`. */
+  setRightPanelWidthLive(px: number): boolean {
+    const clamped = clampSidebarWidth(px, DEFAULT_RIGHT_PANEL_WIDTH);
+    if (clamped === this.rightPanelWidth) return false;
     this.rightPanelWidth = clamped;
+    return true;
+  }
+
+  saveRightPanelWidth(): void {
     try {
-      window.localStorage.setItem("ubra.rightPanelWidth", String(clamped));
+      window.localStorage.setItem(
+        "ubra.rightPanelWidth",
+        String(this.rightPanelWidth),
+      );
     } catch (e) {
       console.error("ubra: failed to save right panel width", e);
     }
   }
 
   setSidebarSplit(ratio: number): void {
+    if (!this.setSidebarSplitLive(ratio)) return;
+    this.saveSidebarSplit();
+  }
+
+  /** Live drag update without persistence; see `setSidebarWidthLive`. */
+  setSidebarSplitLive(ratio: number): boolean {
     const clamped = clampSplitRatio(ratio);
-    if (clamped === this.sidebarSplit) return;
+    if (clamped === this.sidebarSplit) return false;
     this.sidebarSplit = clamped;
+    return true;
+  }
+
+  saveSidebarSplit(): void {
     try {
-      window.localStorage.setItem("ubra.sidebarSplit", String(clamped));
+      window.localStorage.setItem("ubra.sidebarSplit", String(this.sidebarSplit));
     } catch (e) {
       console.error("ubra: failed to save sidebar split", e);
     }

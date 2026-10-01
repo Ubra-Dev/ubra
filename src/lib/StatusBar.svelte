@@ -24,6 +24,7 @@
   } from "./statusBar";
   import { updater } from "./updater.svelte";
   import { usage } from "./usage.svelte";
+  import { asyncCoalescer } from "./schedule";
   import { workspaceGit } from "./workspaceGit.svelte";
 
   let appVersion = $state("");
@@ -101,26 +102,31 @@
 
   const branch = $derived(context ? workspaceGit.branchFor(context.wsId) : null);
 
-  let dirtyCount = $state<number | null>(null);
-  let dirtyRun = 0;
+  // Dirty state follows the active workspace root only. Depending on the
+  // whole context would rerun a full git scan on every agent/layout change
+  // (agent updates arrive with terminal output), wedging git workspaces.
+  const wsRoot = $derived(context?.wsRoot ?? null);
 
-  async function refreshDirty(root: string | null): Promise<void> {
-    const run = ++dirtyRun;
+  let dirtyCount = $state<number | null>(null);
+
+  // Sequential latest-wins runs: bursts collapse and slow scans never pile
+  // up overlapping git processes.
+  const dirtyRefresh = asyncCoalescer<string | null>(async (root) => {
     if (!root) {
-      if (run === dirtyRun) dirtyCount = null;
+      dirtyCount = null;
       return;
     }
     try {
       const status = await gitStatus(root);
-      if (run === dirtyRun) dirtyCount = status.isRepo ? changeCount(status) : null;
+      dirtyCount = status.isRepo ? changeCount(status) : null;
     } catch {
-      if (run === dirtyRun) dirtyCount = null;
+      dirtyCount = null;
     }
-  }
+  });
 
-  // Active workspace changed: re-resolve dirty state immediately.
+  // Active workspace root changed: re-resolve dirty state immediately.
   $effect(() => {
-    void refreshDirty(context?.wsRoot ?? null);
+    dirtyRefresh.request(wsRoot);
   });
 
   const usageLabels = $derived(
@@ -163,7 +169,7 @@
     void usage
       .ensureSupported()
       .then((supported) => usage.refreshAll(supported.map((s) => s.cli)));
-    dirtyTimer = setInterval(() => void refreshDirty(context?.wsRoot ?? null), DIRTY_POLL_MS);
+    dirtyTimer = setInterval(() => dirtyRefresh.request(wsRoot), DIRTY_POLL_MS);
     usageTimer = setInterval(() => {
       const supported = usage.supported;
       if (supported) usage.refreshAll(supported.map((s) => s.cli));

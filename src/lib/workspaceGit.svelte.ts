@@ -12,6 +12,8 @@ class WorkspaceGitStore {
   private runId = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private backendDown = false;
+  /** A refresh is in flight; concurrent triggers skip instead of piling up. */
+  private inFlight = false;
 
   branchFor(workspaceId: string): string | null {
     return this.branches[workspaceId] ?? null;
@@ -40,7 +42,16 @@ class WorkspaceGitStore {
 
   /** Resolve branch plus change counts for every workspace with a directory. */
   async refresh(): Promise<void> {
-    if (this.backendDown) return;
+    if (this.backendDown || this.inFlight) return;
+    this.inFlight = true;
+    try {
+      await this.refreshNow();
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async refreshNow(): Promise<void> {
     const layout = store.layout;
     if (!layout) return;
     const run = ++this.runId;

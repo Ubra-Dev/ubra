@@ -135,7 +135,10 @@
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: transparent;
+    /* Opaque: a transparent webview forces full-window blending every frame
+       and makes resize sluggish on macOS. Matches the default theme until
+       the app root paints. */
+    background: #1a1a1a;
     overflow: hidden;
   }
   .root {
