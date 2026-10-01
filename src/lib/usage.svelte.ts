@@ -81,6 +81,11 @@ class UsageStore {
     for (const cli of clis) void this.load(cli);
   }
 
+  /** Force a fresh fetch for every listed CLI, bypassing caches. */
+  refreshAllForced(clis: string[]): void {
+    for (const cli of clis) void this.load(cli, true);
+  }
+
   /** Force a fresh fetch for one CLI, bypassing caches. */
   refresh(cli: string): void {
     void this.load(cli, true);

@@ -12,6 +12,12 @@
   import { telemetryStatus } from "./telemetry";
   import { applyTelemetryConsent } from "./telemetrySync";
 
+  interface Props {
+    /** Revisit from Settings: creates a new workspace, never rewrites consent. */
+    revisit?: boolean;
+  }
+  let { revisit = false }: Props = $props();
+
   let projectDirectory = $state<string | null>(null);
   const detected = $derived(agentClis.clis);
   let selection = $state("");
@@ -91,6 +97,14 @@
   async function startAgent(): Promise<void> {
     if (onboardingActionBusy || !projectDirectory || !command.trim()) return;
     onboardingActionBusy = true;
+    if (revisit) {
+      const paneId = store.completeOnboardingRevisit(projectDirectory, command);
+      if (!paneId) {
+        errorMessage = "Couldn't prepare the project terminal. Try closing and retrying.";
+        onboardingActionBusy = false;
+      }
+      return;
+    }
     await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
       console.error("ubra: onboarding consent failed", error);
     });
@@ -108,6 +122,10 @@
 
   async function skipSetup(): Promise<void> {
     if (onboardingActionBusy) return;
+    if (revisit) {
+      store.onboardingOpen = false;
+      return;
+    }
     onboardingActionBusy = true;
     await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
       console.error("ubra: onboarding consent failed", error);
@@ -118,10 +136,17 @@
     }
     await store.skipOnboarding();
   }
+
+  function onRevisitKeydown(e: KeyboardEvent): void {
+    if (revisit && e.key === "Escape") {
+      e.preventDefault();
+      store.onboardingOpen = false;
+    }
+  }
 </script>
 
 <div class="onboarding" role="dialog" aria-modal="true" aria-labelledby="welcome-title"
-  tabindex="-1" data-keyboard-overlay use:overlayFocus>
+  tabindex="-1" data-keyboard-overlay use:overlayFocus onkeydown={onRevisitKeydown}>
   <div class="card">
     <aside class="intro">
       <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
@@ -255,7 +280,7 @@
         <div class="error" role="alert">{errorMessage}</div>
       {/if}
 
-      {#if telemetrySupported}
+      {#if telemetrySupported && !revisit}
         <label class="consent-row">
           <input type="checkbox" bind:checked={telemetryOptIn} />
           <span>
@@ -281,7 +306,7 @@
           onclick={skipSetup}
           disabled={onboardingActionBusy}
         >
-          {store.firstRun ? "Skip setup" : "Empty Workspace"}
+          {revisit ? "Close" : store.firstRun ? "Skip setup" : "Empty Workspace"}
         </button>
       </div>
     </form>

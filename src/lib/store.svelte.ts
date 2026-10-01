@@ -126,6 +126,8 @@ class AppStore {
   /** Selected chime: a built-in id or "custom" (uses soundFile). */
   soundStyle = $state<string>(DEFAULT_CHIME_STYLE);
   settingsOpen = $state(false);
+  /** Revisit-mode onboarding opened from Settings (independent of firstRun). */
+  onboardingOpen = $state(false);
   /** Last-focused pane node id (session-only, for shortcuts). */
   focusedPaneId = $state<string | null>(null);
   /** Pane node id that should enter rename editing (F2); cleared on take. */
@@ -941,6 +943,31 @@ class AppStore {
     this.firstRun = false;
     this.saveSoon(true);
     return pane.id;
+  }
+
+  /**
+   * Revisit-mode onboarding: open the chosen folder as a NEW workspace,
+   * never mutating the current one. Returns the new pane id, or null when
+   * there is no layout yet.
+   */
+  completeOnboardingRevisit(
+    projectDirectory: string,
+    command: string | null,
+  ): string | null {
+    if (!this.layout) return null;
+    const existing = findWorkspaceByRoot(this.layout.workspaces, projectDirectory);
+    if (existing) {
+      this.switchWorkspace(existing.id);
+      this.onboardingOpen = false;
+      return collectPaneIds(activeTab(existing).root)[0] ?? null;
+    }
+    const paneId = this.createWorkspace(projectDirectory, command, false);
+    if (paneId && command?.trim()) {
+      this.lastUsedAgentCli = command.trim();
+      this.savePref("ubra.lastAgentCli", command.trim());
+    }
+    if (paneId) this.onboardingOpen = false;
+    return paneId;
   }
 
   async skipOnboarding(): Promise<void> {

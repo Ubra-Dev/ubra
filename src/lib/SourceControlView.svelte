@@ -345,26 +345,32 @@
       </button>
       <button
         class="icon-btn"
-        title="Pull (fast-forward only)"
-        aria-label="Pull (fast-forward only)"
+        class:busy={busy === "pull"}
+        title={busy === "pull" ? "Pulling…" : "Pull (fast-forward only)"}
+        aria-label={busy === "pull" ? "Pulling…" : "Pull (fast-forward only)"}
+        aria-busy={busy === "pull"}
         disabled={busy !== null}
         onclick={() => void runAction("pull", () => gitPull(root))}
       >
-        <Icon name="download" size={13} />
+        <Icon name={busy === "pull" ? "refresh" : "download"} size={13} />
       </button>
       <button
         class="icon-btn"
-        title="Push"
-        aria-label="Push"
+        class:busy={busy === "push"}
+        title={busy === "push" ? "Pushing…" : "Push"}
+        aria-label={busy === "push" ? "Pushing…" : "Push"}
+        aria-busy={busy === "push"}
         disabled={busy !== null}
         onclick={() => void runAction("push", () => gitPush(root))}
       >
-        <Icon name="upload" size={13} />
+        <Icon name={busy === "push" ? "refresh" : "upload"} size={13} />
       </button>
       <button
         class="icon-btn"
-        title="Refresh"
-        aria-label="Refresh"
+        class:busy={busy === "refresh"}
+        title={busy === "refresh" ? "Refreshing…" : "Refresh"}
+        aria-label={busy === "refresh" ? "Refreshing…" : "Refresh"}
+        aria-busy={busy === "refresh"}
         disabled={busy !== null}
         onclick={() => void refresh()}
       >
@@ -673,6 +679,23 @@
   .icon-btn:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  /* The running action keeps full opacity with a spinning glyph. */
+  .icon-btn.busy {
+    opacity: 1;
+  }
+  .icon-btn.busy > :global(svg) {
+    animation: sc-spin 0.9s linear infinite;
+  }
+  @keyframes sc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .icon-btn.busy > :global(svg) {
+      animation: none;
+    }
   }
   .branches {
     flex: 0 0 auto;

@@ -132,15 +132,22 @@
   .tabs button {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    flex: 1 1 0;
+    min-width: 0;
     gap: 6px;
     background: transparent;
     border: none;
     border-radius: 6px;
     color: var(--text-muted);
     font: inherit;
-    padding: 5px 8px;
+    padding: 5px 6px;
     cursor: pointer;
     white-space: nowrap;
+  }
+  .tabs button span {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tabs button:hover {
     color: var(--text-strong);

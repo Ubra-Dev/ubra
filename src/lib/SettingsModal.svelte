@@ -1,6 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
+  import {
+    isPermissionGranted,
+    requestPermission,
+  } from "@tauri-apps/plugin-notification";
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
@@ -88,6 +92,36 @@
   let folderPicking = $state(false);
   let folderError = $state<string | null>(null);
   let soundFileChecking = $state(false);
+  let appearanceTab = $state<"theme" | "text">("theme");
+  /** System-notification permission: silent check on open, request on Test. */
+  let notifyPermission = $state<"granted" | "denied" | "prompt" | "unknown">(
+    "unknown",
+  );
+  let testNotifyError = $state<string | null>(null);
+  const notifyPermissionLabel = $derived(
+    notifyPermission === "granted"
+      ? "granted"
+      : notifyPermission === "denied"
+        ? "denied — enable it in your OS settings"
+        : notifyPermission === "prompt"
+          ? "not decided yet — pressing Test will ask"
+          : "unknown",
+  );
+
+  /** Usage providers to show; null while detection or registry is loading. */
+  const usageShowable = $derived(
+    agentClis.clis === null || usage.supported === null
+      ? null
+      : selectUsageClis(agentClis.clis, usage.supported),
+  );
+  const usageAnyLoading = $derived(
+    usageShowable?.some((entry) => usage.loading[entry.cli] === true) ?? false,
+  );
+
+  function refreshAllUsage(): void {
+    if (!usageShowable) return;
+    usage.refreshAllForced(usageShowable.map((entry) => entry.cli));
+  }
 
   const shortcuts = cheatSheet(isMacPlatform(navigator.platform));
 
@@ -162,6 +196,19 @@
     })();
   });
 
+  // Silent permission check when Alerts opens; the OS prompt only fires from
+  // the Test button below, never from merely viewing this section.
+  $effect(() => {
+    if (section !== "alerts") return;
+    isPermissionGranted()
+      .then((granted) => {
+        notifyPermission = granted ? "granted" : "prompt";
+      })
+      .catch(() => {
+        notifyPermission = "unknown";
+      });
+  });
+
 
   function onAutostartChange(e: Event): void {
     const checked = (e.target as HTMLInputElement).checked;
@@ -232,10 +279,41 @@
   }
 
   /**
+   * Ensure system-notification permission, prompting the OS dialog when the
+   * verdict is still undecided. Returns true when showing is allowed.
+   */
+  async function ensureNotifyPermission(): Promise<boolean> {
+    try {
+      if (await isPermissionGranted()) {
+        notifyPermission = "granted";
+        return true;
+      }
+    } catch (e) {
+      console.error("ubra: notification permission check failed", e);
+    }
+    try {
+      const verdict = await requestPermission();
+      notifyPermission =
+        verdict === "granted"
+          ? "granted"
+          : verdict === "denied"
+            ? "denied"
+            : "prompt";
+      return verdict === "granted";
+    } catch (e) {
+      console.error("ubra: notification permission request failed", e);
+      notifyPermission = "unknown";
+      return false;
+    }
+  }
+
+  /**
    * Fire one sample agent-finish through the current delivery/sound/mute
    * settings, exactly like a real finish (muted Codex stays silent).
+   * Failures surface inline instead of only in the console.
    */
-  function sendTestNotification(): void {
+  async function sendTestNotification(): Promise<void> {
+    testNotifyError = null;
     const test = testNotificationPayload();
     const route = routeNotification({
       delivery: store.notifyDelivery,
@@ -247,11 +325,24 @@
       toasts.push(test.title, test.body, test.nodeId);
     }
     if (route.system) {
-      invoke("notify_agent", {
-        title: test.title,
-        body: test.body,
-        kind: test.kind,
-      }).catch((e) => console.error("ubra: test notification failed", e));
+      const allowed = await ensureNotifyPermission();
+      if (!allowed) {
+        testNotifyError =
+          notifyPermission === "denied"
+            ? "System notifications are blocked. Enable them in your OS settings, then try again."
+            : "Couldn't get notification permission. Try again.";
+      } else {
+        try {
+          await invoke("notify_agent", {
+            title: test.title,
+            body: test.body,
+            kind: test.kind,
+          });
+        } catch (e) {
+          console.error("ubra: test notification failed", e);
+          testNotifyError = "Couldn't show the system notification. Try again.";
+        }
+      }
     }
     if (route.sound) {
       invoke("play_sound", playbackPayload(test.kind, store.soundStyle, store.soundFile))
@@ -315,6 +406,11 @@
 
   const REPO_URL = "https://github.com/stackwares/ubra-tauri";
 
+  function openOnboarding(): void {
+    store.settingsOpen = false;
+    store.onboardingOpen = true;
+  }
+
   function openExternal(url: string): void {
     invoke("plugin:opener|open_url", { url }).catch((e) =>
       console.error("ubra: failed to open link", e),
@@ -363,6 +459,25 @@
         {#if section === "appearance"}
           <section aria-label="Appearance">
             <h2>Appearance</h2>
+            <div class="subtabs" role="tablist" aria-label="Appearance settings">
+              <button
+                role="tab"
+                aria-selected={appearanceTab === "theme"}
+                class:active={appearanceTab === "theme"}
+                onclick={() => (appearanceTab = "theme")}
+              >
+                Theme
+              </button>
+              <button
+                role="tab"
+                aria-selected={appearanceTab === "text"}
+                class:active={appearanceTab === "text"}
+                onclick={() => (appearanceTab = "text")}
+              >
+                Text
+              </button>
+            </div>
+            {#if appearanceTab === "theme"}
             <div class="group">
               <h3 class="group-label" id="theme-label">Theme</h3>
               <div class="card flush" role="group" aria-labelledby="theme-label">
@@ -404,6 +519,7 @@
                 </div>
               </div>
             </div>
+            {:else}
             <div class="group">
               <h3 class="group-label" id="font-label">Interface font</h3>
               <div class="card flush">
@@ -574,6 +690,7 @@
                 </div>
               </div>
             </div>
+            {/if}
           </section>
         {:else if section === "alerts"}
           <section aria-label="Alerts">
@@ -614,11 +731,19 @@
                 {/if}
                 <div class="row">
                   <span class="label">Test with current settings</span>
-                  <button class="btn" onclick={sendTestNotification}>
+                  <button class="btn" onclick={() => void sendTestNotification()}>
                     <Icon name="bell" size={12} />
-                    <span>Send test notification</span>
+                    <span>Test</span>
                   </button>
                 </div>
+                {#if store.notifyDelivery === "system"}
+                  <div class="hint">System permission: {notifyPermissionLabel}</div>
+                {/if}
+                {#if testNotifyError}
+                  <div class="hint">
+                    <span class="error-hint" role="alert">{testNotifyError}</span>
+                  </div>
+                {/if}
               </div>
               <div class="hint">
                 Fires a sample Codex finish through the settings above.
@@ -691,7 +816,7 @@
                   <span class="label">Preview</span>
                   <button class="btn" onclick={onTestSound}>
                     <Icon name="play" size={12} />
-                    <span>Play test sound</span>
+                    <span>Play</span>
                   </button>
                 </div>
               </div>
@@ -734,6 +859,12 @@
                     {autostartError}
                   </div>
                 {/if}
+                <div class="row">
+                  <span class="label">Setup walkthrough</span>
+                  <button class="btn" onclick={openOnboarding}>
+                    <span>Open onboarding</span>
+                  </button>
+                </div>
               </div>
             </div>
             <div class="group">
@@ -800,28 +931,6 @@
                 {/if}
               </div>
             </div>
-            <div class="group">
-              <h3 class="group-label">Quit</h3>
-              <div class="card">
-                <div class="row">
-                  <span class="label">
-                    Quit Ubra and terminate owned pane processes
-                  </span>
-                  <button
-                    class="btn"
-                    onclick={() => {
-                      invoke("quit_app").catch((error) =>
-                        toasts.push("Quit failed", String(error), "", {
-                          kind: "copy",
-                        }),
-                      );
-                    }}
-                  >
-                    Quit Ubra
-                  </button>
-                </div>
-              </div>
-            </div>
             {#if telemetrySupported}
               <div class="group">
                 <h3 class="group-label">Telemetry</h3>
@@ -885,7 +994,7 @@
                   MIT License
                 </button>
               </div>
-              <div class="about-sub">© 2026 Oliver Martinez</div>
+              <div class="about-sub">© 2026 Ubra</div>
             </div>
           </section>
         {:else if section === "workspace"}
@@ -906,16 +1015,18 @@
                       <span class="hint">Detecting installed agents…</span>
                     </div>
                   {:else}
-                    <label class="row">
+                    <div class="row">
                       <span class="label">Default agent CLI</span>
-                      <AgentCliSelect
-                        entries={agentClis.clis}
-                        bind:value={cliSelection}
-                        noneLabel="None (plain shells)"
-                        ariaLabel="Default agent CLI"
-                        onChange={onDefaultCliSelect}
-                      />
-                    </label>
+                      <span class="cli-select">
+                        <AgentCliSelect
+                          entries={agentClis.clis}
+                          bind:value={cliSelection}
+                          noneLabel="None (plain shells)"
+                          ariaLabel="Default agent CLI"
+                          onChange={onDefaultCliSelect}
+                        />
+                      </span>
+                    </div>
                     {#if cliSelection === CUSTOM_COMMAND}
                       <label class="row">
                         <span class="label">Custom command</span>
@@ -933,27 +1044,31 @@
                       </label>
                     {/if}
                   {/if}
-                  <div class="row">
-                    <span class="label">Default folder</span>
-                    <span class="folder-value" title={ws.defaultCwd ?? ""}>
+                  <div class="folder-block">
+                    <div class="row">
+                      <span class="label">Default folder</span>
+                      <span class="folder-actions">
+                        <button
+                          class="btn"
+                          onclick={pickDefaultFolder}
+                          disabled={folderPicking}
+                        >
+                          {folderPicking ? "Opening…" : "Change…"}
+                        </button>
+                        {#if ws.defaultCwd}
+                          <button
+                            class="btn"
+                            onclick={() =>
+                              store.setWorkspaceDefaultCwd(ws.id, null)}
+                          >
+                            Clear
+                          </button>
+                        {/if}
+                      </span>
+                    </div>
+                    <div class="folder-path" title={ws.defaultCwd ?? ""}>
                       {ws.defaultCwd ?? "Default directory"}
-                    </span>
-                    <button
-                      class="btn"
-                      onclick={pickDefaultFolder}
-                      disabled={folderPicking}
-                    >
-                      {folderPicking ? "Opening…" : "Change…"}
-                    </button>
-                    {#if ws.defaultCwd}
-                      <button
-                        class="btn"
-                        onclick={() =>
-                          store.setWorkspaceDefaultCwd(ws.id, null)}
-                      >
-                        Clear
-                      </button>
-                    {/if}
+                    </div>
                   </div>
                   {#if folderError}
                     <div class="hint">
@@ -974,15 +1089,33 @@
           </section>
         {:else if section === "usage"}
           <section aria-label="Usage">
-            <h2>Usage</h2>
-            {#if agentClis.clis === null || usage.supported === null}
+            <div class="section-head">
+              <h2>Usage</h2>
+              {#if usageShowable && usageShowable.length > 0}
+                <button
+                  class="btn btn-icon"
+                  class:spinning={usageAnyLoading}
+                  title="Refresh all usage"
+                  aria-label="Refresh all usage"
+                  aria-busy={usageAnyLoading}
+                  disabled={usageAnyLoading}
+                  onclick={refreshAllUsage}
+                >
+                  <Icon name="refresh" size={12} />
+                </button>
+              {/if}
+            </div>
+            {#if usageShowable === null}
               <div class="hint">Loading supported usage providers…</div>
             {:else}
-              {@const showable = selectUsageClis(agentClis.clis, usage.supported)}
+              {@const showable = usageShowable}
+              {@const supportedLabels = (usage.supported ?? []).map(
+                (entry) => entry.label,
+              )}
               {#if showable.length === 0}
                 <div class="hint">
                   Plan usage is available for {joinLabels(
-                    usage.supported.map((entry) => entry.label),
+                    supportedLabels,
                   )}. Sign in with a supported CLI to view it.
                 </div>
               {:else}
@@ -993,17 +1126,9 @@
                     <h3 class="group-label">{entry.label}</h3>
                     <div class="card" aria-busy={busy}>
                       <div class="row">
-                        <span class="folder-value" title={entry.path}>
+                        <span class="usage-path" title={entry.path}>
                           {entry.path}
                         </span>
-                        <button
-                          class="btn btn-sm"
-                          onclick={() => usage.refresh(entry.cli)}
-                          disabled={busy}
-                        >
-                          <Icon name="refresh" size={12} />
-                          <span>{busy ? "Loading…" : "Refresh"}</span>
-                        </button>
                       </div>
                       {#if !snap}
                         <div class="hint">Loading usage…</div>
@@ -1169,6 +1294,47 @@
     color: var(--text-strong);
     margin: 2px 0 14px;
   }
+  /* Section title row with a trailing action (Usage refresh). */
+  .section-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .section-head h2 {
+    flex: 1;
+  }
+  .section-head .btn-icon {
+    margin-top: 4px;
+  }
+  /* In-section sub-tabs (Appearance Theme/Text). */
+  .subtabs {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    margin: 0 0 14px;
+    background: var(--surface-bg);
+    border: 1px solid var(--separator);
+    border-radius: 8px;
+  }
+  .subtabs button {
+    flex: 1 1 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-weight: 600;
+    text-align: center;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  .subtabs button:hover {
+    color: var(--text);
+  }
+  .subtabs button.active {
+    background: var(--surface-active);
+    color: var(--text-strong);
+  }
   /* Grouped card layout in the macOS System Settings idiom: a small label
      above each card, hairline dividers between rows, helper text below. */
   .group {
@@ -1193,6 +1359,7 @@
     padding: 8px;
   }
   .card > .row + .row,
+  .card > .row + .folder-block,
   .card > .hint + .row {
     border-top: 1px solid var(--separator);
   }
@@ -1386,6 +1553,23 @@
     padding: 2px 10px;
     font-size: 11px;
   }
+  /* Square icon-only action; keeps its accessible name in markup. */
+  .btn-icon {
+    padding: 5px 8px;
+  }
+  .btn-icon.spinning > :global(svg) {
+    animation: btn-spin 0.9s linear infinite;
+  }
+  @keyframes btn-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .btn-icon.spinning > :global(svg) {
+      animation: none;
+    }
+  }
   .file-input {
     border: 1px solid var(--input-border);
     border-radius: 6px;
@@ -1398,15 +1582,35 @@
   .file-input[aria-invalid="true"] {
     border-color: var(--error-text);
   }
-  .folder-value {
-    flex: 1;
+  /* Capped dropdown width so the row label keeps its natural width. */
+  .cli-select {
+    display: flex;
+    flex: 0 1 220px;
     min-width: 0;
+  }
+  /* Default folder: label + actions on one line, full-width path below. */
+  .folder-block {
+    padding: 8px 0;
+  }
+  .folder-block .row {
+    padding: 0 0 6px;
+  }
+  .folder-actions {
+    display: flex;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .folder-path,
+  .usage-path {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    text-align: right;
     color: var(--text-muted);
     font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .usage-path {
+    flex: 1;
+    min-width: 0;
   }
   .hint {
     font-size: 11px;

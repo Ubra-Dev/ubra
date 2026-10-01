@@ -153,7 +153,7 @@ class AgentStore {
   private isSeen(nodeId: string): boolean {
     const layout = store.layout;
     const found = layout && findTabByPane(layout, nodeId);
-    if (!layout || !found || store.settingsOpen || store.pendingClose) return false;
+    if (!layout || !found || store.settingsOpen || store.onboardingOpen || store.pendingClose) return false;
     if (store.firstRun) return false;
     return paneIsVisible({
       activeWorkspaceId: layout.activeWorkspaceId, workspaceId: found.ws.id,
