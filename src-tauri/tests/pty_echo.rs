@@ -613,9 +613,12 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
             Ok(Event::Output(id, data)) if id == parent => {
                 output.push_str(&data);
                 parent_handshake.note_output(&manager, id, &output);
-                if let Some(line) = output.lines().find(|line| line.starts_with("CHILD:")) {
-                    if let Ok(pid) = line.trim_start_matches("CHILD:").trim().parse::<i32>() {
-                        break pid;
+                if let Some(idx) = output.find("CHILD:") {
+                    let rest = &output[idx + "CHILD:".len()..];
+                    if let Some(num_str) = rest.lines().next().and_then(|l| l.split_whitespace().next()) {
+                        if let Ok(pid) = num_str.trim().parse::<i32>() {
+                            break pid;
+                        }
                     }
                 }
             }
