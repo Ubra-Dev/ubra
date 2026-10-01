@@ -116,7 +116,7 @@
       posthog.capture("onboarding_skipped");
       posthogLogs.onboardingSkipped();
     }
-    store.skipOnboarding();
+    await store.skipOnboarding();
   }
 </script>
 
@@ -148,7 +148,7 @@
 
     <form
       class="setup"
-      aria-label="First-run setup"
+      aria-label="Project setup"
       onsubmit={(event) => {
         event.preventDefault();
         startAgent();
@@ -273,7 +273,7 @@
           type="submit"
           disabled={!projectDirectory || !command.trim() || onboardingActionBusy}
         >
-          Open project and start agent
+          Get Started
         </button>
         <button
           class="skip-button"
@@ -281,7 +281,7 @@
           onclick={skipSetup}
           disabled={onboardingActionBusy}
         >
-          {store.firstRun ? "Skip setup" : "Cancel"}
+          {store.firstRun ? "Skip setup" : "Empty Workspace"}
         </button>
       </div>
     </form>
@@ -300,6 +300,7 @@
     padding: 32px;
     background: var(--app-bg);
     overflow: auto;
+    font-family: var(--font-ui);
   }
   .card {
     width: min(900px, 100%);
@@ -354,7 +355,7 @@
     border-radius: 8px;
     background: var(--input-bg);
     color: var(--text);
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 11px var(--font-ui);
   }
   .preview-bar {
     height: 27px;
@@ -495,7 +496,7 @@
   .folder-mark {
     flex: 0 0 auto;
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .folder-path {
     min-width: 0;
@@ -503,7 +504,7 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 11px var(--font-ui);
   }
   .change-folder {
     flex: 0 0 auto;
@@ -523,7 +524,7 @@
   }
   .command-prompt {
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .command-field input {
     width: 100%;
@@ -531,7 +532,7 @@
     outline: 0;
     background: transparent;
     color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 12px var(--font-ui);
   }
   .detecting {
     color: var(--text-subtle);

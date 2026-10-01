@@ -132,30 +132,6 @@ fn reset_layout(app: AppHandle, layout: serde_json::Value) -> Result<Option<Stri
 }
 
 #[tauri::command]
-fn load_saved_setups(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::load_saved_setups_from(&dir).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn save_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<(), String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::save_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn export_saved_setups(app: AppHandle) -> Result<String, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::backup_saved_setups_from(&dir).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn reset_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<Option<String>, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::reset_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn fs_list_dir(root: String, path: String) -> Result<files::DirListing, String> {
     files::list_dir(&root, &path)
 }
@@ -258,6 +234,16 @@ fn app_info() -> AppInfo {
         name: "Ubra".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
+}
+
+/// User home directory for the empty-workspace starting point.
+#[tauri::command]
+fn home_dir() -> Result<String, String> {
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME");
+    home.map_err(|_| "Home directory is unavailable.".to_string())
 }
 
 #[tauri::command]
@@ -498,10 +484,6 @@ pub fn run() {
             save_layout,
             export_layout,
             reset_layout,
-            load_saved_setups,
-            save_saved_setups,
-            export_saved_setups,
-            reset_saved_setups,
             fs_list_dir,
             fs_read_file,
             git_status,
@@ -526,7 +508,8 @@ pub fn run() {
             notify_agent,
             play_sound,
             check_sound_file,
-            app_info
+            app_info,
+            home_dir
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

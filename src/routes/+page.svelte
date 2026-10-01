@@ -3,12 +3,10 @@
   import { agent } from "$lib/agent.svelte";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
-  import SavedSetupsModal from "$lib/SavedSetupsModal.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
   import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
-  import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
   import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
@@ -37,7 +35,7 @@
     if (e.defaultPrevented) return;
     const overlayOpen = store.settingsOpen || !!store.pendingClose ||
       store.firstRun || store.recoveryRequired ||
-      store.recoveryBusy || !!store.savedSetupsRequest ||
+      store.recoveryBusy ||
       !!document.querySelector("[data-keyboard-overlay]");
     const matched = matchShortcutEvent(e, isMacPlatform(navigator.platform), overlayOpen);
     if (!matched) return;
@@ -168,7 +166,7 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || !!store.savedSetupsRequest}>
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose}>
       <div class="app">
         <Sidebar />
         <div class="main">
@@ -190,14 +188,11 @@
       <StatusBar />
     </div>
     {#if store.layout.workspaces.length === 0}
-      <EmptyWorkspaces />
+      <FirstRun />
     {/if}
   {/if}
   {#if store.settingsOpen}
     <SettingsModal />
-  {/if}
-  {#if store.savedSetupsRequest}
-    <SavedSetupsModal />
   {/if}
   <ConfirmDialog />
   <Toasts />

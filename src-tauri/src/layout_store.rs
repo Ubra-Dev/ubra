@@ -1,9 +1,8 @@
-//! Layout and saved-setups persistence.
+//! Layout persistence.
 //!
-//! The frontend owns the workspace/tab/pane tree and the saved-setups library;
-//! Rust durably stores the versioned JSON documents. `UBRA_DATA_DIR` overrides
-//! the data directory so tests and scripted E2E runs never touch the real app
-//! data dir.
+//! The frontend owns the workspace/tab/pane tree; Rust durably stores the
+//! versioned JSON document. `UBRA_DATA_DIR` overrides the data directory so
+//! tests and scripted E2E runs never touch the real app data dir.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -13,9 +12,6 @@ use tauri::Manager;
 /// Current layout schema version. Bumped only with a migration path.
 pub const LAYOUT_VERSION: u32 = 2;
 const LAYOUT_FILE: &str = "layout.json";
-const SAVED_SETUPS_FILE: &str = "saved-setups.json";
-/// Current saved-setups schema version.
-pub const SAVED_SETUPS_VERSION: u32 = 1;
 pub const MAX_LAYOUT_BYTES: u64 = 4 * 1024 * 1024;
 
 struct DocumentSpec {
@@ -32,14 +28,6 @@ const LAYOUT_SPEC: DocumentSpec = DocumentSpec {
     label: "layout",
     current_version: LAYOUT_VERSION,
     readable_versions: &[1, 2],
-};
-
-const SAVED_SETUPS_SPEC: DocumentSpec = DocumentSpec {
-    file: SAVED_SETUPS_FILE,
-    backup_stem: "saved-setups",
-    label: "saved setups",
-    current_version: SAVED_SETUPS_VERSION,
-    readable_versions: &[1],
 };
 
 /// Resolve the data directory, honoring `UBRA_DATA_DIR` for tests/E2E.
@@ -202,29 +190,6 @@ pub fn save_layout_to(dir: &Path, layout: &serde_json::Value) -> anyhow::Result<
     save_doc_to(dir, &LAYOUT_SPEC, layout)
 }
 
-/// Load only supported saved-setups documents. Missing means an empty library.
-pub fn load_saved_setups_from(dir: &Path) -> anyhow::Result<Option<serde_json::Value>> {
-    load_doc_from(dir, &SAVED_SETUPS_SPEC)
-}
-
-/// Ordinary library save refuses to overwrite unreadable/corrupt/unsupported documents.
-pub fn save_saved_setups_to(dir: &Path, setups: &serde_json::Value) -> anyhow::Result<()> {
-    save_doc_to(dir, &SAVED_SETUPS_SPEC, setups)
-}
-
-/// Export an exact-byte backup of the saved-setups document.
-pub fn backup_saved_setups_from(dir: &Path) -> anyhow::Result<String> {
-    backup_doc_from(dir, &SAVED_SETUPS_SPEC)
-}
-
-/// Explicit reset consent: preserve the original before replacing it, even if invalid.
-pub fn reset_saved_setups_to(
-    dir: &Path,
-    setups: &serde_json::Value,
-) -> anyhow::Result<Option<String>> {
-    reset_doc_to(dir, &SAVED_SETUPS_SPEC, setups)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,14 +214,6 @@ mod tests {
             }
         }
         layout
-    }
-
-    fn setups_doc() -> serde_json::Value {
-        serde_json::json!({
-            "version": SAVED_SETUPS_VERSION,
-            "profiles": [{ "id": "p1", "name": "agent", "cwd": "/tmp", "cmd": ["sh"] }],
-            "templates": [],
-        })
     }
 
     #[test]
@@ -391,103 +348,4 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn saved_setups_round_trip_independently_from_layout() {
-        let dir = scratch_dir();
-        let layout = current_layout(serde_json::json!({}));
-        save_layout_to(&dir, &layout).unwrap();
-        let setups = setups_doc();
-        save_saved_setups_to(&dir, &setups).unwrap();
-        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(setups));
-        assert_eq!(load_layout_from(&dir).unwrap(), Some(layout));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_saved_setups_loads_as_none() {
-        let dir = scratch_dir();
-        assert!(load_saved_setups_from(&dir).unwrap().is_none());
-    }
-
-    #[test]
-    fn invalid_saved_setups_block_overwrite() {
-        for original in [b"{not json".as_slice(), b"{\"version\":999}", b"null"] {
-            let dir = scratch_dir();
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
-            assert!(load_saved_setups_from(&dir).is_err());
-            assert!(save_saved_setups_to(&dir, &setups_doc()).is_err());
-            assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
-            let _ = fs::remove_dir_all(&dir);
-        }
-    }
-
-    #[test]
-    fn oversized_saved_setups_preserved_and_exportable() {
-        let dir = scratch_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let original = vec![b' '; MAX_LAYOUT_BYTES as usize + 1];
-        fs::write(dir.join(SAVED_SETUPS_FILE), &original).unwrap();
-        assert!(load_saved_setups_from(&dir).is_err());
-        assert!(save_saved_setups_to(&dir, &setups_doc()).is_err());
-        let backup = backup_saved_setups_from(&dir).unwrap();
-        assert_eq!(fs::read(&backup).unwrap(), original);
-        assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn saved_setups_backup_and_reset_preserve_exact_bytes() {
-        let dir = scratch_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let original = b"{\"version\":999,\"unrecognized\":\"keep me\"}\n";
-        fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
-        let export = backup_saved_setups_from(&dir).unwrap();
-        assert!(export.contains("saved-setups.backup-"));
-        assert_eq!(fs::read(&export).unwrap(), original);
-        let fresh = serde_json::json!({"version": SAVED_SETUPS_VERSION, "profiles": [], "templates": []});
-        let backup = reset_saved_setups_to(&dir, &fresh).unwrap().unwrap();
-        assert_eq!(fs::read(&backup).unwrap(), original);
-        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(fresh));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn saved_setups_failed_replacement_keeps_original_and_backup() {
-        let dir = scratch_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let original = b"broken but valuable";
-        fs::write(dir.join(SAVED_SETUPS_FILE), original).unwrap();
-        fs::create_dir(dir.join(format!("{SAVED_SETUPS_FILE}.tmp"))).unwrap();
-        let fresh = serde_json::json!({"version": SAVED_SETUPS_VERSION, "profiles": [], "templates": []});
-        assert!(reset_saved_setups_to(&dir, &fresh).is_err());
-        assert_eq!(fs::read(dir.join(SAVED_SETUPS_FILE)).unwrap(), original);
-        let backups: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("saved-setups.backup-")
-            })
-            .collect();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(fs::read(&backups[0]).unwrap(), original);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn layout_recovery_leaves_valid_library_untouched() {
-        let dir = scratch_dir();
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(LAYOUT_FILE), b"{not json").unwrap();
-        let setups = setups_doc();
-        fs::write(dir.join(SAVED_SETUPS_FILE), serde_json::to_vec(&setups).unwrap()).unwrap();
-        assert!(load_layout_from(&dir).is_err());
-        let fresh = current_layout(serde_json::json!({}));
-        reset_layout_to(&dir, &fresh).unwrap();
-        assert_eq!(load_saved_setups_from(&dir).unwrap(), Some(setups));
-        let _ = fs::remove_dir_all(&dir);
-    }
 }

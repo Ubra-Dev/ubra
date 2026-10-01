@@ -23,7 +23,7 @@
     customLabel?: string;
     ariaLabel?: string;
     ariaDescribedBy?: string;
-    /** "field" is borderless monospace; "input" mimics a bordered select. */
+    /** "field" is borderless UI font; "input" mimics a bordered select. */
     variant?: "field" | "input";
     onChange?: (value: string) => void;
   }
@@ -268,7 +268,7 @@
     padding: 0;
     background: transparent;
     color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 12px var(--font-ui);
   }
   .button-text {
     flex: 1 1 auto;

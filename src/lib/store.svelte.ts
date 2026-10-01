@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { agentClis } from "./agentClis.svelte";
 import {
   activeTab,
   activeWorkspace,
@@ -33,7 +34,6 @@ import {
   type Workspace,
 } from "./layout";
 import { PendingCommands } from "./pendingCommands";
-import { validateSetupInsertion } from "./savedSetups";
 import { toasts } from "./toasts.svelte.ts";
 import { StartupCommands } from "./startupCommands";
 import {
@@ -136,8 +136,6 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
-  savedSetupsRequest: { mode: "library" } | { mode: "capture"; workspaceId: string } | null =
-    $state(null);
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
@@ -897,12 +895,26 @@ class AppStore {
     return first ? { tab, paneId: first } : null;
   }
 
-  /** First-run welcome only; later workspaces use the folder picker. */
+  /**
+   * First-run welcome, reused when onboarding again after closing the last
+   * workspace. With no workspaces there is no current pane to configure, so
+   * build one instead of failing.
+   */
   completeOnboarding(
     projectDirectory: string | null,
     command: string | null,
   ): string | null {
-    if (!this.layout || !this.firstRun) return null;
+    if (!this.layout) return null;
+    if (this.layout.workspaces.length === 0) {
+      if (!projectDirectory) return null;
+      const paneId = this.createWorkspace(projectDirectory, command, false);
+      if (command?.trim()) {
+        this.lastUsedAgentCli = command.trim();
+        this.savePref("ubra.lastAgentCli", command.trim());
+      }
+      return paneId;
+    }
+    if (!this.firstRun) return null;
 
     const current = this.currentPane();
     if (!current) return null;
@@ -931,10 +943,30 @@ class AppStore {
     return pane.id;
   }
 
-  skipOnboarding(): void {
+  async skipOnboarding(): Promise<void> {
     if (this.firstRun) {
       this.firstRun = false;
       this.saveSoon(true);
+      return;
+    }
+    // Empty Workspace after closing the last workspace: start over at home,
+    // running the first detected agent CLI. With no CLI the terminal idles.
+    if (!this.layout || this.layout.workspaces.length > 0) return;
+    let home: string | null = null;
+    try {
+      home = await invoke<string>("home_dir");
+    } catch (e) {
+      console.error("ubra: home directory lookup failed", e);
+    }
+    if (!home) {
+      this.addBlankWorkspace();
+      return;
+    }
+    const command = (await agentClis.ensure())[0]?.cli ?? null;
+    this.createWorkspace(home, command, false);
+    if (command) {
+      this.lastUsedAgentCli = command;
+      this.savePref("ubra.lastAgentCli", command);
     }
   }
 
@@ -1039,45 +1071,6 @@ class AppStore {
   }
 
   paneSizesChanged(): void {
-    this.saveSoon();
-  }
-
-  openSavedSetups(workspaceId?: string): void {
-    if (!this.loaded || !this.layout || this.recoveryRequired || this.firstRun) return;
-    if (this.settingsOpen || this.pendingClose) return;
-    this.savedSetupsRequest =
-      workspaceId ? { mode: "capture", workspaceId } : { mode: "library" };
-  }
-
-  closeSavedSetups(): void {
-    this.savedSetupsRequest = null;
-  }
-
-  /** Append an instantiated saved workspace and authorize its commands. */
-  launchSavedWorkspace(workspace: Workspace): void {
-    if (!this.layout) throw new Error("Workspace is no longer available.");
-    validateSetupInsertion($state.snapshot(this.layout), workspace);
-    const ids: string[] = [];
-    for (const tab of workspace.tabs) {
-      const visit = (node: typeof tab.root): void => {
-        if (node.kind === "pane") {
-          if (node.cmd !== undefined && node.cmd.length > 0) ids.push(node.id);
-          return;
-        }
-        visit(node.first);
-        visit(node.second);
-      };
-      visit(tab.root);
-    }
-    this.startup.authorize(ids);
-    this.layout.workspaces.push(workspace);
-    this.layout.activeWorkspaceId = workspace.id;
-    const tab = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? workspace.tabs[0];
-    const focusId = tab?.zoomedPaneId ?? (tab ? collectPaneIds(tab.root)[0] : undefined);
-    if (focusId) {
-      this.focusedPaneId = focusId;
-      this.paneFocusTarget = focusId;
-    }
     this.saveSoon();
   }
 
