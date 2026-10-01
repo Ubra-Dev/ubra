@@ -19,7 +19,6 @@
     "notification:allow-request-permission",
     "updater:allow-check",
     "updater:allow-download-and-install",
-    "process:allow-restart",
-    "wdio-webdriver:default"
+    "process:allow-restart"
   ]
 }
