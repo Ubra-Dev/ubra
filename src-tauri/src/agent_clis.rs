@@ -9,6 +9,7 @@ use crate::agent_watch::AGENT_TABLE;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::mpsc;
