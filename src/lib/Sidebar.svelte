@@ -17,8 +17,10 @@
     stepSplitRatio,
   } from "./sidebarResize";
   import { store } from "./store.svelte";
+  import type { WorkspaceLayoutPreset } from "./layout";
   import { workspaceDir } from "./workspaceGit";
   import { workspaceGit } from "./workspaceGit.svelte";
+  import WorkspaceLayoutMenu from "./WorkspaceLayoutMenu.svelte";
 
   let editing = $state<string | null>(null);
   let draft = $state("");
@@ -68,6 +70,79 @@
     } else if (action === "close") {
       store.requestCloseWorkspace(m.id);
     }
+  }
+
+  // New-workspace layout picker: hovering the grid button opens a menu of
+  // prefilled tilings. Click still creates the default 2×2 grid; ArrowDown
+  // opens the menu from the keyboard. Mirrors the split-button agent picker.
+  const LAYOUT_MENU_OPEN_MS = 400;
+  const LAYOUT_MENU_CLOSE_MS = 200;
+  let layoutMenu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+  let layoutOpenTimer: ReturnType<typeof setTimeout> | null = null;
+  let layoutCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelLayoutOpen(): void {
+    if (layoutOpenTimer !== null) {
+      clearTimeout(layoutOpenTimer);
+      layoutOpenTimer = null;
+    }
+  }
+
+  function cancelLayoutClose(): void {
+    if (layoutCloseTimer !== null) {
+      clearTimeout(layoutCloseTimer);
+      layoutCloseTimer = null;
+    }
+  }
+
+  function dismissLayoutMenu(): void {
+    cancelLayoutOpen();
+    cancelLayoutClose();
+    layoutMenu = null;
+  }
+
+  function openLayoutMenu(target: HTMLElement): void {
+    const rect = target.getBoundingClientRect();
+    announceMenuOpen();
+    layoutMenu = { x: rect.left, y: rect.bottom + 4, opener: target };
+  }
+
+  function scheduleLayoutClose(): void {
+    cancelLayoutClose();
+    layoutCloseTimer = setTimeout(() => {
+      layoutCloseTimer = null;
+      layoutMenu = null;
+    }, LAYOUT_MENU_CLOSE_MS);
+  }
+
+  function layoutButtonEnter(e: PointerEvent): void {
+    if (e.pointerType !== "mouse") return;
+    cancelLayoutClose();
+    if (layoutMenu) return;
+    cancelLayoutOpen();
+    const target = e.currentTarget as HTMLElement;
+    layoutOpenTimer = setTimeout(() => {
+      layoutOpenTimer = null;
+      openLayoutMenu(target);
+    }, LAYOUT_MENU_OPEN_MS);
+  }
+
+  function layoutButtonLeave(e: PointerEvent): void {
+    if (e.pointerType !== "mouse") return;
+    cancelLayoutOpen();
+    if (layoutMenu) scheduleLayoutClose();
+  }
+
+  function onLayoutPick(preset: WorkspaceLayoutPreset): void {
+    dismissLayoutMenu();
+    store.addWorkspace(preset);
+  }
+
+  function onLayoutKey(e: KeyboardEvent): void {
+    if (e.key !== "ArrowDown") return;
+    e.preventDefault();
+    dismissLayoutMenu();
+    openLayoutMenu(e.currentTarget as HTMLElement);
   }
 
   // Sidebar resize: width handle on the outer edge, split divider between
@@ -261,6 +336,7 @@
 
 {#if store.layout && store.leftPanelOpen}
   <aside class="sidebar" style="width: {store.sidebarWidth}px">
+    <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
     <div class="split" bind:this={splitEl} bind:clientHeight={splitHeight}>
       <section class="pane" aria-label="Workspaces" style:flex-grow={splitRatio}>
         <div class="section"><Icon name="layers" size={12} /> Workspaces</div>
@@ -354,13 +430,34 @@
       </button>
       <button
         class="add-grid"
-        title="New workspace with 4 terminals (2×2)"
-        aria-label="New workspace with 4 terminals in a 2 by 2 grid"
-        onclick={() => store.addWorkspace(true)}
+        title="New workspace layout — hover to choose, click for 2×2 grid"
+        aria-label="New workspace with layout options; activates a 2 by 2 grid"
+        aria-haspopup="menu"
+        aria-expanded={layoutMenu !== null}
+        onclick={() => {
+          dismissLayoutMenu();
+          store.addWorkspace("grid-2x2");
+        }}
+        onpointerenter={layoutButtonEnter}
+        onpointerleave={layoutButtonLeave}
+        onkeydown={onLayoutKey}
       >
         <Icon name="grid" size={14} />
       </button>
     </div>
+    {#if layoutMenu}
+      <WorkspaceLayoutMenu
+        x={layoutMenu.x}
+        y={layoutMenu.y}
+        opener={layoutMenu.opener}
+        onPick={onLayoutPick}
+        onDismiss={dismissLayoutMenu}
+        onHoverChange={(inside) => {
+          if (inside) cancelLayoutClose();
+          else scheduleLayoutClose();
+        }}
+      />
+    {/if}
         </div>
       </section>
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -585,6 +682,20 @@
     overflow-x: hidden;
     scrollbar-width: thin;
     overscroll-behavior: contain;
+  }
+  .brand {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    padding: 0 6px 8px;
+  }
+  .brand-logo {
+    display: block;
+    height: 28px;
+    width: auto;
+    max-width: 100%;
+    /* Lifts the light rainbow ends off light sidebars; negligible on dark. */
+    filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.35));
   }
   .section {
     display: flex;

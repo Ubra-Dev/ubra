@@ -1,7 +1,7 @@
 /** First-run fleet: pure planning for the multi-CLI launch screen. */
 
 import type { DetectedCli } from "./agentClis";
-import { fleetTab, leavesByAreaDesc, type Rng, type Tab } from "./layout.ts";
+import { leavesByAreaDesc, newId, tilingForCount, type Tab } from "./layout.ts";
 
 /**
  * Initial fleet picks: the preferred CLI first, then detection order.
@@ -36,10 +36,10 @@ export interface FleetLaunchPlan {
 }
 
 /**
- * Roll one random tiling for `count` panes. Onboarding rolls once per
- * count (plus explicit shuffles) so the preview matches the launch.
+ * Launch plan for `count` panes: the canonical tiling shared with the
+ * workspace layout menu, so the preview always matches the launch.
  */
-export function rollFleetPlan(count: number, rng: Rng): FleetLaunchPlan {
-  const tab = fleetTab(count, rng);
+export function planFleetLayout(count: number): FleetLaunchPlan {
+  const tab: Tab = { id: newId("tab"), name: "Tab 1", root: tilingForCount(count) };
   return { tab, order: leavesByAreaDesc(tab.root) };
 }

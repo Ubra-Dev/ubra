@@ -4,9 +4,9 @@ import {
   detectedStems,
   FLEET_DEFAULT_PICKS,
   planFleet,
-  rollFleetPlan,
+  planFleetLayout,
 } from "../src/lib/fleet.ts";
-import { collectPaneIds, countPanes } from "../src/lib/layout.ts";
+import { collectPaneIds, computeLayout, countPanes } from "../src/lib/layout.ts";
 
 describe("planFleet", () => {
   it("keeps the selection in order", () => {
@@ -50,11 +50,27 @@ describe("detectedStems", () => {
   });
 });
 
-describe("rollFleetPlan", () => {
-  it("covers every pane exactly once", () => {
-    const plan = rollFleetPlan(5, () => 0.5);
+describe("planFleetLayout", () => {
+  it("covers every pane exactly once with a deterministic tiling", () => {
+    const plan = planFleetLayout(5);
+    assert.equal(plan.tab.name, "Tab 1");
     assert.equal(countPanes(plan.tab.root), 5);
     assert.deepEqual(new Set(plan.order), new Set(collectPaneIds(plan.tab.root)));
+    const again = planFleetLayout(5);
+    assert.deepEqual(
+      computeLayout(plan.tab.root).panes.map((p) => p.rect),
+      computeLayout(again.tab.root).panes.map((p) => p.rect),
+    );
+  });
+
+  it("puts the largest pane first for the primary CLI", () => {
+    const plan = planFleetLayout(7);
+    const areas = new Map(
+      computeLayout(plan.tab.root).panes.map((p) => [p.node.id, p.rect[2] * p.rect[3]] as const),
+    );
+    const ordered = plan.order.map((id) => areas.get(id) ?? 0);
+    assert.deepEqual(ordered, [...ordered].sort((a, b) => b - a));
+    assert.ok(ordered[0] > ordered[1]);
   });
 });
 

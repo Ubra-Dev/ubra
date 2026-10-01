@@ -13,10 +13,10 @@
   import {
     FLEET_DEFAULT_PICKS,
     planFleet,
-    rollFleetPlan,
+    planFleetLayout,
     type FleetLaunchPlan,
   } from "./fleet";
-  import { computeLayout } from "./layout";
+  import { computeLayout, tilingLabelForCount } from "./layout";
   import { agentClis } from "./agentClis.svelte";
   import { posthogLogs } from "./posthogLogs";
   import { PRIVACY_URL } from "./site.ts";
@@ -108,9 +108,9 @@
     fleetPicks = ordered.slice(0, FLEET_DEFAULT_PICKS).map((entry) => entry.cli);
   });
 
-  // Rolled tiling for the current pick count. Re-rolls only when the
-  // count changes (or Shuffle is pressed), so toggling which CLIs are
-  // picked never reshuffles the preview under the user.
+  // Canonical tiling for the current pick count, shared with the
+  // workspace layout menu. Rebuilt only when the count changes, so
+  // toggling which CLIs are picked never reshuffles the preview.
   let fleetPlan = $state<FleetLaunchPlan | null>(null);
   $effect(() => {
     if (revisit || step !== "fleet") return;
@@ -120,14 +120,9 @@
       return;
     }
     if (!fleetPlan || fleetPlan.order.length !== count) {
-      fleetPlan = rollFleetPlan(count, Math.random);
+      fleetPlan = planFleetLayout(count);
     }
   });
-
-  function shufflePlan(): void {
-    if (fleetCommands.length === 0) return;
-    fleetPlan = rollFleetPlan(fleetCommands.length, Math.random);
-  }
 
   /** CLI per previewed pane: picks in order onto largest-first panes. */
   const fleetAssign = $derived.by((): Map<string, string> => {
@@ -244,11 +239,11 @@
     if (onboardingActionBusy || !projectDirectory || fleetCommands.length === 0) {
       return;
     }
-    // The roll effect keeps the plan in sync; re-roll defensively if a
-    // pick landed after the last roll.
+    // The plan effect keeps the tiling in sync; rebuild defensively
+    // if a pick landed after the last build.
     let plan = fleetPlan;
     if (!plan || plan.order.length !== fleetCommands.length) {
-      plan = rollFleetPlan(fleetCommands.length, Math.random);
+      plan = planFleetLayout(fleetCommands.length);
       fleetPlan = plan;
     }
     onboardingActionBusy = true;
@@ -324,12 +319,10 @@
                 </div>
               {/each}
             </div>
-            {#if fleetCommands.length > 1}
-              <button class="shuffle-btn" type="button" onclick={shufflePlan}>
-                <Icon name="refresh" size={11} />
-                <span>Shuffle layout</span>
-              </button>
-            {/if}
+            <div class="fleet-caption">
+              {tilingLabelForCount(fleetCommands.length)} · {fleetCommands.length}
+              {fleetCommands.length === 1 ? "terminal" : "terminals"}
+            </div>
           {/if}
         </div>
         <p class="intro-foot">Every agent runs in a regular terminal.</p>
@@ -1150,21 +1143,10 @@
     font-size: 10px;
     font-weight: 700;
   }
-  .shuffle-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  .fleet-caption {
     margin-top: 8px;
-    padding: 2px 0;
-    background: transparent;
-    border: none;
     color: var(--text-muted);
-    font: inherit;
     font-size: 11px;
-    cursor: pointer;
-  }
-  .shuffle-btn:hover {
-    color: var(--text-strong);
   }
   :global(.onboarding :focus-visible) {
     outline: 2px solid var(--accent);

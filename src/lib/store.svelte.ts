@@ -19,9 +19,9 @@ import {
   findPane,
   findTabByPane,
   findWorkspaceByRoot,
-  gridTab,
   moveWorkspace,
   preferredAgentCli as pickPreferredAgentCli,
+  presetTab,
   resizePaneInTab,
   resolveWorkspaceRoot,
   sanitizeLayout,
@@ -35,6 +35,7 @@ import {
   type PaneNode,
   type Tab,
   type Workspace,
+  type WorkspaceLayoutPreset,
 } from "./layout";
 import { implicitLaunchCommand } from "./agentLaunch";
 import { restoreCommandFor } from "./agentResume";
@@ -643,11 +644,11 @@ class AppStore {
   }
 
   /** New workspace: native folder picker, defaulting to the last used agent CLI. */
-  addWorkspace(withGrid = false): void {
-    void this.addWorkspaceFromPicker(withGrid);
+  addWorkspace(preset: WorkspaceLayoutPreset = "single"): void {
+    void this.addWorkspaceFromPicker(preset);
   }
 
-  async addWorkspaceFromPicker(withGrid = false): Promise<void> {
+  async addWorkspaceFromPicker(preset: WorkspaceLayoutPreset = "single"): Promise<void> {
     if (!this.layout) return;
     let dir: string | string[] | null;
     try {
@@ -672,7 +673,7 @@ class AppStore {
     this.createWorkspace(
       dir,
       implicitLaunchCommand(this.autoLaunchAgent, this.lastUsedAgentCli || null),
-      withGrid,
+      preset,
     );
   }
 
@@ -680,12 +681,12 @@ class AppStore {
   createWorkspace(
     projectDirectory: string,
     command: string | null,
-    withGrid: boolean,
+    preset: WorkspaceLayoutPreset,
   ): string | null {
     if (!this.layout) return null;
     const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
-    if (withGrid) {
-      const tab = gridTab();
+    if (preset !== "single") {
+      const tab = presetTab(preset);
       workspace.tabs = [tab];
       workspace.activeTabId = tab.id;
     }
@@ -702,7 +703,7 @@ class AppStore {
     const first = collectPaneIds(tab.root)[0];
     const pane = first ? findPane(tab.root, first) : null;
     if (!pane) return null;
-    if (withGrid) this.paneFocusTarget = pane.id;
+    if (preset !== "single") this.paneFocusTarget = pane.id;
     if (command?.trim()) {
       workspace.defaultCli = command.trim();
     }
@@ -1068,7 +1069,7 @@ class AppStore {
     if (!this.layout) return null;
     if (this.layout.workspaces.length === 0) {
       if (!projectDirectory) return null;
-      const paneId = this.createWorkspace(projectDirectory, command, false);
+      const paneId = this.createWorkspace(projectDirectory, command, "single");
       if (command?.trim()) {
         this.lastUsedAgentCli = command.trim();
         this.savePref("ubra.lastAgentCli", command.trim());
@@ -1120,7 +1121,7 @@ class AppStore {
       this.onboardingOpen = false;
       return collectPaneIds(activeTab(existing).root)[0] ?? null;
     }
-    const paneId = this.createWorkspace(projectDirectory, command, false);
+    const paneId = this.createWorkspace(projectDirectory, command, "single");
     if (paneId && command?.trim()) {
       this.lastUsedAgentCli = command.trim();
       this.savePref("ubra.lastAgentCli", command.trim());
@@ -1189,7 +1190,7 @@ class AppStore {
       this.autoLaunchAgent,
       (await agentClis.ensure())[0]?.cli ?? null,
     );
-    this.createWorkspace(home, command, false);
+    this.createWorkspace(home, command, "single");
     if (command) {
       this.lastUsedAgentCli = command;
       this.savePref("ubra.lastAgentCli", command);
