@@ -1,0 +1,36 @@
+name: Apple notarization credential probe
+
+on:
+  push:
+    branches:
+      - codex/apple-notary-probe
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    steps:
+      - name: Authenticate with the release Notarytool credentials
+        shell: bash
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_API_KEY_P8:?APPLE_API_KEY_P8 is missing}"
+          : "${APPLE_API_KEY:?APPLE_API_KEY is missing}"
+          : "${APPLE_API_ISSUER:?APPLE_API_ISSUER is missing}"
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          fingerprint="$(openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+          echo "Decoded API key public fingerprint: $fingerprint"
+          xcrun notarytool history \
+            --key "$key_path" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --output-format json >/dev/null
+          echo "Apple accepted the API key, key ID, and issuer from GitHub Actions."
