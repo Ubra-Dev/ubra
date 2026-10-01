@@ -161,6 +161,13 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
+  /**
+   * Survival mode (`UBRA_DAEMON=1`): quitting detaches and panes keep
+   * running. Null until the backend answers; consumers fall back to the
+   * survival copy, matching backends that predate the `pty_backend`
+   * command. Never changes within a process.
+   */
+  survivalEnabled = $state<boolean | null>(null);
   /** Agent runtime link: null until the first backend status arrives. */
   daemonConnected = $state<boolean | null>(null);
   /** Last daemon error, shown in the disconnected banner. */
@@ -259,7 +266,18 @@ class AppStore {
     }
 
     void this.watchDaemon();
+    void this.fetchBackend();
     await this.retryLayout();
+  }
+
+  /** Learn whether panes survive a quit; stays null when unknown. */
+  private async fetchBackend(): Promise<void> {
+    try {
+      const backend = await invoke<string>("pty_backend");
+      this.survivalEnabled = backend === "daemon";
+    } catch (e) {
+      console.error("ubra: backend query failed", e);
+    }
   }
 
   /**
@@ -971,9 +989,10 @@ class AppStore {
   }
 
   /**
-   * Quit request from menus, shortcuts, or the tray. Panes survive a quit
-   * via the daemon, so warn unless there is nothing to survive or the user
-   * remembered a choice. `agents` is the attached-agent count for the dialog.
+   * Quit request from menus, shortcuts, or the tray. Warn whenever panes
+   * exist (they stop on quit by default, detach in survival mode) unless
+   * the user remembered a choice. `agents` is the attached-agent count
+   * for the dialog.
    */
   requestQuit(agents: number): void {
     if (this.pendingQuit) return;

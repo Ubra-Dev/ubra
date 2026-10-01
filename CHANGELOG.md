@@ -6,6 +6,11 @@ All notable changes to Ubra are documented here. The format follows
 
 ## [Unreleased]
 
+- The survival architecture (background `ubra-daemon` owning every PTY) is
+  now opt-in via `UBRA_DAEMON=1`. By default PTYs run in-process: no
+  daemon is spawned or contacted, and quitting stops every pane. The
+  frontend branches its quit dialog and Settings copy on the new
+  `pty_backend` command, so each mode describes what quitting does.
 - Terminal panes reattach to their surviving backend session across frontend
   restarts (hot reload) by stable pane key instead of spawning blank
   replacements; sessions whose panes no longer exist are reaped on load.

@@ -37,9 +37,20 @@ export interface QuitDialogCopy {
   detail: string;
 }
 
-export function quitDialogCopy(panes: number, agents: number): QuitDialogCopy {
+export function quitDialogCopy(
+  panes: number,
+  agents: number,
+  survival = true,
+): QuitDialogCopy {
   const paneWord = panes === 1 ? "pane" : "panes";
   const agentWord = agents === 1 ? "agent" : "agents";
+  if (!survival) {
+    const detail =
+      agents > 0
+        ? `${panes} terminal ${paneWord} (${agents} ${agentWord}) will stop. Quitting ends every process.`
+        : `${panes} terminal ${paneWord} will stop. Quitting ends every process.`;
+    return { title: "Quit Ubra?", detail };
+  }
   const detail =
     agents > 0
       ? `${panes} terminal ${paneWord} (${agents} ${agentWord}) will keep running in the background. Reopen Ubra to reattach, or stop every agent first.`

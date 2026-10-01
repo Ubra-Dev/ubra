@@ -402,7 +402,12 @@
   }
 
   function quitActionLabel(): string {
-    if (store.quitAction === "keep") return "Always quit and keep running";
+    // Null until the backend answers; assume survival, matching backends
+    // that predate the `pty_backend` command.
+    const survival = store.survivalEnabled ?? true;
+    if (store.quitAction === "keep") {
+      return survival ? "Always quit and keep running" : "Always quit";
+    }
     if (store.quitAction === "stop") return "Always stop agents and quit";
     return "Ask each time";
   }

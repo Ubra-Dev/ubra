@@ -8,10 +8,21 @@
 
   let remember = $state(false);
 
+  // Null until the backend answers; assume survival, matching backends
+  // that predate the `pty_backend` command.
+  const survival = $derived(store.survivalEnabled ?? true);
+
   function activeAgentCount(): number {
     return agent
       .activeAgents()
       .reduce((sum, group) => sum + group.agents.length, 0);
+  }
+
+  // Without survival both quit paths stop every pane, so the primary
+  // action remembers "stop" (quit at once) instead of "keep".
+  function confirmPrimary(): void {
+    if (survival) store.confirmQuitKeep(remember);
+    else store.confirmQuitStop(remember);
   }
 
   onMount(() => {
@@ -42,13 +53,13 @@
       // keep explicitly only when focus is elsewhere in the dialog.
       if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
-      store.confirmQuitKeep(remember);
+      confirmPrimary();
       return;
     }
     // Single-key shortcuts: no modifiers, dialog has no text inputs.
     if (!e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.key === "y" || e.key === "Y") {
-        store.confirmQuitKeep(remember);
+        confirmPrimary();
         return;
       }
       if (e.key === "n" || e.key === "N") {
@@ -61,7 +72,7 @@
 
 {#if store.pendingQuit}
   {@const p = store.pendingQuit}
-  {@const copy = quitDialogCopy(p.panes, p.agents)}
+  {@const copy = quitDialogCopy(p.panes, p.agents, survival)}
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="backdrop"
@@ -77,7 +88,7 @@
       aria-describedby="quit-desc"
       tabindex="-1"
       data-keyboard-overlay
-      use:overlayFocus={{ initial: ".keep" }}
+      use:overlayFocus={{ initial: survival ? ".keep" : ".quit-primary" }}
       onkeydown={onKeydown}
     >
       <div class="title" id="quit-title">{copy.title}</div>
@@ -90,20 +101,30 @@
         <button title="Cancel (N or Esc)" onclick={() => store.cancelQuit()}>
           Cancel
         </button>
-        <button
-          class="danger"
-          title="Stop every agent and quit"
-          onclick={() => store.confirmQuitStop(remember)}
-        >
-          Stop Agents & Quit
-        </button>
-        <button
-          class="keep"
-          title="Quit; agents keep running (Enter or Y)"
-          onclick={() => store.confirmQuitKeep(remember)}
-        >
-          Quit & Keep Running
-        </button>
+        {#if survival}
+          <button
+            class="danger"
+            title="Stop every agent and quit"
+            onclick={() => store.confirmQuitStop(remember)}
+          >
+            Stop Agents & Quit
+          </button>
+          <button
+            class="keep"
+            title="Quit; agents keep running (Enter or Y)"
+            onclick={() => store.confirmQuitKeep(remember)}
+          >
+            Quit & Keep Running
+          </button>
+        {:else}
+          <button
+            class="danger quit-primary"
+            title="Quit; terminals stop (Enter or Y)"
+            onclick={() => store.confirmQuitStop(remember)}
+          >
+            Quit
+          </button>
+        {/if}
       </div>
     </div>
   </div>

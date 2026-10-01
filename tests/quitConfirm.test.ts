@@ -76,4 +76,18 @@ describe("quitDialogCopy", () => {
     assert.match(copy.detail, /2 terminal panes will keep running/);
     assert.doesNotMatch(copy.detail, /agent/);
   });
+
+  it("warns that panes stop without survival mode", () => {
+    const copy = quitDialogCopy(3, 2, false);
+    assert.equal(copy.title, "Quit Ubra?");
+    assert.match(copy.detail, /3 terminal panes \(2 agents\) will stop/);
+    assert.match(copy.detail, /Quitting ends every process/);
+    assert.doesNotMatch(copy.detail, /keep running|reattach/);
+  });
+
+  it("omits the agent count without survival or attached agents", () => {
+    const copy = quitDialogCopy(2, 0, false);
+    assert.match(copy.detail, /2 terminal panes will stop/);
+    assert.doesNotMatch(copy.detail, /agent/);
+  });
 });

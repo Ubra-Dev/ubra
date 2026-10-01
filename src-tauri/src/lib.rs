@@ -73,15 +73,16 @@ fn kill_switch(var: &Result<String, std::env::VarError>) -> bool {
     matches!(var.as_deref(), Ok("1"))
 }
 
-/// Diagnostic kill-switch for the survival architecture: with
-/// `UBRA_LOCAL_PTY=1`, PTYs live in this process (pre-survival behavior)
-/// and quitting stops them. No daemon is spawned or contacted.
-fn local_pty_enabled() -> bool {
-    kill_switch(&std::env::var("UBRA_LOCAL_PTY"))
+/// Opt-in for the survival architecture: with `UBRA_DAEMON=1`, PTYs live
+/// in the background daemon and quitting detaches from them. The default
+/// is in-process PTYs: no daemon is spawned or contacted, and quitting
+/// stops every pane.
+fn daemon_enabled() -> bool {
+    kill_switch(&std::env::var("UBRA_DAEMON"))
 }
 
-/// Where PTYs live. Daemon is the survival architecture; Local restores
-/// in-process PTYs for diagnosis (`UBRA_LOCAL_PTY=1`).
+/// Where PTYs live. Local is the default (in-process PTYs, no survival);
+/// Daemon is the survival architecture (`UBRA_DAEMON=1`).
 enum PtyBackend {
     Local {
         manager: Arc<PtyManager>,
@@ -315,6 +316,18 @@ fn pty_history(backend: State<'_, PtyBackend>, key: String) -> Result<Option<Pty
     backend.history(&key)
 }
 
+/// Which backend serves `pty_*`: `"local"` (default, quitting stops
+/// panes) or `"daemon"` (survival mode, quitting detaches). The frontend
+/// branches quit copy on this; it never changes within a process.
+#[tauri::command]
+fn pty_backend(backend: State<'_, PtyBackend>) -> &'static str {
+    if backend.is_local() {
+        "local"
+    } else {
+        "daemon"
+    }
+}
+
 #[tauri::command]
 fn agent_snapshot(backend: State<'_, PtyBackend>) -> Result<serde_json::Value, String> {
     let snapshot = backend.agent_states()?;
@@ -438,9 +451,10 @@ fn git_init(root: String) -> Result<String, String> {
     git::init(&root)
 }
 
-/// Quit the GUI and detach: the background daemon keeps every agent
-/// running. Reopening reattaches to the same sessions. With
-/// `UBRA_LOCAL_PTY=1` there is no daemon, so local panes stop on exit.
+/// Quit the GUI. In survival mode (`UBRA_DAEMON=1`) this detaches: the
+/// background daemon keeps every agent running and reopening reattaches
+/// to the same sessions. By default there is no daemon, so local panes
+/// stop on exit.
 #[tauri::command]
 fn quit_app(app: AppHandle) -> Result<(), String> {
     app.state::<ShellState>()
@@ -677,19 +691,18 @@ pub fn run() {
                     None
                 }
             };
-            if local_pty_enabled() {
-                eprintln!(
-                    "ubra: UBRA_LOCAL_PTY=1: in-process PTYs without survival (diagnostic mode)"
-                );
+            if daemon_enabled() {
+                eprintln!("ubra: UBRA_DAEMON=1: PTYs live in the background daemon (survival mode)");
+                app.manage(PtyBackend::Daemon(DaemonHandle::default()));
+                supervise_daemon(app.handle().clone(), daemon_state_dir(), rules_dir);
+            } else {
+                eprintln!("ubra: in-process PTYs without survival (set UBRA_DAEMON=1 to opt in)");
                 let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
                 let poll_app = app.handle().clone();
                 let statuses = AgentStatusService::start(&manager, rules_dir, move |update| {
                     let _ = poll_app.emit("agent-state-update", &update);
                 });
                 app.manage(PtyBackend::Local { manager, statuses });
-            } else {
-                app.manage(PtyBackend::Daemon(DaemonHandle::default()));
-                supervise_daemon(app.handle().clone(), daemon_state_dir(), rules_dir);
             }
             app.manage(ShellState::default());
             app.manage(usage::UsageCache::new());
@@ -707,7 +720,7 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("ubra: tray unavailable; closing quits: {e}");
                     app.dialog()
-                        .message(if local_pty_enabled() {
+                        .message(if !daemon_enabled() {
                             "The system tray is unavailable. Closing this window will quit Ubra and stop its terminals. You can also quit from Settings."
                         } else {
                             "The system tray is unavailable. Closing this window will quit Ubra; agents keep running in the background. You can also quit from the app menu."
@@ -749,7 +762,7 @@ pub fn run() {
                             shell.close_warning_pending.store(true, Ordering::SeqCst);
                             let app = window.app_handle().clone();
                             app.dialog()
-                                .message(if local_pty_enabled() {
+                                .message(if !daemon_enabled() {
                                     "Ubra could not hide its window. Closing will quit the app and stop its terminals."
                                 } else {
                                     "Ubra could not hide its window. Closing will quit the app; agents keep running in the background."
@@ -785,6 +798,7 @@ pub fn run() {
             pty_kill,
             pty_snapshot,
             pty_history,
+            pty_backend,
             agent_snapshot,
             detect_agent_clis,
             supported_usage_clis,

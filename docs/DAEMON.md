@@ -4,9 +4,12 @@
 over loopback TCP. By default Unix runtime files live in
 `<tmp>/ubra-<effective-uid>/`; Windows uses the per-user app data directory.
 `ubra-cli` drives it — all output is pretty-printed JSON, and the CLI starts the
-daemon on demand. The desktop GUI is also a daemon client: it owns no PTYs
-itself, so quitting the app detaches without stopping any agent (Herdr-style
-persistence); only an explicit stop ends the agents.
+daemon on demand. The desktop GUI can also run as a daemon client
+(`UBRA_DAEMON=1`, the survival architecture): it then owns no PTYs itself,
+so quitting the app detaches without stopping any agent (Herdr-style
+persistence); only an explicit stop ends the agents. By default the GUI
+runs PTYs in-process instead: no daemon is spawned or contacted, and
+quitting stops every pane.
 
 The macOS GUI bundle includes sibling daemon/CLI executables under
 `Ubra.app/Contents/MacOS/`; they are not automatically added to `PATH`.
@@ -75,26 +78,30 @@ takes `--state-dir`). In dev, `tauri dev` builds the `ubra-daemon`/`ubra-cli`
 sidecars first via `beforeDevCommand`; the GUI spawns the daemon sibling from
 `src-tauri/target/debug/`.
 
-Temporary diagnostic: `UBRA_LOCAL_PTY=1` disables the survival
-architecture for that launch. PTYs and the agent watcher run in-process
-(pre-survival behavior), no daemon is spawned or contacted, and quitting
-stops every pane. Restart without the variable to readopt the daemon's
-surviving sessions.
+Survival mode is opt-in: `UBRA_DAEMON=1` enables the survival
+architecture for that launch. The GUI then probes the daemon port file,
+spawns a detached daemon (own session/process group, stdio closed) when
+none answers, and connects over the same authenticated protocol. Without
+the variable PTYs and the agent watcher run in-process, no daemon is
+spawned or contacted, and quitting stops every pane; a stray daemon from
+an earlier survival launch keeps running untouched. Restart with the
+variable to readopt the daemon's surviving sessions.
 
 ## GUI runtime
 
-On startup the GUI probes the daemon port file and spawns a detached daemon
-(own session/process group, stdio closed) when none answers, then connects
-over the same authenticated protocol. A supervisor thread forwards `pty_*`
-and `agent-state-update` events to the frontend and retries across
-disconnects; every `pty_*` Tauri command is a daemon round trip.
+In survival mode a supervisor thread forwards `pty_*` and
+`agent-state-update` events to the frontend and retries across
+disconnects; every `pty_*` Tauri command is a daemon round trip. The
+frontend learns the mode from the `pty_backend` command and branches its
+quit copy: survival quitting detaches, default quitting stops every pane.
 
 - `Quit Ubra` asks first when panes exist (rememberable in the dialog, reset
-  in Settings → App): quitting detaches, the daemon keeps every agent running,
-  and reopening readopts the same sessions by pane key. With no panes it quits
+  in Settings → App). In survival mode quitting detaches, the daemon keeps
+  every agent running, and reopening readopts the same sessions by pane
+  key. By default quitting stops every pane. With no panes it quits
   at once, as does a remembered choice.
 - `Stop Agents and Quit` (menus, tray) shuts the daemon down first. It
-  never spawns a daemon to stop one.
+  never spawns a daemon to stop one; with in-process PTYs it just quits.
 - While disconnected the GUI shows a reconnecting banner; on reconnect it
   remounts every terminal (adopt live, else fresh spawn).
 - GUI panes spawn keyed (`pane-<uuid>`) with the query responder off so
