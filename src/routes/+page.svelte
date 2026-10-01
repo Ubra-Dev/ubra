@@ -1,143 +1,99 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { agent } from "$lib/agent.svelte";
+  import { buildTrayPayload, createTraySync } from "$lib/traySync";
   import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+  import QuitDialog from "$lib/QuitDialog.svelte";
   import FirstRun from "$lib/FirstRun.svelte";
-  import SavedSetupsModal from "$lib/SavedSetupsModal.svelte";
   import SettingsModal from "$lib/SettingsModal.svelte";
-  import { isEditableTarget, matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
+  import { matchShortcutEvent, isMacPlatform } from "$lib/shortcuts";
+  import NativeMenus from "$lib/NativeMenus.svelte";
+  import { commandContext, dispatchCommand } from "$lib/appCommandRuntime";
+  import { canDispatch, matchEditingShortcut, shouldDispatchDom, type CommandRequest } from "$lib/appCommands";
+  import { nativeOwnsShortcut } from "$lib/nativeMenus";
   import { overlayFocus } from "$lib/overlayFocus";
   import { store } from "$lib/store.svelte";
-  import EmptyWorkspaces from "$lib/EmptyWorkspaces.svelte";
+  import { updater } from "$lib/updater.svelte";
+  import RightSidebar from "$lib/RightSidebar.svelte";
   import Sidebar from "$lib/Sidebar.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
   import TabBar from "$lib/TabBar.svelte";
   import TabCanvas from "$lib/TabCanvas.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import { agentClis } from "$lib/agentClis.svelte";
+  import { posthogLogs } from "$lib/posthogLogs";
+  import { syncTelemetryToConsent } from "$lib/telemetrySync";
   import { workspaceGit } from "$lib/workspaceGit.svelte";
   import { themeStyle } from "$lib/themes";
+  import { syncWindowTheme } from "$lib/windowTheme";
   import "$lib/uiFontFaces";
   import { uiFontStyle } from "$lib/uiFonts";
   import { uiZoomStyle } from "$lib/uiScale";
 
   onMount(() => {
+    // Consent first: align the analytics client before any lifecycle events.
+    void syncTelemetryToConsent().then(() => posthogLogs.applicationBooted());
     void store.boot();
     agent.start();
     workspaceGit.start();
     void agentClis.ensure();
+    document.addEventListener("keydown", onGlobalKeyDown, true);
+    return () => document.removeEventListener("keydown", onGlobalKeyDown, true);
+  });
+
+  // Keep the native titlebar on the app theme's scheme (boot + every pick).
+  $effect(() => {
+    void syncWindowTheme(store.theme.ui.colorScheme);
+  });
+
+  const traySync = createTraySync((payload) => {
+    invoke("tray_update", { summary: payload }).catch((error: unknown) => {
+      console.error("ubra: tray update failed", error);
+    });
+  });
+
+  // Push agent status to the menu-bar/tray icon (debounced, deduped).
+  $effect(() => {
+    if (!store.loaded) return;
+    traySync.queue(
+      buildTrayPayload(agent.activeAgents(), {
+        showTitle: store.trayTitleEnabled,
+        showAgents: store.trayMenuListEnabled,
+      }),
+    );
+  });
+
+  // Silent background update checks once prefs are loaded; the Settings →
+  // App toggle starts/stops them live. Only the check is automatic.
+  $effect(() => {
+    if (!store.loaded) return;
+    if (store.autoCheckUpdates) updater.startAutoCheck();
+    else updater.stopAutoCheck();
   });
 
   function onGlobalKeyDown(e: KeyboardEvent): void {
-    if (e.defaultPrevented) return;
-    const overlayOpen = store.settingsOpen || !!store.pendingClose ||
-      store.firstRun || store.onboardingOpen || store.recoveryRequired ||
-      store.recoveryBusy || !!store.savedSetupsRequest ||
-      !!document.querySelector("[data-keyboard-overlay]");
-    const matched = matchShortcutEvent(e, isMacPlatform(navigator.platform), overlayOpen);
-    if (!matched) return;
-    // Typing wins in rename inputs and selects — except settings, which opens
-    // from anywhere. xterm's helper textarea is exempt: it looks editable but
-    // terminal focus must not swallow app shortcuts.
-    const ae = document.activeElement as HTMLElement | null;
-    const inTerminal = ae?.closest?.(".xterm") != null;
-    if (
-      !inTerminal &&
-      isEditableTarget(ae) &&
-      matched.action !== "open-settings"
-    )
-      return;
-    if (matched.action === "open-settings") {
-      e.preventDefault();
-      store.settingsOpen = !store.settingsOpen;
-      return;
+    if (e.defaultPrevented || e.isComposing) return;
+    const isMac = isMacPlatform(navigator.platform);
+    const context = commandContext();
+    let matched: CommandRequest | null = matchShortcutEvent(e, isMac);
+    if (!matched && !(isMac ? e.ctrlKey : e.metaKey)) {
+      const action = matchEditingShortcut({ key: e.key, mod: isMac ? e.metaKey : e.ctrlKey,
+        shift: e.shiftKey, alt: e.altKey }, isMac, context.terminalFocus);
+      if (action) matched = { action };
     }
-    if (!store.loaded || !store.layout) return;
-    switch (matched.action) {
-      case "new-tab":
-        store.addTab();
-        break;
-      case "close-pane-or-tab":
-        store.requestClosePaneOrTab();
-        break;
-      case "new-workspace":
-        store.addWorkspace();
-        break;
-      case "split-right": {
-        const cur = store.currentPane();
-        if (cur) store.splitPane(cur.paneId, "row");
-        break;
-      }
-      case "split-down": {
-        const cur = store.currentPane();
-        if (cur) store.splitPane(cur.paneId, "col");
-        break;
-      }
-      case "toggle-zoom": {
-        const cur = store.currentPane();
-        if (cur) store.toggleZoomPane(cur.paneId);
-        break;
-      }
-      case "prev-tab":
-        store.cycleTab(-1);
-        break;
-      case "next-tab":
-        store.cycleTab(1);
-        break;
-      case "jump-tab":
-        if (matched.index !== undefined) store.jumpTab(matched.index);
-        break;
-      case "prev-workspace":
-        store.cycleWorkspace(-1);
-        break;
-      case "next-workspace":
-        store.cycleWorkspace(1);
-        break;
-      case "font-bigger":
-        store.bumpTermFontSize(1);
-        store.bumpUiScale(1);
-        break;
-      case "font-smaller":
-        store.bumpTermFontSize(-1);
-        store.bumpUiScale(-1);
-        break;
-      case "font-reset":
-        store.resetTermFontSize();
-        store.resetUiScale();
-        break;
-      case "rename-pane":
-        store.requestPaneRename();
-        break;
-      case "focus-neighbor":
-        if (matched.dir) store.focusNeighbor(matched.dir);
-        break;
-      case "swap-neighbor":
-        if (matched.dir) store.swapWithNeighbor(matched.dir);
-        break;
-      case "resize-pane":
-        if (matched.dir) store.resizeFocused(matched.dir);
-        break;
-      case "move-pane-to-new-tab": {
-        const cur = store.currentPane();
-        if (cur) store.movePaneToNewTab(cur.paneId);
-        break;
-      }
-      case "move-pane-to-new-workspace": {
-        const cur = store.currentPane();
-        if (cur) store.movePaneToNewWorkspace(cur.paneId);
-        break;
-      }
-      case "find-in-pane":
-        store.requestPaneFind();
-        break;
-      default:
-        return;
-    }
+    if (!matched || matched.action === "switch-workspace" || !canDispatch(matched, context)) return;
+    // Capture before xterm so app accelerators never become terminal input.
     e.preventDefault();
+    const ordinaryTextEdit = !isMac && context.textFocus && !e.shiftKey &&
+      ["copy", "paste", "select-all", "undo", "redo", "cut"].includes(matched.action);
+    if (shouldDispatchDom(matched.action, !ordinaryTextEdit && nativeOwnsShortcut(matched.action), e.key === "+" && e.shiftKey)) {
+      void dispatchCommand(matched);
+    }
   }
 </script>
 
-<svelte:window onkeydown={onGlobalKeyDown} />
+<NativeMenus />
 
 <div class="root" style={`${themeStyle(store.theme, store.termOpacity / 100)};${uiZoomStyle(store.uiScale)};${uiFontStyle(store.uiFontId)}`}>
   {#if !store.loaded}
@@ -163,7 +119,7 @@
   {:else if store.firstRun}
     <FirstRun />
   {:else if store.layout}
-    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || store.onboardingOpen || !!store.savedSetupsRequest}>
+    <div class="shell" inert={store.settingsOpen || !!store.pendingClose || !!store.pendingQuit || store.onboardingOpen}>
       <div class="app">
         <Sidebar />
         <div class="main">
@@ -180,23 +136,22 @@
             {/each}
           </div>
         </div>
+        <RightSidebar />
       </div>
       <StatusBar />
     </div>
-    {#if store.layout.workspaces.length === 0 && !store.onboardingOpen}
-      <EmptyWorkspaces />
-    {/if}
-    {#if store.onboardingOpen}
+    {#if store.layout.workspaces.length === 0}
       <FirstRun />
     {/if}
   {/if}
   {#if store.settingsOpen}
     <SettingsModal />
   {/if}
-  {#if store.savedSetupsRequest}
-    <SavedSetupsModal />
+  {#if store.onboardingOpen}
+    <FirstRun revisit />
   {/if}
   <ConfirmDialog />
+  <QuitDialog />
   <Toasts />
 </div>
 
@@ -204,7 +159,10 @@
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: transparent;
+    /* Opaque: a transparent webview forces full-window blending every frame
+       and makes resize sluggish on macOS. Matches the default theme until
+       the app root paints. */
+    background: #1a1a1a;
     overflow: hidden;
   }
   .root {

@@ -1,7 +1,8 @@
 //! Notification sounds, Herdr-style (`[ui.sound]`).
 //!
-//! The default chimes are synthesized at runtime (no audio assets to bundle);
-//! each kind can be overridden with a user audio file (mp3/ogg/wav/flac).
+//! There is exactly one chime: an audio file (mp3/ogg/wav/flac) whose path
+//! the frontend always sends. When it is missing or unreadable, a
+//! synthesized fallback plays so the finish signal is never silent.
 //! Playback runs on a dedicated audio thread holding the output stream, so
 //! sounds play even when the window is hidden to the tray.
 
@@ -23,46 +24,23 @@ pub enum SoundKind {
     Request,
 }
 
-/// Built-in chime style for the Done signal. Request keeps its own urgent
-/// triple regardless of style (it only fires once blocked-detection lands).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChimeStyle {
-    #[default]
-    Default,
-    Bright,
-    Soft,
-    Pop,
-}
-
-/// One chime note: (frequency Hz, length).
+/// One fallback chime note: (frequency Hz, length).
 pub fn chime_notes(kind: SoundKind) -> Vec<(f32, Duration)> {
-    chime_notes_styled(kind, ChimeStyle::Default)
-}
-
-pub fn chime_notes_styled(kind: SoundKind, style: ChimeStyle) -> Vec<(f32, Duration)> {
     let ms = |n: u64| Duration::from_millis(n);
     match kind {
         SoundKind::Request => vec![(880.0, ms(110)), (659.25, ms(110)), (880.0, ms(240))],
-        SoundKind::Done => match style {
-            // Default: rising two-note chime.
-            ChimeStyle::Default => vec![(659.25, ms(120)), (880.0, ms(220))],
-            ChimeStyle::Bright => vec![(880.0, ms(90)), (1174.66, ms(90)), (1567.98, ms(200))],
-            ChimeStyle::Soft => vec![(523.25, ms(160)), (392.0, ms(260))],
-            ChimeStyle::Pop => vec![(1200.0, ms(70)), (800.0, ms(100))],
-        },
+        SoundKind::Done => vec![(659.25, ms(120)), (880.0, ms(220))],
     }
 }
 
-fn append_chime(player: &Player, kind: SoundKind, style: ChimeStyle) {
-    for (freq, len) in chime_notes_styled(kind, style) {
+fn append_chime(player: &Player, kind: SoundKind) {
+    for (freq, len) in chime_notes(kind) {
         player.append(SineWave::new(freq).take_duration(len).amplify(0.2));
     }
 }
 
 struct PlayMsg {
     kind: SoundKind,
-    style: ChimeStyle,
     file: Option<PathBuf>,
 }
 
@@ -76,22 +54,13 @@ fn expand_tilde(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// Resolve a user override path: `None`/blank means "synthesized default".
+/// Resolve the chime path: `None`/blank means "synthesized fallback".
 pub fn resolve_override(file: Option<&str>) -> Option<PathBuf> {
     let raw = file?.trim();
     if raw.is_empty() {
         return None;
     }
     Some(expand_tilde(raw))
-}
-
-/// True when the path opens and decodes as audio (header sniff, no playback).
-pub fn file_decodes(path: &str) -> bool {
-    let path = expand_tilde(path.trim());
-    File::open(&path)
-        .ok()
-        .and_then(|f| Decoder::try_from(f).ok())
-        .is_some()
 }
 
 fn play_on(player: &Player, msg: &PlayMsg) {
@@ -102,11 +71,11 @@ fn play_on(player: &Player, msg: &PlayMsg) {
                 return;
             }
             _ => {
-                eprintln!("ubra: sound file unreadable, using default chime: {path:?}");
+                eprintln!("ubra: sound file unreadable, using fallback chime: {path:?}");
             }
         }
     }
-    append_chime(player, msg.kind, msg.style);
+    append_chime(player, msg.kind);
 }
 
 fn audio_loop(rx: mpsc::Receiver<PlayMsg>) {
@@ -149,11 +118,10 @@ fn sender() -> &'static Sender<PlayMsg> {
 
 /// Queue a notification sound. Best-effort: failures are logged on the audio
 /// thread, never surfaced to the notify flow.
-pub fn play(kind: SoundKind, style: ChimeStyle, file: Option<&str>) -> anyhow::Result<()> {
+pub fn play(kind: SoundKind, file: Option<&str>) -> anyhow::Result<()> {
     sender()
         .send(PlayMsg {
             kind,
-            style,
             file: resolve_override(file),
         })
         .map_err(|e| anyhow::anyhow!("audio thread gone: {e}"))
@@ -161,9 +129,7 @@ pub fn play(kind: SoundKind, style: ChimeStyle, file: Option<&str>) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        chime_notes, chime_notes_styled, file_decodes, resolve_override, ChimeStyle, SoundKind,
-    };
+    use super::{chime_notes, resolve_override, SoundKind};
 
     #[test]
     fn chimes_differ_per_kind() {
@@ -177,54 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn chime_styles_differ_for_done() {
-        let styles = [
-            ChimeStyle::Default,
-            ChimeStyle::Bright,
-            ChimeStyle::Soft,
-            ChimeStyle::Pop,
-        ];
-        let seqs: Vec<_> = styles
-            .iter()
-            .map(|s| chime_notes_styled(SoundKind::Done, *s))
-            .collect();
-        for seq in &seqs {
-            assert!(!seq.is_empty());
-            for (_, len) in seq {
-                assert!(!len.is_zero());
-            }
-        }
-        for (i, a) in seqs.iter().enumerate() {
-            for b in &seqs[i + 1..] {
-                assert_ne!(a, b);
-            }
-        }
-    }
-
-    #[test]
-    fn request_ignores_style() {
-        let expected = chime_notes(SoundKind::Request);
-        for style in [
-            ChimeStyle::Default,
-            ChimeStyle::Bright,
-            ChimeStyle::Soft,
-            ChimeStyle::Pop,
-        ] {
-            assert_eq!(chime_notes_styled(SoundKind::Request, style), expected);
-        }
-    }
-
-    #[test]
-    fn blank_override_means_default() {
+    fn blank_override_means_fallback() {
         assert_eq!(resolve_override(None), None);
         assert_eq!(resolve_override(Some("")), None);
         assert_eq!(resolve_override(Some("   ")), None);
         assert!(resolve_override(Some("/tmp/x.mp3")).is_some());
-    }
-
-    #[test]
-    fn missing_file_does_not_decode() {
-        assert!(!file_decodes("/nonexistent-ubra-sound-12345.mp3"));
-        assert!(!file_decodes(""));
     }
 }

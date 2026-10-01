@@ -16,6 +16,16 @@ export interface PaneNode {
   cmd?: string[];
   /** false requires explicit launch authorization; absence keeps legacy auto-run. */
   cmdOnRestore?: boolean;
+  /** Last agent CLI launched in this pane; rerun when it spawns fresh. */
+  agentCli?: string;
+  /** Captured agent session for resume-after-restart (stale-tolerant). */
+  agentSession?: AgentSession;
+}
+
+/** Session captured from a running agent; `cli` names its producer. */
+export interface AgentSession {
+  cli: string;
+  value: string;
 }
 
 export interface SplitNode {
@@ -42,6 +52,8 @@ export interface Workspace {
   name: string;
   tabs: Tab[];
   activeTabId: string;
+  /** Project folder shown in the Explorer / Source Control panels. */
+  root?: string;
   /** Agent command auto-run in new tabs/panes; unset disables auto-run. */
   defaultCli?: string;
   /** Spawn directory for new tabs/panes; unset keeps the backend default. */
@@ -90,6 +102,53 @@ export function gridTab(name = "Tab 1"): Tab {
   };
 }
 
+/**
+ * First-run fleet tab for `count` panes in a random tiling. Pane priority
+ * comes from `leavesByAreaDesc`: the primary CLI takes the largest pane.
+ */
+export function fleetTab(count: number, rng: Rng, name = "Tab 1"): Tab {
+  return { id: newId("tab"), name, root: randomTiling(count, rng) };
+}
+
+/** Injectable randomness for tiling; production passes Math.random. */
+export type Rng = () => number;
+
+/** Random split ratio bounds: wide enough to surprise, never a sliver. */
+const TILE_RATIO_MIN = 0.4;
+const TILE_RATIO_MAX = 0.6;
+
+/**
+ * Random binary tiling for exactly `count` panes (counts below 1 give one).
+ * Splits recurse with a random direction, pane share, and ratio, so every
+ * first-run fleet lands in a fresh arrangement.
+ */
+export function randomTiling(count: number, rng: Rng): LayoutNode {
+  const panes = Math.max(Math.floor(count) || 1, 1);
+  if (panes === 1) return defaultPane();
+  const share = 1 + Math.floor(rng() * (panes - 1));
+  const ratio = TILE_RATIO_MIN + rng() * (TILE_RATIO_MAX - TILE_RATIO_MIN);
+  return {
+    kind: "split",
+    id: newId("split"),
+    dir: rng() < 0.5 ? "row" : "col",
+    sizes: [ratio, 1 - ratio],
+    first: randomTiling(share, rng),
+    second: randomTiling(panes - share, rng),
+  };
+}
+
+/** Leaf pane ids ordered by area, largest first. */
+export function leavesByAreaDesc(node: LayoutNode): string[] {
+  return computeLayout(node)
+    .panes.slice()
+    .sort((p, q) => {
+      const [, , pw, ph] = p.rect;
+      const [, , qw, qh] = q.rect;
+      return qw * qh - pw * ph;
+    })
+    .map((pane) => pane.node.id);
+}
+
 export function defaultWorkspace(name = "Workspace 1"): Workspace {
   const tab = defaultTab();
   return { id: newId("ws"), name, tabs: [tab], activeTabId: tab.id };
@@ -136,6 +195,53 @@ export function preferredAgentCli(
 
 export function countPanes(node: LayoutNode): number {
   return node.kind === "pane" ? 1 : countPanes(node.first) + countPanes(node.second);
+}
+
+/**
+ * Remember the agent CLI queued to run in a pane, so a fresh spawn after a
+ * restart can rerun it. False when the command is blank or the pane is gone;
+ * the stamp persists with the layout until the pane closes or another
+ * CLI is queued.
+ */
+export function stampPaneAgentCli(
+  layout: Layout,
+  paneId: string,
+  command: string,
+): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  const found = findTabByPane(layout, paneId);
+  const node = found ? findPane(found.tab.root, paneId) : null;
+  if (!node) return false;
+  node.agentCli = trimmed;
+  return true;
+}
+
+/**
+ * Remember the agent session observed in a pane, for resume-after-restart.
+ * True only when the stamp changes: agent updates arrive far more often
+ * than sessions do, and unchanged stamps must not dirty the layout.
+ */
+export function stampPaneAgentSession(
+  layout: Layout,
+  paneId: string,
+  cli: string,
+  value: string,
+): boolean {
+  const trimmedCli = cli.trim();
+  const trimmedValue = value.trim();
+  if (!trimmedCli || !trimmedValue) return false;
+  const found = findTabByPane(layout, paneId);
+  const node = found ? findPane(found.tab.root, paneId) : null;
+  if (!node) return false;
+  if (
+    node.agentSession?.cli === trimmedCli &&
+    node.agentSession.value === trimmedValue
+  ) {
+    return false;
+  }
+  node.agentSession = { cli: trimmedCli, value: trimmedValue };
+  return true;
 }
 
 export function findTabByPane(
@@ -420,7 +526,7 @@ function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNo
   const id = identity(value["id"], context);
   if (value["kind"] === "pane") {
     const node: PaneNode = { kind: "pane", id };
-    for (const key of ["cwd", "title"] as const) {
+    for (const key of ["cwd", "title", "agentCli"] as const) {
       if (value[key] !== undefined) {
         if (typeof value[key] !== "string") throw new Error(`Invalid saved pane ${key}.`);
         node[key] = value[key];
@@ -437,6 +543,21 @@ function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNo
         throw new Error("Invalid saved pane command restore policy.");
       }
       node.cmdOnRestore = value["cmdOnRestore"];
+    }
+    if (value["agentSession"] !== undefined) {
+      const session: unknown = value["agentSession"];
+      const fields =
+        typeof session === "object" && session !== null && !Array.isArray(session)
+          ? (session as Record<string, unknown>)
+          : null;
+      if (
+        !fields ||
+        typeof fields["cli"] !== "string" ||
+        typeof fields["value"] !== "string"
+      ) {
+        throw new Error("Invalid saved pane agent session.");
+      }
+      node.agentSession = { cli: fields["cli"], value: fields["value"] };
     }
     return node;
   }
@@ -510,6 +631,10 @@ function sanitizeWorkspace(v: unknown, context: LoadContext): Workspace {
   if (typeof defaultCwd === "string" && defaultCwd.trim()) {
     workspace.defaultCwd = defaultCwd;
   }
+  if (value["root"] !== undefined) {
+    if (typeof value["root"] !== "string") throw new Error("Invalid saved workspace root.");
+    workspace.root = value["root"];
+  }
   return workspace;
 }
 
@@ -571,6 +696,44 @@ export function baseName(path: string): string {
   if (trimmed === "") return path === "" ? "" : "/";
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1];
+}
+
+/**
+ * Folder shown by Explorer / Source Control: explicit sidebar root, then the
+ * current folder-workspace default, then the active pane or first pane cwd.
+ */
+export function resolveWorkspaceRoot(
+  ws: Workspace,
+  activePaneId?: string | null,
+): string | undefined {
+  if (ws.root?.trim()) return ws.root;
+  if (ws.defaultCwd?.trim()) return ws.defaultCwd;
+  const tab = activeTab(ws);
+  if (activePaneId) {
+    const pane = findPane(tab.root, activePaneId);
+    if (pane?.cwd?.trim()) return pane.cwd;
+  }
+  const firstCwd = (node: LayoutNode): string | undefined => {
+    if (node.kind === "pane") return node.cwd?.trim() ? node.cwd : undefined;
+    return firstCwd(node.first) ?? firstCwd(node.second);
+  };
+  return firstCwd(tab.root);
+}
+
+/** Find the workspace already pointing at a folder, if any. Trailing slashes
+ * are ignored so picker results match saved roots and folder-workspace defaults. */
+export function findWorkspaceByRoot(
+  workspaces: Workspace[],
+  dir: string,
+): Workspace | null {
+  const want = dir.replace(/[\\/]+$/, "");
+  if (want === "") return null;
+  return (
+    workspaces.find((ws) =>
+      [ws.root, ws.defaultCwd].some((root) => root?.replace(/[\\/]+$/, "") === want),
+    ) ??
+    null
+  );
 }
 
 /** Pane header/context title: explicit title, else the cwd's last segment. */

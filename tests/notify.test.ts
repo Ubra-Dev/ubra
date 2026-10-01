@@ -1,9 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chimeStyleParam,
-  parseChimeStyle,
+  FIXED_CHIME_FILE,
+  describeNotifyOutcome,
   parseDelivery,
+  parseNotifyOutcome,
+  parseNotifyPermission,
   parseToastPosition,
   playbackPayload,
   routeNotification,
@@ -74,36 +76,16 @@ describe("routeNotification", () => {
   });
 });
 
-describe("chime styles", () => {
-  it("parses persisted selections, falling back to default", () => {
-    assert.equal(parseChimeStyle("bright"), "bright");
-    assert.equal(parseChimeStyle("custom"), "custom");
-    assert.equal(parseChimeStyle("nope"), "default");
-    assert.equal(parseChimeStyle(null), "default");
-    assert.equal(parseChimeStyle(undefined), "default");
-  });
-
-  it("maps selections to backend params without ever sending custom", () => {
-    assert.equal(chimeStyleParam("soft"), "soft");
-    assert.equal(chimeStyleParam("custom"), null);
-    assert.equal(chimeStyleParam("nope"), "default");
-  });
-});
-
 describe("playback selection", () => {
-  it("ignores a retained custom path for every built-in style and restores it on return to custom", () => {
-    const file = "/sounds/my chime.wav";
-    assert.deepEqual(playbackPayload("done", "custom", file), { kind: "done", style: null, file });
-    for (const style of ["default", "bright", "soft", "pop"]) {
-      assert.deepEqual(playbackPayload("done", style, file), { kind: "done", style, file: null });
-    }
-    assert.deepEqual(playbackPayload("request", "custom", file), { kind: "request", style: null, file });
-  });
-
-  it("uses the backend fallback for a blank or invalid custom file without leaking it to built-ins", () => {
-    assert.deepEqual(playbackPayload("done", "custom", "  "), { kind: "done", style: null, file: null });
-    assert.deepEqual(playbackPayload("done", "custom", "/missing.wav"), { kind: "done", style: null, file: "/missing.wav" });
-    assert.deepEqual(playbackPayload("done", "unknown", "/missing.wav"), { kind: "done", style: "default", file: null });
+  it("always plays the fixed chime file", () => {
+    assert.deepEqual(playbackPayload("done"), {
+      kind: "done",
+      file: FIXED_CHIME_FILE,
+    });
+    assert.deepEqual(playbackPayload("request"), {
+      kind: "request",
+      file: FIXED_CHIME_FILE,
+    });
   });
 });
 
@@ -133,5 +115,117 @@ describe("testNotificationPayload", () => {
     });
     assert.equal(muted.sound, false);
     assert.equal(muted.system, true);
+  });
+});
+
+describe("parseNotifyPermission", () => {
+  it("accepts backend states and falls back to unknown", () => {
+    assert.equal(parseNotifyPermission("granted"), "granted");
+    assert.equal(parseNotifyPermission("denied"), "denied");
+    assert.equal(parseNotifyPermission("prompt"), "prompt");
+    assert.equal(parseNotifyPermission("unknown"), "unknown");
+    assert.equal(parseNotifyPermission("yes"), "unknown");
+    assert.equal(parseNotifyPermission(true), "unknown");
+    assert.equal(parseNotifyPermission(null), "unknown");
+    assert.equal(parseNotifyPermission(undefined), "unknown");
+  });
+});
+
+describe("parseNotifyOutcome", () => {
+  it("passes backend reports through with their status", () => {
+    assert.deepEqual(parseNotifyOutcome({ status: "delivered" }), {
+      status: "delivered",
+    });
+    assert.deepEqual(parseNotifyOutcome({ status: "denied" }), {
+      status: "denied",
+    });
+    assert.deepEqual(parseNotifyOutcome({ status: "attempted" }), {
+      status: "attempted",
+    });
+    assert.deepEqual(
+      parseNotifyOutcome({ status: "unavailable", reason: "not-determined" }),
+      { status: "unavailable", reason: "not-determined" },
+    );
+  });
+
+  it("normalizes malformed payloads to unavailable", () => {
+    assert.deepEqual(parseNotifyOutcome({ status: "unavailable" }), {
+      status: "unavailable",
+      reason: "unknown",
+    });
+    assert.deepEqual(parseNotifyOutcome({ status: "bogus" }), {
+      status: "unavailable",
+      reason: "bad-outcome",
+    });
+    assert.deepEqual(parseNotifyOutcome(null), {
+      status: "unavailable",
+      reason: "bad-outcome",
+    });
+    assert.deepEqual(parseNotifyOutcome("delivered"), {
+      status: "unavailable",
+      reason: "bad-outcome",
+    });
+  });
+});
+
+describe("describeNotifyOutcome", () => {
+  it("confirms delivery inline for the Test button, silently for finishes", () => {
+    assert.deepEqual(
+      describeNotifyOutcome({ status: "delivered" }, "test"),
+      { ok: true, message: "System notification sent." },
+    );
+    assert.deepEqual(describeNotifyOutcome({ status: "delivered" }, "agent"), {
+      ok: true,
+      message: null,
+    });
+  });
+
+  it("marks legacy attempts ok with a packaged-app pointer for Test", () => {
+    const report = describeNotifyOutcome({ status: "attempted" }, "test");
+    assert.equal(report.ok, true);
+    assert.match(report.message ?? "", /packaged app/);
+    assert.deepEqual(describeNotifyOutcome({ status: "attempted" }, "agent"), {
+      ok: true,
+      message: null,
+    });
+  });
+
+  it("points denials at System Settings in both contexts", () => {
+    for (const context of ["test", "agent"] as const) {
+      const report = describeNotifyOutcome({ status: "denied" }, context);
+      assert.equal(report.ok, false);
+      assert.match(report.message ?? "", /System Settings/);
+    }
+  });
+
+  it("routes undecided permission to the Test button", () => {
+    const test = describeNotifyOutcome(
+      { status: "unavailable", reason: "not-determined" },
+      "test",
+    );
+    assert.equal(test.ok, false);
+    assert.match(test.message ?? "", /press Test again/);
+    const agent = describeNotifyOutcome(
+      { status: "unavailable", reason: "not-determined" },
+      "agent",
+    );
+    assert.equal(agent.ok, false);
+    assert.match(agent.message ?? "", /Settings → Alerts/);
+  });
+
+  it("keeps transient failures inline for Test but silent for finishes", () => {
+    const test = describeNotifyOutcome(
+      { status: "unavailable", reason: "delivery-timed-out" },
+      "test",
+    );
+    assert.equal(test.ok, false);
+    assert.match(test.message ?? "", /delivery-timed-out/);
+    assert.deepEqual(
+      describeNotifyOutcome(
+        { status: "unavailable", reason: "delivery-timed-out" },
+        "agent",
+      ),
+      { ok: false, message: null },
+    );
   });
 });

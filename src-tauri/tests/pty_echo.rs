@@ -3,7 +3,7 @@
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager};
+use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager, PtySessionInfo, SpawnOptions};
 
 enum Event {
     Output(PaneId, String),
@@ -28,8 +28,8 @@ impl PtyEventSink for ChannelSink {
 ///
 /// ConPTY — and shells like PSReadLine — emit `ESC[6n` at startup and withhold
 /// all further output until the terminal replies with a cursor position
-/// report. In production xterm.js answers via `pty_write`; these headless
-/// tests must play the terminal themselves, or the pane looks permanently
+/// report. In production xterm.js answers via `pty_write`; these tests
+/// must play the terminal themselves, or the pane looks permanently
 /// stuck (no output, no exit). Tracking the whole transcript also covers the
 /// query arriving split across output chunks. On Unix the query never
 /// arrives, so this is a silent no-op there.
@@ -69,7 +69,15 @@ fn pty_spawns_and_captures_output() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let (shell, args) = echo_command();
-    let id = manager.spawn(shell, None, args, 80, 24).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = String::new();
@@ -96,12 +104,116 @@ fn pty_spawns_and_captures_output() {
     );
 }
 
+/// Panes advertise a color-capable terminal even when the spawner
+/// carries a stale colorless environment.
+#[test]
+fn pty_spawn_advertises_color_capable_terminal() {
+    fn env_command() -> (Option<String>, Vec<String>) {
+        #[cfg(windows)]
+        return (
+            Some("cmd.exe".to_string()),
+            vec![
+                "/C".to_string(),
+                "echo TERM=%TERM% COLORTERM=%COLORTERM% NO_COLOR=%NO_COLOR%".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        return (
+            Some("sh".to_string()),
+            vec![
+                "-c".to_string(),
+                "echo TERM=$TERM COLORTERM=$COLORTERM NO_COLOR=${NO_COLOR-unset}".to_string(),
+            ],
+        );
+    }
+
+    // Simulate a spawner launched from a colorless session: the pane
+    // must not inherit any of this. Restored immediately after spawn,
+    // which captures the child environment.
+    let saved_term = std::env::var_os("TERM");
+    let saved_colorterm = std::env::var_os("COLORTERM");
+    let saved_no_color = std::env::var_os("NO_COLOR");
+    std::env::set_var("TERM", "dumb");
+    std::env::remove_var("COLORTERM");
+    std::env::set_var("NO_COLOR", "1");
+
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    let (shell, args) = env_command();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+
+    match saved_term {
+        Some(v) => std::env::set_var("TERM", v),
+        None => std::env::remove_var("TERM"),
+    }
+    match saved_colorterm {
+        Some(v) => std::env::set_var("COLORTERM", v),
+        None => std::env::remove_var("COLORTERM"),
+    }
+    match saved_no_color {
+        Some(v) => std::env::set_var("NO_COLOR", v),
+        None => std::env::remove_var("NO_COLOR"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut transcript = String::new();
+    let mut handshake = Handshake::new();
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(got, data)) => {
+                assert_eq!(got, id);
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, success)) => {
+                assert_eq!(got, id);
+                assert!(success, "env probe should exit 0");
+                break;
+            }
+            Err(_) => panic!("timed out waiting for env probe; got: {transcript:?}"),
+        }
+    }
+    assert!(
+        transcript.contains("TERM=xterm-256color"),
+        "pane should advertise xterm-256color, got: {transcript:?}"
+    );
+    assert!(
+        transcript.contains("COLORTERM=truecolor"),
+        "pane should advertise truecolor, got: {transcript:?}"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        transcript.contains("NO_COLOR=unset"),
+        "pane must not inherit NO_COLOR, got: {transcript:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        transcript.contains("NO_COLOR=%NO_COLOR%"),
+        "pane must not inherit NO_COLOR, got: {transcript:?}"
+    );
+}
+
 #[test]
 fn pty_kill_terminates_live_pane() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     // Bare interactive shell blocks on input until killed.
-    let id = manager.spawn(None, None, Vec::new(), 80, 24).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     // Drain startup output (answering the ConPTY handshake on Windows) so the
     // child is actually running — not blocked on an unanswered cursor query —
     // when killed. Must happen before kill: kill drops the session, and with
@@ -146,13 +258,12 @@ fn pty_kill_terminates_live_pane() {
 fn spawn_failure_returns_error_and_leaks_no_session() {
     let (tx, _rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
-    let result = manager.spawn(
-        Some("ubra-no-such-binary-xyz".to_string()),
-        None,
-        Vec::new(),
-        80,
-        24,
-    );
+    let result = manager.spawn(SpawnOptions {
+        shell: Some("ubra-no-such-binary-xyz".to_string()),
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    });
     assert!(result.is_err(), "bogus shell must fail to spawn");
     assert!(
         manager.pane_roots().is_empty(),
@@ -175,7 +286,13 @@ fn snapshot_repaints_live_pane_and_fails_after_kill() {
     let (tx, rx) = mpsc::channel();
     let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     // Bare interactive shell stays alive so the snapshot has a live screen.
-    let id = manager.spawn(None, None, Vec::new(), 80, 24).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let mut handshake = Handshake::new();
     let mut transcript = String::new();
     // Warm up (answering the ConPTY handshake on Windows), then run echo.
@@ -237,10 +354,132 @@ fn snapshot_repaints_live_pane_and_fails_after_kill() {
     }
 }
 
+/// A restarted frontend discovers its surviving sessions by stable key
+/// and adopts them via snapshot instead of spawning replacements.
+#[test]
+fn keyed_sessions_list_and_reattach_after_frontend_restart() {
+    let (tx, rx) = mpsc::channel();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            key: Some("pane-aaa".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    // Warm up, then produce output the reattach must recover.
+    let mut handshake = Handshake::new();
+    let mut transcript = String::new();
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before reattach"),
+            Err(_) => break, // Quiet: warmed up.
+        }
+    }
+    manager.write(id, "echo hello-reattach\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(_, data)) => {
+                transcript.push_str(&data);
+                handshake.note_output(&manager, id, &transcript);
+                if transcript.contains("hello-reattach") {
+                    break;
+                }
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before echo"),
+            Err(_) => panic!("timed out waiting for echo; got: {transcript:?}"),
+        }
+    }
+
+    // The "restarted frontend" knows only the stable key, not the numeric id.
+    let listed = manager.list();
+    assert_eq!(
+        listed,
+        vec![PtySessionInfo {
+            id,
+            key: Some("pane-aaa".to_string()),
+        }]
+    );
+    let adopted = listed
+        .iter()
+        .find(|s| s.key.as_deref() == Some("pane-aaa"))
+        .unwrap()
+        .id;
+    let snap = manager.snapshot(adopted).unwrap();
+    assert!(
+        snap.data.contains("hello-reattach"),
+        "adopted snapshot must repaint surviving output, got: {snap:?}"
+    );
+
+    // Keyed and unkeyed sessions coexist in one listing.
+    let id2 = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            key: Some("pane-bbb".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let id3 = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        manager.list(),
+        vec![
+            PtySessionInfo {
+                id,
+                key: Some("pane-aaa".into())
+            },
+            PtySessionInfo {
+                id: id2,
+                key: Some("pane-bbb".into())
+            },
+            PtySessionInfo { id: id3, key: None },
+        ]
+    );
+
+    // Kills disappear from the list, so orphan sweeps observe the truth.
+    manager.kill(id).unwrap();
+    assert!(
+        manager
+            .list()
+            .iter()
+            .all(|s| s.key.as_deref() != Some("pane-aaa")),
+        "killed key must leave the list"
+    );
+    manager.kill(id2).unwrap();
+    manager.kill(id3).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut exits = 0;
+    while exits < 3 {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Event::Exit(_, _)) => exits += 1,
+            Ok(Event::Output(_, _)) => {}
+            Err(_) => panic!("timed out waiting for killed panes to exit"),
+        }
+    }
+}
+
 #[test]
 fn invalid_geometry_preserves_a_usable_session() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     for (cols, rows) in [
         (0, 24),
         (1, 24),
@@ -249,10 +488,22 @@ fn invalid_geometry_preserves_a_usable_session() {
         (1000, 1000),
         (u16::MAX, u16::MAX),
     ] {
-        assert!(manager.spawn(None, None, vec![], cols, rows).is_err());
+        assert!(manager
+            .spawn(SpawnOptions {
+                cols,
+                rows,
+                ..Default::default()
+            })
+            .is_err());
     }
     assert!(manager.pane_roots().is_empty());
-    let id = manager.spawn(None, None, vec![], 80, 24).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     for (cols, rows) in [(0, 24), (1, 24), (80, 0), (1000, 1000)] {
         assert!(manager.resize(id, cols, rows).is_err());
         let snapshot = manager.snapshot(id).unwrap();
@@ -260,6 +511,27 @@ fn invalid_geometry_preserves_a_usable_session() {
     }
     manager.resize(id, 2, 1).unwrap();
     manager.resize(id, 80, 24).unwrap();
+
+    let mut handshake = Handshake::new();
+    let mut output = String::new();
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(got, data)) => {
+                if got == id {
+                    output.push_str(&data);
+                    handshake.note_output(&manager, id, &output);
+                }
+            }
+            Ok(Event::Exit(got, _)) => panic!("shell {got} exited before write"),
+            Err(_) => break, // Quiet: warmed up.
+        }
+    }
+
     #[cfg(unix)]
     manager.write(id, "printf 'healthy-%s\\n' pane\n").unwrap();
     #[cfg(windows)]
@@ -267,10 +539,14 @@ fn invalid_geometry_preserves_a_usable_session() {
         .write(id, "Write-Output ('healthy-' + 'pane')\r\n")
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut output = String::new();
     while !output.contains("healthy-pane") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Event::Output(_, data)) => output.push_str(&data),
+            Ok(Event::Output(got, data)) => {
+                if got == id {
+                    output.push_str(&data);
+                    handshake.note_output(&manager, got, &output);
+                }
+            }
             _ => panic!("rejected resize damaged session: {output:?}"),
         }
     }
@@ -280,38 +556,79 @@ fn invalid_geometry_preserves_a_usable_session() {
 #[test]
 fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     #[cfg(unix)]
     let sibling = manager
-        .spawn(Some("sh".into()), None, vec![], 80, 24)
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     #[cfg(windows)]
     let sibling = manager
-        .spawn(
-            Some("powershell.exe".into()),
-            None,
-            vec!["-NoProfile".into()],
-            80,
-            24,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("powershell.exe".into()),
+            args: vec!["-NoProfile".into()],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     #[cfg(unix)]
-    let parent = manager.spawn(Some("sh".into()), None, vec!["-c".into(),
-        "trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; echo CHILD:$$; while :; do sleep 1; done' & wait".into()], 80, 24).unwrap();
+    let parent = manager
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            args: vec![
+                "-c".into(),
+                "trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; echo CHILD:$$; while :; do sleep 1; done' & wait".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     #[cfg(windows)]
-    let parent = manager.spawn(Some("powershell.exe".into()), None, vec!["-NoProfile".into(), "-Command".into(),
-        "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; Write-Output ('CHILD:' + $p.Id); Start-Sleep 300".into()], 80, 24).unwrap();
+    let parent = manager
+        .spawn(SpawnOptions {
+            shell: Some("powershell.exe".into()),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "$p = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -PassThru; [Console]::WriteLine('CHILD:' + $p.Id); Start-Sleep 300".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
+    let mut parent_handshake = Handshake::new();
+    let mut sibling_handshake = Handshake::new();
+    let mut sibling_output = String::new();
     let child = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Output(id, data)) if id == parent => {
                 output.push_str(&data);
-                if let Some(line) = output.lines().find(|line| line.starts_with("CHILD:")) {
-                    if let Ok(pid) = line.trim_start_matches("CHILD:").trim().parse::<i32>() {
-                        break pid;
+                parent_handshake.note_output(&manager, id, &output);
+                if let Some(idx) = output.find("CHILD:") {
+                    let rest = &output[idx + "CHILD:".len()..];
+                    if let Some(num_str) = rest
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().next())
+                    {
+                        if let Ok(pid) = num_str.trim().parse::<i32>() {
+                            break pid;
+                        }
                     }
                 }
+            }
+            Ok(Event::Output(id, data)) if id == sibling => {
+                sibling_output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &sibling_output);
             }
             Ok(_) => {}
             Err(_) => panic!("child did not start: {output:?}"),
@@ -333,6 +650,23 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     assert!(processes
         .process(sysinfo::Pid::from_u32(child as u32))
         .is_none_or(|p| p.status() == sysinfo::ProcessStatus::Zombie));
+
+    let warmup_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let timeout = warmup_deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(Event::Output(id, data)) if id == sibling => {
+                sibling_output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &sibling_output);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
     #[cfg(unix)]
     manager
         .write(sibling, "printf 'sibling-%s\\n' alive\n")
@@ -345,7 +679,10 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !output.contains("sibling-alive") {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Event::Output(id, data)) if id == sibling => output.push_str(&data),
+            Ok(Event::Output(id, data)) if id == sibling => {
+                output.push_str(&data);
+                sibling_handshake.note_output(&manager, id, &output);
+            }
             Ok(_) => {}
             Err(_) => panic!("closing another pane damaged sibling: {output:?}"),
         }
@@ -356,16 +693,34 @@ fn close_terminates_resistant_child_but_preserves_sibling_pane() {
 #[test]
 fn shutdown_terminates_live_sessions_and_refuses_late_spawns() {
     let (tx, _rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
-    manager.spawn(None, None, vec![], 80, 24).unwrap();
-    manager.spawn(None, None, vec![], 80, 24).unwrap();
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
+    manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+    manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     manager.shutdown().unwrap();
     assert!(
         manager.pane_roots().is_empty(),
         "live sessions escaped shutdown"
     );
     assert!(
-        manager.spawn(None, None, vec![], 80, 24).is_err(),
+        manager
+            .spawn(SpawnOptions {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            })
+            .is_err(),
         "closed manager admitted another process"
     );
 }
@@ -374,7 +729,7 @@ fn shutdown_terminates_live_sessions_and_refuses_late_spawns() {
 #[test]
 fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles() {
     let (tx, rx) = mpsc::channel();
-    let manager = PtyManager::new_headless(std::sync::Arc::new(ChannelSink { tx }));
+    let manager = PtyManager::new(std::sync::Arc::new(ChannelSink { tx }));
     let mut nonce = [0u8; 8];
     getrandom::fill(&mut nonce).unwrap();
     let path = std::env::temp_dir().join(format!(
@@ -387,7 +742,13 @@ fn root_exit_releases_resistant_children_even_after_they_close_terminal_handles(
         path.display(), path.display(), path.display()
     );
     let id = manager
-        .spawn(Some("sh".into()), None, vec!["-c".into(), script], 80, 24)
+        .spawn(SpawnOptions {
+            shell: Some("sh".into()),
+            args: vec!["-c".into(), script],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = String::new();
@@ -431,37 +792,49 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
             .as_nanos()
     ));
     let error = manager
-        .spawn(
-            Some("sh".to_string()),
-            Some(missing.to_string_lossy().into_owned()),
-            Vec::new(),
-            80,
-            24,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("sh".to_string()),
+            cwd: Some(missing.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap_err();
     assert!(
-        error.to_string().starts_with("Working directory is unavailable:"),
+        error
+            .to_string()
+            .starts_with("Working directory is unavailable:"),
         "unexpected error: {error}"
     );
     let file_cwd = std::env::temp_dir().join(format!("ubra-file-cwd-{}", std::process::id()));
     std::fs::write(&file_cwd, b"not a directory").unwrap();
     let error = manager
-        .spawn(
-            Some("sh".to_string()),
-            Some(file_cwd.to_string_lossy().into_owned()),
-            Vec::new(),
-            80,
-            24,
-        )
+        .spawn(SpawnOptions {
+            shell: Some("sh".to_string()),
+            cwd: Some(file_cwd.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
         .unwrap_err();
     assert!(
-        error.to_string().starts_with("Working directory is not a directory:"),
+        error
+            .to_string()
+            .starts_with("Working directory is not a directory:"),
         "unexpected error: {error}"
     );
     let _ = std::fs::remove_file(&file_cwd);
     assert!(manager.pane_roots().is_empty());
     let (shell, args) = echo_command();
-    let id = manager.spawn(shell, None, args, 80, 24).unwrap();
+    let id = manager
+        .spawn(SpawnOptions {
+            shell,
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = String::new();
     let mut handshake = Handshake::new();
@@ -481,5 +854,8 @@ fn invalid_cwd_fails_without_a_session_while_a_valid_sibling_runs() {
             Err(_) => panic!("timed out waiting for sibling pane; got: {transcript:?}"),
         }
     }
-    assert!(transcript.contains("hello-pty"), "sibling should run, got: {transcript:?}");
+    assert!(
+        transcript.contains("hello-pty"),
+        "sibling should run, got: {transcript:?}"
+    );
 }

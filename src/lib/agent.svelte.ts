@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { playbackPayload, routeNotification } from "./notify";
+import {
+  describeNotifyOutcome,
+  parseNotifyOutcome,
+  playbackPayload,
+  routeNotification,
+  type NotifyOutcome,
+} from "./notify";
 import { store } from "./store.svelte";
+import { captureAgentEnded, captureAgentStarted, type AgentEndOutcome } from "./telemetry";
 import { toasts } from "./toasts.svelte.ts";
 import { baseName, collectPaneIds, findPane, findTabByPane, type Tab, type Workspace } from "./layout";
 import {
@@ -34,8 +41,14 @@ class AgentStore {
   private lastAgent = $state<Record<string, { agent: string; cli?: string; cwd?: string }>>({});
   private pending = new Map<number, AgentTransition>();
   private disposed = new Set<number>();
+  /** Observed agent-session starts by node, for telemetry durations. */
+  private sessionStart = new Map<string, number>();
+  /** Ignore the first snapshot, which may describe a resumed session. */
+  private telemetryBaselineReady = false;
   private foreground = false;
   private started = false;
+  /** A blocked-notification toast already surfaced; reset by a success. */
+  private systemDenyNoticed = false;
   // TEMP perf instrumentation (removed after the lag audit).
   private perfLog = false;
   private perfCount = 0;
@@ -65,7 +78,11 @@ class AgentStore {
     delete this.liveToNode[liveId];
     this.pending.delete(liveId);
     this.model = acknowledgeAgent(this.model, liveId, true);
-    if (node) delete this.lastAgent[node];
+    if (node) {
+      const last = this.lastAgent[node];
+      if (last?.cli) this.captureEnded(node, last.cli, "closed");
+      delete this.lastAgent[node];
+    }
   }
   start(): void {
     if (this.started) return;
@@ -99,9 +116,16 @@ class AgentStore {
     this.foreground = await win.isFocused();
     // Subscribe before fetching: startup snapshots cannot overwrite newer events.
     await listen<AgentUpdate>("agent-state-update", (event) => this.onUpdate(event.payload));
+    await listen<string>("tray-focus-pane", (event) => {
+      // The backend already showed the window; ignore ids from a stale menu.
+      if (store.layout && findTabByPane(store.layout, event.payload)) {
+        this.jumpToPane(event.payload);
+      }
+    });
     document.addEventListener("visibilitychange", () => this.acknowledgeFocused());
     const snapshot = await invoke<AgentUpdate>("agent_snapshot");
     this.onUpdate({ ...snapshot, transitions: [] });
+    this.telemetryBaselineReady = true;
     this.acknowledgeFocused();
   }
   paneState(nodeId: string): AgentStatus | null {
@@ -110,6 +134,9 @@ class AgentStore {
   }
   paneAgentLabel(nodeId: string): string | undefined {
     return this.paneState(nodeId)?.agent ?? this.lastAgent[nodeId]?.agent;
+  }
+  paneCli(nodeId: string): string | undefined {
+    return this.paneState(nodeId)?.cli ?? this.lastAgent[nodeId]?.cli;
   }
   private liveForNode(nodeId: string): number | undefined {
     const live = Object.entries(this.liveToNode).find(([, node]) => node === nodeId)?.[0];
@@ -143,8 +170,8 @@ class AgentStore {
   private isSeen(nodeId: string): boolean {
     const layout = store.layout;
     const found = layout && findTabByPane(layout, nodeId);
-    if (!layout || !found || store.settingsOpen || store.pendingClose) return false;
-    if (store.savedSetupsRequest || store.onboardingOpen || store.firstRun) return false;
+    if (!layout || !found || store.settingsOpen || store.onboardingOpen || store.pendingClose || store.pendingQuit) return false;
+    if (store.firstRun) return false;
     return paneIsVisible({
       activeWorkspaceId: layout.activeWorkspaceId, workspaceId: found.ws.id,
       activeTabId: found.ws.activeTabId, tabId: found.tab.id,
@@ -202,10 +229,39 @@ class AgentStore {
   private rememberAgents(): void {
     for (const [live, node] of Object.entries(this.liveToNode)) {
       const state = this.states[live];
-      if (state?.agent) this.lastAgent[node] = {
+      if (!state?.agent) continue;
+      const previous = this.lastAgent[node];
+      if (this.telemetryBaselineReady && previous?.agent !== state.agent) {
+        if (previous?.agent && previous.cli) this.captureEnded(node, previous.cli, "closed");
+        this.sessionStart.set(node, Date.now());
+        if (state.cli) {
+          captureAgentStarted(state.cli).catch((error: unknown) => {
+            console.error("ubra: agent-started capture failed", error);
+          });
+        }
+      }
+      this.lastAgent[node] = {
         agent: state.agent, cli: state.cli, cwd: state.cwd ?? this.lastAgent[node]?.cwd,
       };
+      // Persist captured sessions for resume-after-restart; the stamp
+      // reports changes so idle updates never dirty the layout.
+      const ref = state.sessionRef;
+      if (
+        state.cli && ref?.value &&
+        store.stampPaneAgentSession(node, state.cli, ref.value)
+      ) {
+        store.saveSoon();
+      }
     }
+  }
+  /** Emit an agent-ended event when a session start was observed. */
+  private captureEnded(node: string, cli: string, outcome: AgentEndOutcome): void {
+    const started = this.sessionStart.get(node);
+    this.sessionStart.delete(node);
+    if (started === undefined || !cli) return;
+    captureAgentEnded(cli, Date.now() - started, outcome).catch((error: unknown) => {
+      console.error("ubra: agent-ended capture failed", error);
+    });
   }
   private onUpdate(update: AgentUpdate): void {
     this.perfNoteUpdate();
@@ -215,8 +271,14 @@ class AgentStore {
     this.rememberAgents();
     for (const transition of result.transitions) {
       const node = this.liveToNode[transition.paneId];
-      if (node) this.notify(transition);
-      else if (!this.disposed.has(transition.paneId)) {
+      if (node) {
+        this.notify(transition);
+        const cli = transition.cli ?? this.lastAgent[node]?.cli;
+        if (cli) {
+          const outcome = transition.kind === "task-completed" ? "completed" : "stopped";
+          this.captureEnded(node, cli, outcome);
+        }
+      } else if (!this.disposed.has(transition.paneId)) {
         this.pending.set(transition.paneId, transition);
       }
     }
@@ -237,8 +299,28 @@ class AgentStore {
       soundEnabled: store.soundEnabled, mutedClis: store.mutedAgents,
       cli: transition.cli ?? last?.cli });
     if (route.toast) toasts.push(title, "Click to review", nodeId);
-    if (route.system) invoke("notify_agent", { title, body: "Open Ubra to review", kind }).catch(console.error);
-    if (route.sound) invoke("play_sound", playbackPayload(kind, store.soundStyle, store.soundFile)).catch(console.error);
+    if (route.system) {
+      invoke<unknown>("notify_agent", { title, body: "Open Ubra to review", kind })
+        .then((raw) => this.handleNotifyOutcome(parseNotifyOutcome(raw)))
+        .catch(console.error);
+    }
+    if (route.sound) invoke("play_sound", playbackPayload(kind)).catch(console.error);
+  }
+  /**
+   * Surface actionable system-delivery failures once per session. A later
+   * success re-arms, so a re-denial informs again instead of staying silent.
+   */
+  private handleNotifyOutcome(outcome: NotifyOutcome): void {
+    const report = describeNotifyOutcome(outcome, "agent");
+    if (report.ok) {
+      this.systemDenyNoticed = false;
+      return;
+    }
+    if (!report.message) return;
+    console.error(`ubra: system notification not shown: ${report.message}`);
+    if (this.systemDenyNoticed) return;
+    this.systemDenyNoticed = true;
+    toasts.push("System notifications blocked", report.message, "");
   }
 }
 export const agent = new AgentStore();

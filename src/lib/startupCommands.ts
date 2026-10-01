@@ -1,5 +1,5 @@
-// Explicit-launch authorization for saved-setup commands.
-// Nothing here is serialized: restore always opens shells until Launch authorizes.
+// Explicit-launch authorization for pane commands.
+// Nothing here is serialized: restore always opens shells until an explicit launch authorizes.
 import type { PaneNode } from "./layout.ts";
 
 export class StartupCommands {

@@ -1,46 +1,52 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { agent } from "./agent.svelte";
+  import { changeCount, gitStatus } from "./git";
   import Icon from "./Icon.svelte";
   import {
-    baseName,
     findPane,
     findTabByPane,
     paneDisplayTitle,
   } from "./layout";
   import { store } from "./store.svelte";
   import {
-    deliveryLabel,
+    branchTooltip,
+    crumbDotClass,
     fleetSummary,
-    layoutTotalsLabel,
-    platformLabel,
+    notifyTooltip,
     saveState,
     soundLabel,
+    updateSegment,
+    usageWarning,
     type FleetCounts,
+    type UpdateAction,
   } from "./statusBar";
+  import { updater } from "./updater.svelte";
+  import { usage } from "./usage.svelte";
+  import { asyncCoalescer } from "./schedule";
+  import { workspaceGit } from "./workspaceGit.svelte";
 
   let appVersion = $state("");
 
-  onMount(() => {
-    invoke<{ name: string; version: string }>("app_info")
-      .then((info) => {
-        appVersion = info.version;
-      })
-      .catch((e) => console.error("ubra: app info failed", e));
-  });
-
-  const osLabel = platformLabel(navigator.platform);
+  /** Dirty-state refresh for the active workspace; matches branch polling. */
+  const DIRTY_POLL_MS = 10_000;
+  /** Usage refresh; matches the backend cache TTL. */
+  const USAGE_POLL_MS = 5 * 60 * 1000;
+  /** Hold duration on the app version to toggle the update simulation. */
+  const VERSION_HOLD_MS = 600;
 
   interface PaneContext {
     paneId: string;
+    wsId: string;
+    wsRoot: string | null;
     title: string;
     crumb: string;
     cwd: string | null;
-    cwdBase: string | null;
     agent: string | null;
     cli: string | null;
     statusTitle: string;
+    dot: "blocked" | "attention" | "working" | null;
   }
 
   // Fleet counts span all workspaces: background agents needing review are
@@ -71,38 +77,149 @@
     const node = findPane(current.tab.root, current.paneId);
     if (!found || !node) return null;
     const state = agent.paneState(current.paneId);
-    const cwd = node.cwd ?? state?.cwd ?? null;
-    const title = paneDisplayTitle(node);
+    const agentLabel = agent.paneAgentLabel(current.paneId) ?? null;
     return {
       paneId: current.paneId,
-      title,
-      crumb: `${found.ws.name} › ${current.tab.name} › ${title}`,
-      cwd,
-      cwdBase: cwd ? baseName(cwd) || null : null,
-      agent: agent.paneAgentLabel(current.paneId) ?? null,
+      wsId: found.ws.id,
+      wsRoot: found.ws.root ?? null,
+      title: paneDisplayTitle(node),
+      crumb: `${found.ws.name} › ${current.tab.name} › ${paneDisplayTitle(node)}`,
+      cwd: node.cwd ?? state?.cwd ?? null,
+      agent: agentLabel,
       cli: state?.cli ?? null,
       statusTitle: agent.paneStatusTitle(current.paneId),
+      dot: crumbDotClass(agent.paneStatus(current.paneId), agentLabel !== null),
     };
   });
 
+  const crumbTitle = $derived.by((): string | null => {
+    if (!context) return null;
+    let title = `Focus pane — ${context.crumb}`;
+    if (context.cwd) title += ` (${context.cwd})`;
+    if (context.agent) {
+      title += ` · ${context.statusTitle} — ${context.agent}${context.cli ? ` (${context.cli})` : ""}`;
+    }
+    return title;
+  });
+
+  const branch = $derived(context ? workspaceGit.branchFor(context.wsId) : null);
+
+  // Dirty state follows the active workspace root only. Depending on the
+  // whole context would rerun a full git scan on every agent/layout change
+  // (agent updates arrive with terminal output), wedging git workspaces.
+  const wsRoot = $derived(context?.wsRoot ?? null);
+
+  let dirtyCount = $state<number | null>(null);
+
+  // Sequential latest-wins runs: bursts collapse and slow scans never pile
+  // up overlapping git processes.
+  const dirtyRefresh = asyncCoalescer<string | null>(async (root) => {
+    if (!root) {
+      dirtyCount = null;
+      return;
+    }
+    try {
+      const status = await gitStatus(root);
+      dirtyCount = status.isRepo ? changeCount(status) : null;
+    } catch {
+      dirtyCount = null;
+    }
+  });
+
+  // Active workspace root changed: re-resolve dirty state immediately.
+  $effect(() => {
+    dirtyRefresh.request(wsRoot);
+  });
+
+  const usageLabels = $derived(
+    Object.fromEntries((usage.supported ?? []).map((s) => [s.cli, s.label] as const)),
+  );
+  const warn = $derived(usageWarning(usage.entries, usageLabels));
+
+  const update = $derived(
+    updateSegment({
+      phase: updater.phase,
+      checked: updater.checked,
+      version: updater.version,
+      downloadedBytes: updater.downloadedBytes,
+      totalBytes: updater.totalBytes,
+      error: updater.error,
+    }),
+  );
+
   const save = $derived(saveState({ saving: store.saving, error: store.saveError }));
-  const totals = $derived(layoutTotalsLabel(store.layout));
   const zoomedId = $derived(store.tab()?.zoomedPaneId ?? null);
   const mutedCount = $derived(store.mutedAgents.length);
 
   const notifyTitle = $derived(
-    `Notifications: ${deliveryLabel(store.notifyDelivery)} · ` +
-      `Sound ${soundLabel(store.soundEnabled)}` +
-      (mutedCount > 0
-        ? ` · ${mutedCount} muted agent${mutedCount === 1 ? "" : "s"}`
-        : "") +
-      " — open Settings",
+    notifyTooltip({
+      delivery: store.notifyDelivery,
+      soundEnabled: store.soundEnabled,
+      mutedCount,
+    }),
   );
+
+  let dirtyTimer: ReturnType<typeof setInterval> | null = null;
+  let usageTimer: ReturnType<typeof setInterval> | null = null;
+  let versionHoldTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onMount(() => {
+    invoke<{ name: string; version: string }>("app_info")
+      .then((info) => {
+        appVersion = info.version;
+      })
+      .catch((e) => console.error("ubra: app info failed", e));
+    void usage
+      .ensureSupported()
+      .then((supported) => usage.refreshAll(supported.map((s) => s.cli)));
+    dirtyTimer = setInterval(() => dirtyRefresh.request(wsRoot), DIRTY_POLL_MS);
+    usageTimer = setInterval(() => {
+      const supported = usage.supported;
+      if (supported) usage.refreshAll(supported.map((s) => s.cli));
+    }, USAGE_POLL_MS);
+  });
+
+  onDestroy(() => {
+    if (dirtyTimer) clearInterval(dirtyTimer);
+    if (usageTimer) clearInterval(usageTimer);
+    cancelVersionHold();
+  });
+
+  function startVersionHold(e: PointerEvent): void {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    cancelVersionHold();
+    versionHoldTimer = setTimeout(() => {
+      versionHoldTimer = null;
+      updater.toggleSimulation();
+    }, VERSION_HOLD_MS);
+  }
+
+  function cancelVersionHold(): void {
+    if (versionHoldTimer) clearTimeout(versionHoldTimer);
+    versionHoldTimer = null;
+  }
 
   function focusContextPane(): void {
     if (!context) return;
     store.focusPane(context.paneId);
     store.paneFocusTarget = context.paneId;
+  }
+
+  function runUpdateAction(): void {
+    const action: UpdateAction | null = update?.action ?? null;
+    if (action === "check") void updater.checkForUpdates();
+    else if (action === "download") void updater.downloadAndInstall();
+    else if (action === "relaunch") void updater.relaunchApp();
+  }
+
+  function openUsage(): void {
+    store.settingsOpenSection = "usage";
+    store.settingsOpen = true;
+  }
+
+  function openSourceControl(): void {
+    store.setRightPanelOpen(true);
+    store.setRightPanelView("source-control");
   }
 </script>
 
@@ -130,29 +247,60 @@
     {#if context}
       <button
         class="seg action crumb"
-        title="Focus pane — {context.crumb}{context.cwd ? ` (${context.cwd})` : ""}"
+        title={crumbTitle}
         onclick={focusContextPane}
       >
+        {#if context.dot}
+          <span class={"dot " + context.dot}></span>
+        {/if}
         <span class="text">{context.crumb}</span>
       </button>
-      {#if context.cwdBase && context.cwdBase !== context.title}
-        <span class="seg dim" title={context.cwd}>
-          <span class="text">{context.cwdBase}</span>
-        </span>
-      {/if}
-      {#if context.agent}
-        <span
-          class="seg agent"
-          title="{context.statusTitle} — {context.agent}{context.cli
-            ? ` (${context.cli})`
-            : ""}"
+      {#if branch}
+        <button
+          class="seg action"
+          title={branchTooltip({ branch, changes: dirtyCount })}
+          onclick={openSourceControl}
         >
-          <span class="text">{context.agent}</span>
-        </span>
+          <Icon name="git-branch" size={11} />
+          <span class="text">{branch}</span>
+          {#if dirtyCount !== null && dirtyCount > 0}
+            <span class="dot attention"></span>
+          {/if}
+        </button>
       {/if}
+    {/if}
+    {#if warn}
+      <button class="seg action" title={warn.title} onclick={openUsage}>
+        <Icon name="alert" size={11} />
+        <span class="text">{warn.text}</span>
+      </button>
     {/if}
   </div>
   <div class="cluster right">
+    {#if update}
+      {#if update.action}
+        <button
+          class="seg action"
+          class:error={updater.phase === "error"}
+          class:dim={updater.phase === "idle"}
+          title={update.title}
+          onclick={runUpdateAction}
+        >
+          {#if updater.phase === "available" || updater.phase === "downloading"}
+            <Icon name="download" size={11} />
+          {:else if updater.phase === "ready"}
+            <Icon name="refresh" size={11} />
+          {:else if updater.phase === "error"}
+            <Icon name="alert" size={11} />
+          {/if}
+          <span class="text">{update.text}</span>
+        </button>
+      {:else}
+        <span class="seg dim" title={update.title}>
+          <span class="text">{update.text}</span>
+        </span>
+      {/if}
+    {/if}
     {#if zoomedId}
       <button
         class="seg action"
@@ -178,29 +326,32 @@
       <span class="seg dim" title="Saving layout…">
         <span class="text">Saving…</span>
       </span>
-    {:else}
-      <span class="seg dim" title="Layout saved">
-        <Icon name="check" size={11} />
-        <span class="text">Saved</span>
-      </span>
     {/if}
-    {#if totals}
-      <span class="seg dim" title="Workspaces · tabs · panes">
-        <span class="text">{totals}</span>
-      </span>
-    {/if}
-    <button class="seg action" title={notifyTitle} onclick={() => (store.settingsOpen = true)}>
+    <button
+      class="seg action"
+      title={notifyTitle}
+      aria-pressed={store.soundEnabled}
+      onclick={() => store.setSoundEnabled(!store.soundEnabled)}
+    >
       <Icon name="bell" size={11} />
-      <span class="text">{deliveryLabel(store.notifyDelivery)}</span>
       <span class="vol" class:off={!store.soundEnabled}>
         <Icon name="volume" size={11} />
       </span>
       <span class="text">{soundLabel(store.soundEnabled)}</span>
     </button>
     {#if appVersion}
-      <span class="seg dim" title="Ubra {appVersion}{osLabel ? ` · ${osLabel}` : ""}">
-        <span class="text">v{appVersion}{osLabel ? ` · ${osLabel}` : ""}</span>
-      </span>
+      <button
+        class="seg dim version-sim"
+        title="Ubra {appVersion} — press and hold to simulate an update"
+        aria-label="Ubra {appVersion}. Press and hold to simulate an available update."
+        onpointerdown={startVersionHold}
+        onpointerup={cancelVersionHold}
+        onpointerleave={cancelVersionHold}
+        onpointercancel={cancelVersionHold}
+        oncontextmenu={(e) => e.preventDefault()}
+      >
+        <span class="text">v{appVersion}</span>
+      </button>
     {/if}
   </div>
 </footer>
@@ -253,6 +404,12 @@
   button.seg:hover {
     background: var(--surface-bg);
     color: var(--text-strong);
+  }
+  /* Version looks like the label it is; the hold gesture stays hidden. */
+  button.seg.version-sim:hover {
+    background: transparent;
+    color: var(--text-muted);
+    cursor: default;
   }
   .seg.crumb {
     flex: 0 1 auto;

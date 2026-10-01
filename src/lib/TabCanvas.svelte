@@ -1,5 +1,6 @@
 <script lang="ts">
   import PaneView from "./PaneView.svelte";
+  import { frameCoalescer } from "./schedule";
   import { store } from "./store.svelte";
   import {
     computeLayout,
@@ -41,6 +42,10 @@
     split.sizes = [clamped, 1 - clamped];
   }
 
+  // Divider drags coalesce to one layout update per frame; the canvas box
+  // is measured once at grab time so moves never force sync layout.
+  const dividerFrame = frameCoalescer();
+
   function onDividerPointerDown(
     e: PointerEvent,
     splitId: string,
@@ -48,22 +53,22 @@
     rect: [number, number, number, number],
   ): void {
     e.preventDefault();
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    const [x, y, w, h] = rect;
+    const left = box.left + box.width * x;
+    const top = box.top + box.height * y;
+    const span = dir === "row" ? box.width * w : box.height * h;
+    const origin = dir === "row" ? left : top;
     const move = (ev: PointerEvent) => {
-      if (!el) return;
-      const box = el.getBoundingClientRect();
-      const [x, y, w, h] = rect;
-      const left = box.left + box.width * x;
-      const top = box.top + box.height * y;
-      setRatio(
-        splitId,
-        dir === "row"
-          ? (ev.clientX - left) / (box.width * w)
-          : (ev.clientY - top) / (box.height * h),
-      );
+      const point = dir === "row" ? ev.clientX : ev.clientY;
+      const ratio = span > 0 ? (point - origin) / span : 0.5;
+      dividerFrame.schedule(() => setRatio(splitId, ratio));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      dividerFrame.flush();
       store.paneSizesChanged();
     };
     window.addEventListener("pointermove", move);

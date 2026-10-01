@@ -546,7 +546,7 @@ export const THEMES = {
 
 export type ThemeId = keyof typeof THEMES;
 export type AppTheme = (typeof THEMES)[ThemeId];
-export const DEFAULT_THEME_ID: ThemeId = "vscode-dark";
+export const DEFAULT_THEME_ID: ThemeId = "vesper";
 
 export const THEME_IDS = Object.keys(THEMES) as ThemeId[];
 

@@ -1,0 +1,12 @@
+{
+  "claudeAiOauth": {
+    "accessToken": "<redacted>",
+    "refreshToken": "<redacted>",
+    "expiresAt": 1791300069,
+    "refreshTokenExpiresAt": 1793900069,
+    "scopes": ["user:inference"],
+    "subscriptionType": "<redacted>",
+    "rateLimitTier": "<redacted>",
+    "clientId": "<redacted>"
+  }
+}

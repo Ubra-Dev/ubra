@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use ubra_lib::agent_watch::{poll_once, poll_once_with_grace, PaneAgent};
-use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager};
+use ubra_lib::pty_manager::{PaneId, PtyEventSink, PtyManager, SpawnOptions};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -145,8 +145,22 @@ fn detects_agent_process_in_pane() {
     let (program, args) = fake_agent(&dir, "codex");
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
-    let shell_pane = manager.spawn(None, None, Vec::new(), 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+    let shell_pane = manager
+        .spawn(SpawnOptions {
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     assert_ne!(manager.pane_roots().len(), 0);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -195,7 +209,15 @@ fn detects_versioned_muse_binary_in_pane() {
     let (program, args) = fake_agent(&dir, "muse-bin-1.4.1-R4503.1");
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     expect_unknown(&manager, agent_pane, "Muse", "muse");
 
@@ -210,7 +232,15 @@ fn process_age_never_implies_working() {
     let (program, args) = fake_agent(&dir, "codex");
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     // A huge grace keeps the fresh process unknown; zero grace still reads unknown.
     expect_state(
@@ -258,7 +288,15 @@ fn stopped_agent_reports_blocked_until_resumed() {
     let (program, args) = fake_agent(&dir, "codex");
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
     let root_pid = manager
         .pane_roots()
         .iter()
@@ -300,7 +338,15 @@ fn approval_screen_reports_blocked() {
     );
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     let mut watcher = ubra_lib::agent_watch::Watcher::bundled();
     expect_with(
@@ -334,7 +380,15 @@ fn detection_override_file_adds_rules() {
     .unwrap();
 
     let manager = PtyManager::new(std::sync::Arc::new(Sink));
-    let agent_pane = manager.spawn(Some(program), None, args, 80, 24).unwrap();
+    let agent_pane = manager
+        .spawn(SpawnOptions {
+            shell: Some(program),
+            args,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
 
     let mut watcher = ubra_lib::agent_watch::Watcher::with_dir(rules_dir.clone());
     expect_with(

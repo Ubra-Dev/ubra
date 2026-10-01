@@ -16,8 +16,13 @@ jobs:
           - os: ubuntu-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}
+    # $env/static/public requires these keys at build time. Empty keeps
+    # telemetry compiled-in but disabled, matching the guarded local flow.
+    env:
+      PUBLIC_POSTHOG_HOST: ""
+      PUBLIC_POSTHOG_PROJECT_TOKEN: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # System dependencies from https://v2.tauri.app/start/prerequisites/
       - name: Install Linux dependencies
@@ -36,7 +41,7 @@ jobs:
             librsvg2-dev
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -76,6 +81,8 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       # Direct CLI build (no tauri-action): bundles via the pinned
-      # @tauri-apps/cli in devDependencies.
+      # @tauri-apps/cli in devDependencies. Unsigned: CI holds no Apple or
+      # updater keys, and the bundler refuses to sign without them, so skip
+      # signing here — the release workflow covers the signed path.
       - name: Tauri build
-        run: npm run tauri build
+        run: npm run tauri build -- --no-sign

@@ -19,10 +19,15 @@ import {
   findPaneAtPoint,
   findSplit,
   findTabByPane,
+  findWorkspaceByRoot,
+  fleetTab,
   gridTab,
+  leavesByAreaDesc,
+  randomTiling,
   isActiveAgentState,
   moveWorkspace,
   resizePaneInTab,
+  resolveWorkspaceRoot,
   MAX_LAYOUT_BYTES,
   MAX_LAYOUT_DEPTH,
   MAX_LAYOUT_ENTITIES,
@@ -33,8 +38,35 @@ import {
   swapPanesInTab,
   setZoomedPane,
   splitPaneInTab,
+  stampPaneAgentCli,
+  stampPaneAgentSession,
+  type LayoutNode,
+  type Rng,
   type Tab,
 } from "../src/lib/layout.ts";
+
+/** Deterministic rng for tiling tests. */
+function seededRng(seed: number): Rng {
+  let state = seed >>> 0;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Split tree shape without ids, for determinism comparisons. */
+function tilingShape(node: LayoutNode): unknown {
+  if (node.kind === "pane") return "pane";
+  return {
+    dir: node.dir,
+    sizes: node.sizes,
+    first: tilingShape(node.first),
+    second: tilingShape(node.second),
+  };
+}
 
 function rootPaneId(tab: Tab): string {
   assert.equal(tab.root.kind, "pane");
@@ -100,6 +132,76 @@ describe("gridTab", () => {
   it("preserves the grid when saving and restoring a layout", () => {
     const layout = defaultLayout();
     const tab = gridTab("Grid");
+    layout.workspaces[0].tabs = [tab];
+    layout.workspaces[0].activeTabId = tab.id;
+    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
+  });
+});
+
+describe("randomTiling", () => {
+  it("builds exactly N panes with unique ids", () => {
+    for (let count = 1; count <= 8; count++) {
+      const root = randomTiling(count, seededRng(count * 7919));
+      assert.equal(countPanes(root), count);
+      assert.equal(new Set(collectPaneIds(root)).size, count);
+    }
+  });
+
+  it("floors invalid counts at a single pane", () => {
+    assert.equal(countPanes(randomTiling(0, seededRng(1))), 1);
+    assert.equal(countPanes(randomTiling(-4, seededRng(1))), 1);
+  });
+
+  it("keeps every split ratio inside the 0.4..0.6 band", () => {
+    const check = (node: LayoutNode): void => {
+      if (node.kind === "pane") return;
+      const [a, b] = node.sizes;
+      assert.ok(a >= 0.4 && a <= 0.6, `ratio ${a} out of band`);
+      assert.ok(b >= 0.4 && b <= 0.6, `ratio ${b} out of band`);
+      check(node.first);
+      check(node.second);
+    };
+    for (const seed of [1, 7, 42]) check(randomTiling(6, seededRng(seed)));
+  });
+
+  it("is deterministic for a seeded rng", () => {
+    assert.deepEqual(
+      tilingShape(randomTiling(5, seededRng(11))),
+      tilingShape(randomTiling(5, seededRng(11))),
+    );
+  });
+
+  it("covers the unit square without overlap", () => {
+    const panes = computeLayout(randomTiling(5, seededRng(3))).panes;
+    const area = panes.reduce((sum, p) => sum + p.rect[2] * p.rect[3], 0);
+    assert.ok(Math.abs(area - 1) < 1e-9, `area ${area} should sum to 1`);
+  });
+});
+
+describe("leavesByAreaDesc", () => {
+  it("orders every leaf largest-first", () => {
+    const root = randomTiling(6, seededRng(21));
+    const order = leavesByAreaDesc(root);
+    assert.deepEqual(new Set(order), new Set(collectPaneIds(root)));
+    const areas = new Map(
+      computeLayout(root).panes.map((p) => [p.node.id, p.rect[2] * p.rect[3]] as const),
+    );
+    const ordered = order.map((id) => areas.get(id) ?? 0);
+    const sorted = [...ordered].sort((a, b) => b - a);
+    assert.deepEqual(ordered, sorted);
+  });
+});
+
+describe("fleetTab", () => {
+  it("builds a named tab around a random tiling", () => {
+    const tab = fleetTab(4, seededRng(5), "Fleet");
+    assert.equal(tab.name, "Fleet");
+    assert.equal(countPanes(tab.root), 4);
+  });
+
+  it("preserves the fleet tab when saving and restoring a layout", () => {
+    const layout = defaultLayout();
+    const tab = fleetTab(5, seededRng(9), "Fleet");
     layout.workspaces[0].tabs = [tab];
     layout.workspaces[0].activeTabId = tab.id;
     assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
@@ -389,6 +491,69 @@ describe("sanitizeLayout", () => {
     const root = layout.workspaces[0].tabs[0].root;
     assert.equal(root.kind, "pane");
     if (root.kind === "pane") assert.deepEqual(root.cmd, ["claude", "--resume"]);
+  });
+
+  it("preserves pane agent CLIs for restore", () => {
+    const layout = sanitizeLayout({
+      version: 2,
+      activeWorkspaceId: "w",
+      workspaces: [
+        {
+          id: "w",
+          name: "w",
+          activeTabId: "t",
+          tabs: [
+            {
+              id: "t",
+              name: "t",
+              root: { kind: "pane", id: "p", agentCli: "claude" },
+            },
+          ],
+        },
+      ],
+    });
+    const root = layout.workspaces[0].tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind === "pane") assert.equal(root.agentCli, "claude");
+    const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
+    raw.workspaces[0].tabs[0].root.agentCli = ["claude"];
+    assert.throws(() => sanitizeLayout(raw), /Invalid saved pane agentCli/);
+  });
+
+  it("preserves pane agent sessions for resume", () => {
+    const layout = sanitizeLayout({
+      version: 2,
+      activeWorkspaceId: "w",
+      workspaces: [
+        {
+          id: "w",
+          name: "w",
+          activeTabId: "t",
+          tabs: [
+            {
+              id: "t",
+              name: "t",
+              root: {
+                kind: "pane",
+                id: "p",
+                agentCli: "codex",
+                agentSession: { cli: "codex", value: "019dd790-abc" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const root = layout.workspaces[0].tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind === "pane") {
+      assert.deepEqual(root.agentSession, { cli: "codex", value: "019dd790-abc" });
+    }
+    for (const bad of ["codex", ["codex"], { cli: "codex" }, { value: "x" }, 42]) {
+      const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
+      raw.workspaces[0].tabs[0].root.agentSession = bad;
+      assert.throws(() => sanitizeLayout(raw), /Invalid saved pane agent session/);
+    }
   });
 });
 
@@ -865,5 +1030,132 @@ describe("paneDisplayTitle", () => {
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p" }), "Terminal");
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "/repo/web" }), "web");
     assert.equal(paneDisplayTitle({ kind: "pane", id: "p", title: "", cwd: "" }), "Terminal");
+  });
+});
+
+describe("findWorkspaceByRoot", () => {
+  it("matches defaultCwd ignoring trailing slashes", () => {
+    const a = defaultWorkspace("A");
+    a.defaultCwd = "/repo/web";
+    const b = defaultWorkspace("B");
+    assert.equal(findWorkspaceByRoot([a, b], "/repo/web/")?.id, a.id);
+    assert.equal(findWorkspaceByRoot([a, b], "/repo/other"), null);
+    assert.equal(findWorkspaceByRoot([a, b], ""), null);
+  });
+
+  it("matches an explicit Explorer root", () => {
+    const a = defaultWorkspace("A");
+    a.root = "/repo/extra";
+    assert.equal(findWorkspaceByRoot([a], "/repo/extra/"), a);
+  });
+});
+
+describe("workspace root", () => {
+  it("round-trips an explicit root through sanitize", () => {
+    const layout = defaultLayout();
+    layout.workspaces[0].root = "/repo/web";
+    const loaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    assert.equal(loaded.workspaces[0].root, "/repo/web");
+  });
+
+  it("keeps legacy documents without a root loadable", () => {
+    const loaded = sanitizeLayout(JSON.parse(JSON.stringify(defaultLayout())));
+    assert.equal(loaded.workspaces[0].root, undefined);
+  });
+
+  it("rejects a non-string root", () => {
+    const raw = JSON.parse(JSON.stringify(defaultLayout()));
+    raw.workspaces[0].root = 42;
+    assert.throws(() => sanitizeLayout(raw), /workspace root/);
+  });
+});
+
+describe("resolveWorkspaceRoot", () => {
+  it("prefers the explicit root and current folder-workspace default", () => {
+    const ws = defaultWorkspace("web");
+    const root = ws.tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    root.cwd = "/pane/cwd";
+    ws.defaultCwd = "/repo/default";
+    ws.root = "/repo/explicit";
+    assert.equal(resolveWorkspaceRoot(ws, root.id), "/repo/explicit");
+    delete ws.root;
+    assert.equal(resolveWorkspaceRoot(ws, root.id), "/repo/default");
+  });
+
+  it("falls back to the active pane cwd, then the first cwd in the tab", () => {
+    const ws = defaultWorkspace("web");
+    const tab = ws.tabs[0];
+    assert.equal(tab.root.kind, "pane");
+    if (tab.root.kind !== "pane") throw new Error("Expected pane");
+    tab.root.cwd = "/repo/web";
+    assert.equal(resolveWorkspaceRoot(ws, tab.root.id), "/repo/web");
+    assert.equal(resolveWorkspaceRoot(ws, "missing-pane"), "/repo/web");
+    assert.equal(resolveWorkspaceRoot(ws), "/repo/web");
+  });
+
+  it("treats empty values as unset", () => {
+    const ws = defaultWorkspace("web");
+    ws.root = "";
+    ws.defaultCwd = "";
+    const root = ws.tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    root.cwd = "";
+    assert.equal(resolveWorkspaceRoot(ws, root.id), undefined);
+  });
+});
+
+describe("stampPaneAgentCli", () => {
+  it("stamps the queued CLI and survives a sanitize round trip", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentCli(layout, root.id, "  claude  "), true);
+    assert.equal(root.agentCli, "claude");
+    const reloaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    const again = reloaded.workspaces[0].tabs[0].root;
+    if (again.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(again.agentCli, "claude");
+    // A later queue overwrites the stamp.
+    assert.equal(stampPaneAgentCli(layout, root.id, "droid"), true);
+    assert.equal(root.agentCli, "droid");
+  });
+
+  it("refuses blank commands and missing panes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentCli(layout, root.id, "   "), false);
+    assert.equal(root.agentCli, undefined);
+    assert.equal(stampPaneAgentCli(layout, "missing-pane", "claude"), false);
+  });
+});
+
+describe("stampPaneAgentSession", () => {
+  it("stamps sessions and reports only changes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-1"), true);
+    assert.deepEqual(root.agentSession, { cli: "codex", value: "id-1" });
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-1"), false);
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-2"), true);
+    assert.deepEqual(root.agentSession, { cli: "codex", value: "id-2" });
+    const reloaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    const again = reloaded.workspaces[0].tabs[0].root;
+    if (again.kind !== "pane") throw new Error("Expected pane");
+    assert.deepEqual(again.agentSession, { cli: "codex", value: "id-2" });
+  });
+
+  it("refuses blanks and missing panes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentSession(layout, root.id, "  ", "id-1"), false);
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "  "), false);
+    assert.equal(root.agentSession, undefined);
+    assert.equal(stampPaneAgentSession(layout, "missing-pane", "codex", "id-1"), false);
   });
 });

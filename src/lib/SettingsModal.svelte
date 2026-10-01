@@ -4,15 +4,22 @@
   import { onMount } from "svelte";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import Spinner from "./Spinner.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
-    CUSTOM_CHIME_ID,
+    describeNotifyOutcome,
+    parseNotifyOutcome,
+    parseNotifyPermission,
     playbackPayload,
     routeNotification,
     testNotificationPayload,
     type NotifyDelivery,
+    type NotifyPermission,
     type ToastPosition,
   } from "./notify";
   import { cheatSheet, isMacPlatform } from "./shortcuts";
@@ -37,13 +44,33 @@
   } from "./uiFonts";
   import { toasts } from "./toasts.svelte.ts";
   import { THEMES, THEME_IDS, isThemeId } from "./themes";
+  import {
+    CONTACT_URL,
+    ISSUES_URL,
+    LICENSE_URL,
+    PRIVACY_URL,
+    RELEASES_URL,
+    REPO_URL,
+    SITE_URL,
+    TERMS_URL,
+  } from "./site.ts";
+  import {
+    formatResetCountdown,
+    formatUpdatedAgo,
+    joinLabels,
+    selectUsageClis,
+  } from "./usage";
+  import { usage } from "./usage.svelte";
+  import { downloadPercent, friendlyUpdateError } from "./statusBar";
+  import { updater } from "./updater.svelte";
 
   type SectionId =
     | "appearance"
     | "alerts"
     | "shortcuts"
     | "app"
-    | "workspace";
+    | "workspace"
+    | "usage";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
@@ -51,6 +78,7 @@
     { id: "shortcuts", label: "Shortcuts", icon: "command" },
     { id: "app", label: "App", icon: "info" },
     { id: "workspace", label: "Workspace", icon: "layers" },
+    { id: "usage", label: "Usage", icon: "activity" },
   ];
 
   let section = $state<SectionId>("app");
@@ -58,21 +86,91 @@
   let autostart = $state(false);
   let autostartLoaded = $state(false);
   let autostartError = $state<string | null>(null);
+  let telemetrySupported = $state(false);
+  let telemetryConsented = $state(false);
+  let telemetryLoaded = $state(false);
+  let telemetryError = $state<string | null>(null);
   let appName = $state("Ubra");
   let appVersion = $state("");
-  let soundFile = $state(store.soundFile);
   let fontQuery = $state("");
-  /** null = blank (default chime) or unchecked; otherwise backend verdict. */
-  let soundFileValid = $state<boolean | null>(null);
   /** Workspace-section draft: "" = off, a CLI id, or CUSTOM_COMMAND. */
   let cliSelection = $state("");
   let cliCustom = $state("");
   let cliDraftReady = $state(false);
   let folderPicking = $state(false);
   let folderError = $state<string | null>(null);
-  let soundFileChecking = $state(false);
+  let appearanceTab = $state<"theme" | "text">("theme");
+  /** System-notification permission: silent check on open, request on Test. */
+  let notifyPermission = $state<NotifyPermission>("unknown");
+  let testNotifyError = $state<string | null>(null);
+  let testNotifyNote = $state<string | null>(null);
+  /** True while a Test is in flight; the OS prompt can keep it waiting. */
+  let testNotifyBusy = $state(false);
+  const notifyPermissionLabel = $derived(
+    notifyPermission === "granted"
+      ? "granted"
+      : notifyPermission === "denied"
+        ? "denied — enable it in your OS settings"
+        : notifyPermission === "prompt"
+          ? "not decided yet — pressing Test will ask"
+          : "unknown — this build can't query the system state",
+  );
+
+  /** Usage providers to show; null while detection or registry is loading. */
+  const usageShowable = $derived(
+    agentClis.clis === null || usage.supported === null
+      ? null
+      : selectUsageClis(agentClis.clis, usage.supported),
+  );
+  const usageAnyLoading = $derived(
+    usageShowable?.some((entry) => usage.loading[entry.cli] === true) ?? false,
+  );
+
+  function refreshAllUsage(): void {
+    if (!usageShowable) return;
+    usage.refreshAllForced(usageShowable.map((entry) => entry.cli));
+  }
 
   const shortcuts = cheatSheet(isMacPlatform(navigator.platform));
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const mb = bytes / (1024 * 1024);
+    return mb < 10 ? `${mb.toFixed(1)} MB` : `${Math.round(mb)} MB`;
+  }
+
+  const updateHeadline = $derived(
+    updater.phase === "checking"
+      ? "Checking for updates…"
+      : updater.phase === "available"
+        ? "Update available"
+        : updater.phase === "downloading"
+          ? "Downloading update…"
+          : updater.phase === "ready"
+            ? "Update installed — relaunch to apply it"
+            : updater.phase === "error"
+              ? "Update check failed"
+              : updater.checked
+                ? "You're up to date"
+                : "Never checked for updates",
+  );
+  const updateProgress = $derived(
+    downloadPercent(updater.downloadedBytes, updater.totalBytes),
+  );
+  const updateErrorFriendly = $derived(friendlyUpdateError(updater.error));
+  const updateErrorRaw = $derived((updater.error ?? "").trim());
+  const lastCheckedLabel = $derived(
+    updater.lastCheckedAt === null
+      ? "Never"
+      : formatUpdatedAgo(updater.lastCheckedAt),
+  );
+
+  function onAutoCheckUpdatesChange(e: Event): void {
+    const enabled = (e.target as HTMLInputElement).checked;
+    store.setAutoCheckUpdates(enabled);
+    // Re-enabling checks right away instead of waiting for the next tick.
+    if (enabled) void updater.checkForUpdates({ silent: true });
+  }
 
   function close(): void {
     store.settingsOpen = false;
@@ -87,12 +185,25 @@
   }
 
   onMount(() => {
+    // Honor a section requested by menus/commands; fall back to App.
+    const requested = store.settingsOpenSection;
+    if (requested && SECTIONS.some((s) => s.id === requested)) {
+      section = requested as SectionId;
+    }
+    store.settingsOpenSection = null;
     invoke<boolean>("autostart_enabled")
       .then((v) => {
         autostart = v;
         autostartLoaded = true;
       })
       .catch((e) => console.error("ubra: autostart check failed", e));
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+        telemetryConsented = status.consented;
+        telemetryLoaded = true;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
     invoke<{ name: string; version: string }>("app_info")
       .then((info) => {
         appName = info.name;
@@ -121,6 +232,30 @@
     cliDraftReady = true;
   });
 
+  // Load usage providers when the section opens; refresh only supported CLIs.
+  $effect(() => {
+    if (section !== "usage") return;
+    const detected = agentClis.clis;
+    if (detected === null) return;
+    void (async () => {
+      const supported = await usage.ensureSupported();
+      usage.refreshAll(selectUsageClis(detected, supported).map((entry) => entry.cli));
+    })();
+  });
+
+  // Silent permission check when Alerts opens; the OS prompt only fires from
+  // the Test button below, never from merely viewing this section.
+  $effect(() => {
+    if (section !== "alerts") return;
+    invoke<unknown>("notification_permission")
+      .then((state) => {
+        notifyPermission = parseNotifyPermission(state);
+      })
+      .catch(() => {
+        notifyPermission = "unknown";
+      });
+  });
+
 
   function onAutostartChange(e: Event): void {
     const checked = (e.target as HTMLInputElement).checked;
@@ -133,10 +268,23 @@
     });
   }
 
-  function onDefaultCliSelect(e: Event): void {
+  async function onTelemetryChange(e: Event): Promise<void> {
+    const checked = (e.target as HTMLInputElement).checked;
+    telemetryError = null;
+    try {
+      await applyTelemetryConsent(checked);
+      telemetryConsented = checked;
+    } catch (err) {
+      console.error("ubra: telemetry consent failed", err);
+      telemetryConsented = !checked;
+      telemetryError = "Couldn't update the telemetry preference; reverted.";
+    }
+  }
+
+  function onDefaultCliSelect(picked: string): void {
     const ws = store.workspace();
     if (!ws) return;
-    const value = (e.target as HTMLSelectElement).value;
+    const value = picked;
     cliSelection = value;
     if (value === CUSTOM_COMMAND) {
       store.setWorkspaceDefaultCli(ws.id, cliCustom || null);
@@ -178,30 +326,93 @@
   }
 
   /**
+   * Ensure system-notification permission, prompting the OS dialog when the
+   * verdict is still undecided. Returns true when showing is allowed. The
+   * backend answers from the real OS state; only this gesture may prompt.
+   */
+  async function ensureNotifyPermission(): Promise<boolean> {
+    try {
+      notifyPermission = parseNotifyPermission(
+        await invoke<unknown>("notification_permission"),
+      );
+    } catch (e) {
+      console.error("ubra: notification permission check failed", e);
+      notifyPermission = "unknown";
+      return false;
+    }
+    if (notifyPermission === "granted") return true;
+    if (notifyPermission !== "prompt") return false;
+    try {
+      notifyPermission = parseNotifyPermission(
+        await invoke<unknown>("request_notification_permission"),
+      );
+      return notifyPermission === "granted";
+    } catch (e) {
+      console.error("ubra: notification permission request failed", e);
+      notifyPermission = "unknown";
+      return false;
+    }
+  }
+
+  /**
    * Fire one sample agent-finish through the current delivery/sound/mute
    * settings, exactly like a real finish (muted Codex stays silent).
+   * Failures surface inline instead of only in the console.
    */
-  function sendTestNotification(): void {
-    const test = testNotificationPayload();
-    const route = routeNotification({
-      delivery: store.notifyDelivery,
-      soundEnabled: store.soundEnabled,
-      mutedClis: store.mutedAgents,
-      cli: test.cli,
-    });
-    if (route.toast) {
-      toasts.push(test.title, test.body, test.nodeId);
-    }
-    if (route.system) {
-      invoke("notify_agent", {
-        title: test.title,
-        body: test.body,
-        kind: test.kind,
-      }).catch((e) => console.error("ubra: test notification failed", e));
-    }
-    if (route.sound) {
-      invoke("play_sound", playbackPayload(test.kind, store.soundStyle, store.soundFile))
-        .catch((e) => console.error("ubra: test sound failed", e));
+  async function sendTestNotification(): Promise<void> {
+    if (testNotifyBusy) return;
+    testNotifyBusy = true;
+    testNotifyError = null;
+    testNotifyNote = null;
+    try {
+      const test = testNotificationPayload();
+      const route = routeNotification({
+        delivery: store.notifyDelivery,
+        soundEnabled: store.soundEnabled,
+        mutedClis: store.mutedAgents,
+        cli: test.cli,
+      });
+      if (route.toast) {
+        toasts.push(test.title, test.body, test.nodeId);
+      }
+      if (route.system) {
+        const allowed = await ensureNotifyPermission();
+        if (!allowed) {
+          testNotifyError =
+            notifyPermission === "denied"
+              ? "System notifications are blocked. Enable them in System Settings → Notifications, then try again."
+              : notifyPermission === "prompt"
+                ? "Permission isn't decided yet — answer the system prompt, then press Test again."
+                : "Couldn't check notification permission. Try again.";
+        } else {
+          try {
+            const raw = await invoke<unknown>("notify_agent", {
+              title: test.title,
+              body: test.body,
+              kind: test.kind,
+            });
+            const outcome = parseNotifyOutcome(raw);
+            if (outcome.status === "denied") notifyPermission = "denied";
+            const report = describeNotifyOutcome(outcome, "test");
+            if (report.ok) {
+              testNotifyNote = report.message;
+            } else {
+              testNotifyError = report.message;
+            }
+          } catch (e) {
+            console.error("ubra: test notification failed", e);
+            testNotifyError =
+              "Couldn't show the system notification. Try again.";
+          }
+        }
+      }
+      if (route.sound) {
+        invoke("play_sound", playbackPayload(test.kind)).catch((e) =>
+          console.error("ubra: test sound failed", e),
+        );
+      }
+    } finally {
+      testNotifyBusy = false;
     }
   }
 
@@ -230,36 +441,31 @@
     store.setSoundEnabled((e.target as HTMLInputElement).checked);
   }
 
-  function onSoundFileChange(): void {
-    store.setSoundFile(soundFile);
-    if (soundFile.trim() === "") {
-      soundFileValid = null;
-      soundFileChecking = false;
-      return;
-    }
-    soundFileValid = null;
-    soundFileChecking = true;
-    invoke<boolean>("check_sound_file", { path: soundFile })
-      .then((ok) => {
-        soundFileValid = ok;
-        soundFileChecking = false;
-      })
-      .catch(() => {
-        soundFileValid = false;
-        soundFileChecking = false;
-      });
+  function onTermGpuChange(e: Event): void {
+    store.setTermGpu((e.target as HTMLInputElement).checked);
+  }
+
+  function onAutoLaunchAgentChange(e: Event): void {
+    store.setAutoLaunchAgent((e.target as HTMLInputElement).checked);
+  }
+
+  function onTrayTitleChange(e: Event): void {
+    store.setTrayTitleEnabled((e.target as HTMLInputElement).checked);
+  }
+
+  function onTrayMenuListChange(e: Event): void {
+    store.setTrayMenuListEnabled((e.target as HTMLInputElement).checked);
   }
 
   function onTestSound(): void {
-    invoke("play_sound", playbackPayload("done", store.soundStyle, store.soundFile))
+    invoke("play_sound", playbackPayload("done"))
       .catch((e) => console.error("ubra: test sound failed", e));
   }
 
-  function onSoundStyleChange(e: Event): void {
-    store.setSoundStyle((e.target as HTMLSelectElement).value);
+  function openOnboarding(): void {
+    store.settingsOpen = false;
+    store.onboardingOpen = true;
   }
-
-  const REPO_URL = "https://github.com/stackwares/ubra-tauri";
 
   function openExternal(url: string): void {
     invoke("plugin:opener|open_url", { url }).catch((e) =>
@@ -287,7 +493,7 @@
   >
     <div class="header">
       <span>Settings</span>
-      <button onclick={close} aria-label="Close settings">
+      <button onclick={close} title="Close settings" aria-label="Close settings">
         <Icon name="x" size={14} />
       </button>
     </div>
@@ -309,6 +515,25 @@
         {#if section === "appearance"}
           <section aria-label="Appearance">
             <h2>Appearance</h2>
+            <div class="subtabs" role="tablist" aria-label="Appearance settings">
+              <button
+                role="tab"
+                aria-selected={appearanceTab === "theme"}
+                class:active={appearanceTab === "theme"}
+                onclick={() => (appearanceTab = "theme")}
+              >
+                Theme
+              </button>
+              <button
+                role="tab"
+                aria-selected={appearanceTab === "text"}
+                class:active={appearanceTab === "text"}
+                onclick={() => (appearanceTab = "text")}
+              >
+                Text
+              </button>
+            </div>
+            {#if appearanceTab === "theme"}
             <div class="group">
               <h3 class="group-label" id="theme-label">Theme</h3>
               <div class="card flush" role="group" aria-labelledby="theme-label">
@@ -350,6 +575,7 @@
                 </div>
               </div>
             </div>
+            {:else}
             <div class="group">
               <h3 class="group-label" id="font-label">Interface font</h3>
               <div class="card flush">
@@ -422,6 +648,7 @@
                       <button
                         onclick={() => store.bumpUiScale(-1)}
                         disabled={store.uiScale <= MIN_UI_SCALE}
+                        title="Smaller interface text"
                         aria-label="Smaller interface text"
                       >
                         &minus;
@@ -429,6 +656,7 @@
                       <button
                         onclick={() => store.bumpUiScale(1)}
                         disabled={store.uiScale >= MAX_UI_SCALE}
+                        title="Bigger interface text"
                         aria-label="Bigger interface text"
                       >
                         +
@@ -456,6 +684,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(-1)}
                         disabled={store.termFontSize <= MIN_TERM_FONT_SIZE}
+                        title="Smaller terminal font"
                         aria-label="Smaller terminal font"
                       >
                         &minus;
@@ -463,6 +692,7 @@
                       <button
                         onclick={() => store.bumpTermFontSize(1)}
                         disabled={store.termFontSize >= MAX_TERM_FONT_SIZE}
+                        title="Bigger terminal font"
                         aria-label="Bigger terminal font"
                       >
                         +
@@ -514,8 +744,21 @@
                     <span class="value">{store.termOpacity}%</span>
                   </span>
                 </div>
+                <label class="row switch">
+                  <span class="label">Hardware-accelerated terminal rendering</span>
+                  <input
+                    type="checkbox"
+                    checked={store.termGpu}
+                    onchange={onTermGpuChange}
+                    aria-label="Hardware-accelerated terminal rendering"
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
               </div>
             </div>
+            {/if}
           </section>
         {:else if section === "alerts"}
           <section aria-label="Alerts">
@@ -556,11 +799,27 @@
                 {/if}
                 <div class="row">
                   <span class="label">Test with current settings</span>
-                  <button class="btn" onclick={sendTestNotification}>
+                  <button
+                    class="btn"
+                    disabled={testNotifyBusy}
+                    onclick={() => void sendTestNotification()}
+                  >
                     <Icon name="bell" size={12} />
-                    <span>Send test notification</span>
+                    <span>{testNotifyBusy ? "Waiting…" : "Test"}</span>
                   </button>
                 </div>
+                {#if store.notifyDelivery === "system"}
+                  <div class="hint">System permission: {notifyPermissionLabel}</div>
+                {/if}
+                {#if testNotifyError}
+                  <div class="hint">
+                    <span class="error-hint" role="alert">{testNotifyError}</span>
+                  </div>
+                {:else if testNotifyNote}
+                  <div class="hint">
+                    <span class="ok-hint" role="status">{testNotifyNote}</span>
+                  </div>
+                {/if}
               </div>
               <div class="hint">
                 Fires a sample Codex finish through the settings above.
@@ -580,60 +839,11 @@
                     <span class="thumb"></span>
                   </span>
                 </label>
-                <label class="row">
-                  <span class="label">Chime</span>
-                  <span class="select-wrap">
-                    <select
-                      value={store.soundStyle}
-                      onchange={onSoundStyleChange}
-                      aria-label="Notification chime"
-                    >
-                      <option value="default">Default chime</option>
-                      <option value="bright">Bright</option>
-                      <option value="soft">Soft</option>
-                      <option value="pop">Pop</option>
-                      <option value={CUSTOM_CHIME_ID}>
-                        Custom audio file…
-                      </option>
-                    </select>
-                  </span>
-                </label>
-                {#if store.soundStyle === CUSTOM_CHIME_ID}
-                  <label class="row">
-                    <span class="label">Custom sound</span>
-                    <input
-                      type="text"
-                      bind:value={soundFile}
-                      onchange={onSoundFileChange}
-                      placeholder="~/Music/chime.mp3"
-                      aria-label="Custom sound file path"
-                      aria-invalid={soundFileValid === false}
-                      aria-describedby={soundFile.trim() !== ""
-                        ? "sound-hint"
-                        : undefined}
-                      class="file-input"
-                    />
-                  </label>
-                  {#if soundFile.trim() !== ""}
-                    <div class="hint" id="sound-hint">
-                      {#if soundFileChecking}
-                        <span class="checking">Checking file…</span>
-                      {:else if soundFileValid === false}
-                        <span class="error-hint" role="alert">
-                          File not found or not playable audio; default chime
-                          is used.
-                        </span>
-                      {:else if soundFileValid === true}
-                        <span class="ok-hint">Custom sound ready.</span>
-                      {/if}
-                    </div>
-                  {/if}
-                {/if}
                 <div class="row">
                   <span class="label">Preview</span>
                   <button class="btn" onclick={onTestSound}>
                     <Icon name="play" size={12} />
-                    <span>Play test sound</span>
+                    <span>Play</span>
                   </button>
                 </div>
               </div>
@@ -676,48 +886,245 @@
                     {autostartError}
                   </div>
                 {/if}
-              </div>
-            </div>
-            <div class="group">
-              <h3 class="group-label">Onboarding</h3>
-              <div class="card">
-                <div class="row">
-                  <span class="label">
-                    Set up another project and agent session
+                <label class="row switch">
+                  <span class="label">Auto-launch agent in new terminals</span>
+                  <input
+                    type="checkbox"
+                    checked={store.autoLaunchAgent}
+                    onchange={onAutoLaunchAgentChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
                   </span>
-                  <button class="btn" onclick={() => store.openOnboarding()}>
-                    <Icon name="layers" size={12} />
-                    <span>Run onboarding</span>
+                </label>
+                <div class="row">
+                  <span class="label">Setup walkthrough</span>
+                  <button class="btn" onclick={openOnboarding}>
+                    <span>Open onboarding</span>
                   </button>
                 </div>
               </div>
               <div class="hint">
-                Completing setup opens a new workspace and keeps your current
-                work.
+                When on, new panes, tabs, and workspaces launch the default
+                agent automatically.
               </div>
             </div>
             <div class="group">
-              <h3 class="group-label">Quit</h3>
+              <h3 class="group-label">Menu bar</h3>
               <div class="card">
-                <div class="row">
-                  <span class="label">
-                    Quit Ubra and terminate owned pane processes
+                <label class="row switch">
+                  <span class="label">Show agent count in menu bar</span>
+                  <input
+                    type="checkbox"
+                    checked={store.trayTitleEnabled}
+                    onchange={onTrayTitleChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
                   </span>
-                  <button
-                    class="btn"
-                    onclick={() => {
-                      invoke("quit_app").catch((error) =>
-                        toasts.push("Quit failed", String(error), "", {
-                          kind: "copy",
-                        }),
-                      );
-                    }}
-                  >
-                    Quit Ubra
-                  </button>
-                </div>
+                </label>
+                <label class="row switch">
+                  <span class="label">Show agents in tray menu</span>
+                  <input
+                    type="checkbox"
+                    checked={store.trayMenuListEnabled}
+                    onchange={onTrayMenuListChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="hint">
+                The tray menu lists running agents; picking one shows the
+                window and focuses its pane. The count appears next to the
+                tray icon on macOS and Linux.
               </div>
             </div>
+            <div class="group">
+              <h3 class="group-label">Updates</h3>
+              <div class="card">
+                <div class="row update-head">
+                  <span class="update-status">
+                    {#if updater.phase === "checking"}
+                      <Spinner size={14} />
+                    {:else if updater.phase === "downloading" || updater.phase === "available"}
+                      <span class="update-icon accent">
+                        <Icon name="download" size={14} />
+                      </span>
+                    {:else if updater.phase === "ready"}
+                      <span class="update-icon success">
+                        <Icon name="check" size={14} />
+                      </span>
+                    {:else if updater.phase === "error"}
+                      <span class="update-icon error">
+                        <Icon name="alert" size={14} />
+                      </span>
+                    {:else if updater.checked}
+                      <span class="update-icon success">
+                        <Icon name="check" size={14} />
+                      </span>
+                    {:else}
+                      <span class="update-icon">
+                        <Icon name="refresh" size={14} />
+                      </span>
+                    {/if}
+                    <span class="label">{updateHeadline}</span>
+                    {#if updater.phase === "available" && updater.version}
+                      <span class="version-pill">v{updater.version}</span>
+                    {/if}
+                  </span>
+                  {#if updater.phase === "available"}
+                    <button
+                      class="btn primary"
+                      onclick={() => void updater.downloadAndInstall()}
+                    >
+                      <Icon name="download" size={12} />
+                      <span>Download and install</span>
+                    </button>
+                  {:else if updater.phase === "ready"}
+                    <button
+                      class="btn primary"
+                      onclick={() => void updater.relaunchApp()}
+                    >
+                      <Icon name="refresh" size={12} />
+                      <span>Relaunch</span>
+                    </button>
+                  {:else if updater.phase === "error"}
+                    <button
+                      class="btn"
+                      onclick={() => void updater.checkForUpdates()}
+                    >
+                      <Icon name="refresh" size={12} />
+                      <span>Retry</span>
+                    </button>
+                  {:else}
+                    <button
+                      class="btn"
+                      disabled={updater.phase === "checking" ||
+                        updater.phase === "downloading"}
+                      onclick={() => void updater.checkForUpdates()}
+                    >
+                      {#if updater.phase === "checking"}
+                        <Spinner size={12} />
+                      {:else}
+                        <Icon name="refresh" size={12} />
+                      {/if}
+                      <span>
+                        {updater.phase === "checking"
+                          ? "Checking…"
+                          : updater.phase === "downloading"
+                            ? "Downloading…"
+                            : updater.checked
+                              ? "Check again"
+                              : "Check for updates"}
+                      </span>
+                    </button>
+                  {/if}
+                </div>
+                {#if updater.phase === "downloading"}
+                  <div
+                    class="update-progress"
+                    class:indeterminate={updateProgress === null}
+                    role="progressbar"
+                    aria-label="Update download progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={updateProgress ?? undefined}
+                  >
+                    <span
+                      style={updateProgress === null
+                        ? ""
+                        : `width: ${updateProgress}%`}
+                    ></span>
+                  </div>
+                  <div class="hint">
+                    {#if updater.totalBytes}
+                      {formatBytes(updater.downloadedBytes)} of
+                      {formatBytes(updater.totalBytes)}
+                      {#if updateProgress !== null}
+                        · {updateProgress}%
+                      {/if}
+                    {:else}
+                      {formatBytes(updater.downloadedBytes)} downloaded
+                    {/if}
+                  </div>
+                {/if}
+                {#if updater.phase === "available" && updater.notes}
+                  <div class="update-notes">{updater.notes}</div>
+                {/if}
+                {#if updater.phase === "error"}
+                  <div class="hint error-hint" role="alert">
+                    {updateErrorFriendly}
+                  </div>
+                  {#if updateErrorRaw && updateErrorRaw !== updateErrorFriendly}
+                    <div class="hint update-raw" title={updateErrorRaw}>
+                      {updateErrorRaw}
+                    </div>
+                  {/if}
+                {/if}
+                <div class="row update-meta">
+                  <span class="hint">
+                    {#if appVersion}Ubra {appVersion} · {/if}Last checked
+                    {lastCheckedLabel}
+                  </span>
+                  <button
+                    class="link"
+                    onclick={() => openExternal(RELEASES_URL)}
+                  >
+                    View releases
+                  </button>
+                </div>
+                <label class="row switch">
+                  <span class="label">Automatically check for updates</span>
+                  <input
+                    type="checkbox"
+                    checked={store.autoCheckUpdates}
+                    onchange={onAutoCheckUpdatesChange}
+                  />
+                  <span class="track" aria-hidden="true">
+                    <span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="hint">
+                Checks quietly in the background; downloading and restarting
+                always ask first.
+              </div>
+            </div>
+            {#if telemetrySupported}
+              <div class="group">
+                <h3 class="group-label">Telemetry</h3>
+                <div class="card">
+                  <label class="row switch">
+                    <span class="label">Share anonymous usage and crash reports</span>
+                    <input
+                      type="checkbox"
+                      checked={telemetryConsented}
+                      disabled={!telemetryLoaded}
+                      onchange={onTelemetryChange}
+                    />
+                    <span class="track" aria-hidden="true">
+                      <span class="thumb"></span>
+                    </span>
+                  </label>
+                  {#if telemetryError}
+                    <div class="hint error-hint" role="alert">
+                      {telemetryError}
+                    </div>
+                  {/if}
+                </div>
+                <div class="hint">
+                  Helps improve Ubra. Anonymous events and crash reports only —
+                  never code, file paths, or commands. Takes effect immediately.
+                  See the
+                  <button
+                    class="link"
+                    onclick={() => openExternal(PRIVACY_URL)}
+                  >Privacy Policy</button>.
+                </div>
+              </div>
+            {/if}
             <div class="group about-block">
               <img
                 class="about-logo"
@@ -731,29 +1138,47 @@
               </div>
               <div class="about-sub">Agent runtime desktop app</div>
               <div class="links">
+                <button class="link" onclick={() => openExternal(SITE_URL)}>
+                  Website
+                </button>
                 <button class="link" onclick={() => openExternal(REPO_URL)}>
                   GitHub
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/issues`)}
+                  onclick={() => openExternal(ISSUES_URL)}
                 >
                   Report an issue
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/releases`)}
+                  onclick={() => openExternal(RELEASES_URL)}
                 >
                   Releases
                 </button>
                 <button
                   class="link"
-                  onclick={() => openExternal(`${REPO_URL}/blob/main/LICENSE`)}
+                  onclick={() => openExternal(LICENSE_URL)}
                 >
                   MIT License
                 </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(PRIVACY_URL)}
+                >
+                  Privacy
+                </button>
+                <button class="link" onclick={() => openExternal(TERMS_URL)}>
+                  Terms
+                </button>
+                <button
+                  class="link"
+                  onclick={() => openExternal(CONTACT_URL)}
+                >
+                  Contact
+                </button>
               </div>
-              <div class="about-sub">© 2026 Oliver Martinez</div>
+              <div class="about-sub">© 2026 Ubra</div>
             </div>
           </section>
         {:else if section === "workspace"}
@@ -774,26 +1199,18 @@
                       <span class="hint">Detecting installed agents…</span>
                     </div>
                   {:else}
-                    <label class="row">
+                    <div class="row">
                       <span class="label">Default agent CLI</span>
-                      <span class="select-wrap">
-                        <select
-                          value={cliSelection}
-                          onchange={onDefaultCliSelect}
-                          aria-label="Default agent CLI"
-                        >
-                          <option value="">None (plain shells)</option>
-                          {#each agentClis.clis as entry (entry.cli)}
-                            <option value={entry.cli} title={entry.path}>
-                              {entry.label} · {entry.cli}
-                            </option>
-                          {/each}
-                          <option value={CUSTOM_COMMAND}>
-                            Custom command…
-                          </option>
-                        </select>
+                      <span class="cli-select">
+                        <AgentCliSelect
+                          entries={agentClis.clis}
+                          bind:value={cliSelection}
+                          noneLabel="None (plain shells)"
+                          ariaLabel="Default agent CLI"
+                          onChange={onDefaultCliSelect}
+                        />
                       </span>
-                    </label>
+                    </div>
                     {#if cliSelection === CUSTOM_COMMAND}
                       <label class="row">
                         <span class="label">Custom command</span>
@@ -811,27 +1228,22 @@
                       </label>
                     {/if}
                   {/if}
-                  <div class="row">
-                    <span class="label">Default folder</span>
-                    <span class="folder-value" title={ws.defaultCwd ?? ""}>
+                  <div class="folder-block">
+                    <div class="row">
+                      <span class="label">Default folder</span>
+                      <span class="folder-actions">
+                        <button
+                          class="btn"
+                          onclick={pickDefaultFolder}
+                          disabled={folderPicking}
+                        >
+                          {folderPicking ? "Opening…" : "Change…"}
+                        </button>
+                      </span>
+                    </div>
+                    <div class="folder-path" title={ws.defaultCwd ?? ""}>
                       {ws.defaultCwd ?? "Default directory"}
-                    </span>
-                    <button
-                      class="btn"
-                      onclick={pickDefaultFolder}
-                      disabled={folderPicking}
-                    >
-                      {folderPicking ? "Opening…" : "Change…"}
-                    </button>
-                    {#if ws.defaultCwd}
-                      <button
-                        class="btn"
-                        onclick={() =>
-                          store.setWorkspaceDefaultCwd(ws.id, null)}
-                      >
-                        Clear
-                      </button>
-                    {/if}
+                    </div>
                   </div>
                   {#if folderError}
                     <div class="hint">
@@ -842,12 +1254,109 @@
                   {/if}
                 </div>
                 <div class="hint">
-                  The default CLI runs automatically in new tabs and panes.
-                  Applies to new panes only.
+                  When auto-launch is on, the default CLI runs automatically
+                  in new tabs and panes. Applies to new panes only.
                 </div>
               </div>
             {:else}
               <div class="hint">No workspace open.</div>
+            {/if}
+          </section>
+        {:else if section === "usage"}
+          <section aria-label="Usage">
+            <div class="section-head">
+              <h2>Usage</h2>
+              {#if usageShowable && usageShowable.length > 0}
+                <button
+                  class="btn btn-icon"
+                  title="Refresh all usage"
+                  aria-label="Refresh all usage"
+                  aria-busy={usageAnyLoading}
+                  disabled={usageAnyLoading}
+                  onclick={refreshAllUsage}
+                >
+                  {#if usageAnyLoading}
+                    <Spinner size={12} />
+                  {:else}
+                    <Icon name="refresh" size={12} />
+                  {/if}
+                </button>
+              {/if}
+            </div>
+            {#if usageShowable === null}
+              <div class="hint">Loading supported usage providers…</div>
+            {:else}
+              {@const showable = usageShowable}
+              {@const supportedLabels = (usage.supported ?? []).map(
+                (entry) => entry.label,
+              )}
+              {#if showable.length === 0}
+                <div class="hint">
+                  Plan usage is available for {joinLabels(
+                    supportedLabels,
+                  )}. Sign in with a supported CLI to view it.
+                </div>
+              {:else}
+                {#each showable as entry (entry.cli)}
+                  {@const snap = usage.entries[entry.cli]}
+                  {@const busy = usage.loading[entry.cli] === true}
+                  <div class="group">
+                    <h3 class="group-label">{entry.label}</h3>
+                    <div class="card" aria-busy={busy}>
+                      <div class="row">
+                        <span class="usage-path" title={entry.path}>
+                          {entry.path}
+                        </span>
+                      </div>
+                      {#if !snap}
+                        <div class="hint">Loading usage…</div>
+                      {:else if snap.status === "ready" && snap.snapshot}
+                        {@const shot = snap.snapshot}
+                        {#each shot.windows as window (window.label)}
+                          <div class="usage-window">
+                            <div class="usage-head">
+                              <span class="label">{window.label}</span>
+                              <span class="usage-value">
+                                {#if window.percentUsed !== undefined}
+                                  {window.percentUsed.toFixed(0)}% used
+                                {/if}
+                                {#if window.percentUsed !== undefined && window.resetsAt !== undefined}
+                                  ·
+                                {/if}
+                                {#if window.resetsAt !== undefined}
+                                  resets {formatResetCountdown(window.resetsAt)}
+                                {/if}
+                              </span>
+                            </div>
+                            {#if window.percentUsed !== undefined}
+                              <div
+                                class="usage-bar"
+                                role="progressbar"
+                                aria-label={window.label}
+                                aria-valuenow={Math.round(window.percentUsed)}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                              >
+                                <span
+                                  style={`width:${Math.min(100, window.percentUsed)}%`}
+                                ></span>
+                              </div>
+                            {/if}
+                          </div>
+                        {/each}
+                        <div class="hint">
+                          {shot.source}{#if shot.plan} · {shot.plan}{/if} · Updated
+                          {formatUpdatedAgo(shot.fetchedAt)}
+                        </div>
+                      {:else}
+                        <div class="hint">
+                          {snap.message ?? "Usage unavailable."}
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              {/if}
             {/if}
           </section>
         {/if}
@@ -963,6 +1472,47 @@
     color: var(--text-strong);
     margin: 2px 0 14px;
   }
+  /* Section title row with a trailing action (Usage refresh). */
+  .section-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .section-head h2 {
+    flex: 1;
+  }
+  .section-head .btn-icon {
+    margin-top: 4px;
+  }
+  /* In-section sub-tabs (Appearance Theme/Text). */
+  .subtabs {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    margin: 0 0 14px;
+    background: var(--surface-bg);
+    border: 1px solid var(--separator);
+    border-radius: 8px;
+  }
+  .subtabs button {
+    flex: 1 1 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-weight: 600;
+    text-align: center;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  .subtabs button:hover {
+    color: var(--text);
+  }
+  .subtabs button.active {
+    background: var(--surface-active);
+    color: var(--text-strong);
+  }
   /* Grouped card layout in the macOS System Settings idiom: a small label
      above each card, hairline dividers between rows, helper text below. */
   .group {
@@ -987,8 +1537,43 @@
     padding: 8px;
   }
   .card > .row + .row,
+  .card > .row + .folder-block,
   .card > .hint + .row {
     border-top: 1px solid var(--separator);
+  }
+  .card > .row + .usage-window,
+  .card > .usage-window + .usage-window {
+    border-top: 1px solid var(--separator);
+  }
+  .usage-window {
+    padding: 8px 0;
+  }
+  .usage-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .usage-head .label {
+    flex: 1;
+  }
+  .usage-value {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .usage-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-active);
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .usage-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
   }
   .row {
     display: flex;
@@ -1146,6 +1731,118 @@
     padding: 2px 10px;
     font-size: 11px;
   }
+  /* Accent-filled call to action for the primary update step. */
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--app-bg);
+    font-weight: 600;
+  }
+  .btn.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--app-bg);
+  }
+  .update-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .update-status .label {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .update-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    color: var(--text-muted);
+  }
+  .update-icon.accent {
+    color: var(--accent);
+  }
+  .update-icon.success {
+    color: var(--success);
+  }
+  .update-icon.error {
+    color: var(--error-text);
+  }
+  .version-pill {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--surface-active);
+    border-radius: 999px;
+    padding: 1px 8px;
+    white-space: nowrap;
+  }
+  .update-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-active);
+    margin: 2px 0 4px;
+    overflow: hidden;
+  }
+  .update-progress > span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width 150ms ease;
+  }
+  .update-progress.indeterminate > span {
+    width: 40%;
+    animation: update-slide 1.2s ease-in-out infinite alternate;
+  }
+  @keyframes update-slide {
+    from {
+      margin-left: -40%;
+    }
+    to {
+      margin-left: 100%;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .update-progress > span {
+      transition: none;
+    }
+    .update-progress.indeterminate > span {
+      animation: none;
+      width: 100%;
+      margin-left: 0;
+    }
+  }
+  .update-notes {
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--separator);
+    padding: 8px 0;
+    margin: 0;
+    max-height: 96px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .update-raw {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .update-meta .hint {
+    padding: 0;
+  }
+  .update-meta .link {
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+  /* Square icon-only action; keeps its accessible name in markup. */
+  .btn-icon {
+    padding: 5px 8px;
+  }
   .file-input {
     border: 1px solid var(--input-border);
     border-radius: 6px;
@@ -1155,18 +1852,35 @@
     font: inherit;
     width: 220px;
   }
-  .file-input[aria-invalid="true"] {
-    border-color: var(--error-text);
-  }
-  .folder-value {
-    flex: 1;
+  /* Capped dropdown width so the row label keeps its natural width. */
+  .cli-select {
+    display: flex;
+    flex: 0 1 220px;
     min-width: 0;
+  }
+  /* Default folder: label + actions on one line, full-width path below. */
+  .folder-block {
+    padding: 8px 0;
+  }
+  .folder-block .row {
+    padding: 0 0 6px;
+  }
+  .folder-actions {
+    display: flex;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .folder-path,
+  .usage-path {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    text-align: right;
     color: var(--text-muted);
     font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .usage-path {
+    flex: 1;
+    min-width: 0;
   }
   .hint {
     font-size: 11px;
@@ -1189,9 +1903,6 @@
   }
   .error-hint {
     color: var(--error-text);
-  }
-  .checking {
-    color: var(--text-muted);
   }
   .ok-hint {
     color: var(--success);

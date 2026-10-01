@@ -1,11 +1,13 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import TerminalPane from "./TerminalPane.svelte";
+  import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
-  import { agentStatusLabel } from "./agentStatus";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import { paneDisplayTitle, type PaneNode } from "./layout";
@@ -29,6 +31,20 @@
   let editing = $state(false);
   let draft = $state("");
   let menu = $state<{ x: number; y: number; opener: HTMLElement | null } | null>(null);
+
+  function restartTerminal(): void {
+    if (!exited) return;
+    store.authorizePaneCommand(node.id);
+    store.relaunchPaneAgent(node.id);
+    exited = false;
+    runId += 1;
+    store.paneFocusTarget = node.id;
+    terminalCommands.changed();
+  }
+  onMount(() => terminalCommands.registerRestart(node.id, {
+    available: () => exited,
+    restart: restartTerminal,
+  }));
 
   // Split-button agent picker: hovering a split button opens a menu of
   // detected agent CLIs to run in the new pane. Click still splits with
@@ -120,6 +136,7 @@
   }
   const agentLabel = $derived(agent.paneAgentLabel(node.id));
   const agentStatus = $derived(agent.paneStatus(node.id));
+  const agentCli = $derived(agent.paneCli(node.id));
 
   // F2 rename: the matching pane takes the request and clears it.
   $effect(() => {
@@ -150,6 +167,14 @@
 
   const title = $derived(paneDisplayTitle(node));
 
+  const respawnLabel = $derived(
+    node.cmd?.length && node.cmdOnRestore === false
+      ? "Run saved command"
+      : node.agentCli?.trim()
+        ? `Restart ${node.agentCli.trim().split(/\s+/)[0]}`
+        : "Restart terminal",
+  );
+
   function focus(el: HTMLInputElement): void {
     el.focus();
     el.select();
@@ -170,9 +195,13 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
-  function onTerminalSpawn(id: number): void {
+  function onTerminalSpawn(id: number, attached: boolean, firstDelivery: boolean): void {
     agent.register(id, node.id);
-    const command = store.takePendingTerminalCommand(node.id);
+    // Session queue wins; otherwise a fresh (non-attached) first delivery
+    // reruns the pane's persisted agent. Attached sessions already run it.
+    const command =
+      store.takePendingTerminalCommand(node.id) ??
+      (!attached && firstDelivery ? store.takeRestoreAgent(node.id) : null);
     if (!command) return;
     invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
       console.error("ubra: failed to start onboarding command", error);
@@ -248,8 +277,16 @@
       </span>
     {/if}
     {#if agentLabel}
-      <span class={"agent " + agentStatus} title={agent.paneStatusTitle(node.id)}>
-        {agentLabel} · {agentStatusLabel(agentStatus)}
+      <span class="agent" title={agent.paneStatusTitle(node.id)}>
+        {#if agentStatus === "done"}
+          <span class="done-check"><Icon name="check" size={10} /></span>
+        {:else}
+          <span class={"dot " + agentStatus}></span>
+        {/if}
+        {#if agentCli}
+          <AgentCliIcon cli={agentCli} label={agentLabel} size={14} />
+        {/if}
+        <span class="agent-label">{agentLabel}</span>
       </span>
     {/if}
     {#if zoomed}
@@ -305,7 +342,8 @@
         focusToken={focusToken}
         findToken={findToken}
         scrollback={store.termScrollback}
-        onExit={() => (exited = true)}
+        gpuEnabled={store.termGpu}
+        onExit={() => { exited = true; terminalCommands.changed(); }}
         onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}
       />
@@ -313,14 +351,10 @@
     {#if exited}
       <button
         class="respawn"
-        onclick={() => {
-          store.authorizePaneCommand(node.id);
-          exited = false;
-          runId += 1;
-        }}
+        onclick={restartTerminal}
       >
         <Icon name="refresh" size={12} />
-        <span>{node.cmd?.length && node.cmdOnRestore === false ? "Run saved command" : "Restart terminal"}</span>
+        <span>{respawnLabel}</span>
       </button>
     {/if}
   </div>
@@ -353,6 +387,7 @@
       items={(agentClis.clis ?? []).map((entry) => ({
         id: entry.cli,
         label: `${entry.label} · ${entry.cli}`,
+        cli: entry.cli,
       }))}
       onPick={onSplitPick}
       onDismiss={dismissSplitMenu}
@@ -406,29 +441,45 @@
     padding: 1px 6px;
   }
   .agent {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: 11px;
-    color: var(--agent-text);
-    background: var(--agent-bg);
-    border: none;
-    padding: 1px 8px;
-    border-radius: 8px;
+    color: var(--text-subtle);
     white-space: nowrap;
-    cursor: pointer;
   }
-  .agent.blocked {
-    color: var(--error-text);
-    background: var(--error-bg);
+  .agent-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .agent.attention {
-    color: var(--attention);
-    background: var(--attention-bg);
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
   }
-  .agent.done {
+  .dot.working {
+    background: var(--success);
+  }
+  .dot.blocked {
+    background: var(--error-text);
+  }
+  .dot.unknown {
+    background: var(--text-subtle);
+  }
+  .dot.attention {
+    background: var(--attention);
+  }
+  .dot.idle {
+    background: transparent;
+    border: 1px solid var(--text-subtle);
+    box-sizing: border-box;
+  }
+  .done-check {
+    display: inline-flex;
     color: var(--success);
-  }
-  .agent.idle,
-  .agent.unknown {
-    color: var(--text-muted);
+    flex: 0 0 auto;
   }
   .zoomed {
     border: 0;

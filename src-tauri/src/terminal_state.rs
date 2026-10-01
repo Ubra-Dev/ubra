@@ -1,4 +1,4 @@
-//! Serializable terminal state and chunk-safe headless query handling.
+//! Serializable terminal state, including unfinished escape input.
 use crate::pty_manager::PtySnapshot;
 
 pub(crate) struct ScreenState {
@@ -30,6 +30,13 @@ impl ScreenState {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         let mut data = String::from("\x1bc");
+        // History first, as plain text: replaying the scrollback before the
+        // visible screen lets the fresh renderer accumulate it in its own
+        // scroll buffer (the state dump below only homes and erases the
+        // visible screen, `\x1b[H\x1b[J`, which preserves scrollback).
+        // Empty when there is no history, keeping the byte stream identical
+        // to snapshots without scrollback.
+        data.push_str(&scrollback_segment(screen));
         if screen.alternate_screen() {
             // Copy only on attachment: switching a cloned screen preserves the
             // primary buffer without mutating the live emulator/parser state.
@@ -52,6 +59,65 @@ impl ScreenState {
             rows,
         }
     }
+}
+
+/// Plain-text scrollback (oldest row first) for snapshot replay.
+/// Formatting is intentionally dropped: history stays readable without
+/// risking escape-sequence hazards in the replay stream.
+fn scrollback_segment(screen: &vt100::Screen) -> String {
+    if screen.alternate_screen() {
+        // Alternate grids carry no history; read the primary grid the same
+        // way the snapshot repaints it below.
+        let (rows, cols) = screen.size();
+        let mut primary = vt100::Parser::new(rows, cols, 0);
+        *primary.screen_mut() = screen.clone();
+        primary.process(b"\x1b[?1049l");
+        return scrollback_text(primary.screen());
+    }
+    scrollback_text(screen)
+}
+
+/// Page the view offset through the history buffer: vt100 exposes only
+/// visible rows, so the top visible row at each offset walks the scrollback
+/// from oldest (highest offset) to newest (offset 1).
+///
+/// The segment ends on a fresh row plus `rows - 1` blank scrolls, which push
+/// every replayed row off the visible screen and into the fresh renderer's
+/// scroll buffer *before* the state dump below erases the screen. Without
+/// that, short histories would sit on visible rows and be erased instead of
+/// retained. Wrapped rows rejoin (no newline), so long lines re-wrap at the
+/// renderer's width exactly as before.
+fn scrollback_text(screen: &vt100::Screen) -> String {
+    let (rows, cols) = screen.size();
+    let mut view = screen.clone();
+    view.set_scrollback(usize::MAX);
+    let total = view.scrollback();
+    if total == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut wrapping = false;
+    for offset in (1..=total).rev() {
+        view.set_scrollback(offset);
+        let row = view.rows(0, cols).next().unwrap_or_default();
+        if row.is_empty() && wrapping {
+            out.push('\n');
+        } else {
+            out.push_str(&row);
+        }
+        let wrapped = view.row_wrapped(0);
+        if !wrapped {
+            out.push_str("\r\n");
+        }
+        wrapping = wrapped;
+    }
+    if wrapping {
+        out.push_str("\r\n");
+    }
+    for _ in 1..rows {
+        out.push_str("\r\n");
+    }
+    out
 }
 
 #[derive(Default)]
@@ -128,35 +194,6 @@ impl ControlTail {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct TerminalQueries {
-    control: ControlTail,
-}
-
-impl TerminalQueries {
-    pub fn respond(&mut self, text: &str, screen: &vt100::Screen, mut reply: impl FnMut(&str)) {
-        for ch in text.chars() {
-            if self.control.push(ch) {
-                match self.control.pending.as_str() {
-                    "\x1b[6n" | "\x1b[?6n" => {
-                        let (row, col) = screen.cursor_position();
-                        let private = if self.control.pending == "\x1b[?6n" {
-                            "?"
-                        } else {
-                            ""
-                        };
-                        reply(&format!("\x1b[{private}{};{}R", row + 1, col + 1));
-                    }
-                    "\x1b[5n" => reply("\x1b[0n"),
-                    "\x1b[c" | "\x1b[0c" => reply("\x1b[?1;2c"),
-                    _ => {}
-                }
-                self.control.pending.clear();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,15 +227,92 @@ mod tests {
         );
         assert!(restored.screen().contents().contains("primary"));
     }
-    #[test]
-    fn query_responder_handles_split_and_repeated_queries_without_osc_false_positive() {
-        let parser = vt100::Parser::new(24, 80, 0);
-        let mut queries = TerminalQueries::default();
-        let mut replies = Vec::new();
-        for chunk in ["\x1b[", "6n\x1b[6n", "\x1b]title \x1b[6n\x07", "\x1b[5n"] {
-            queries.respond(chunk, parser.screen(), |s| replies.push(s.to_string()));
+    /// Rows currently retained in the history buffer (oldest first).
+    fn history_rows(screen: &vt100::Screen) -> Vec<String> {
+        let (_, cols) = screen.size();
+        let mut view = screen.clone();
+        view.set_scrollback(usize::MAX);
+        let total = view.scrollback();
+        let mut rows = Vec::with_capacity(total);
+        for offset in (1..=total).rev() {
+            view.set_scrollback(offset);
+            rows.push(view.rows(0, cols).next().unwrap_or_default());
         }
-        assert_eq!(replies, ["\x1b[1;1R", "\x1b[1;1R", "\x1b[0n"]);
+        rows
+    }
+
+    #[test]
+    fn snapshot_replays_scrollback_before_visible_screen() {
+        let mut state = ScreenState::new(10, 80);
+        let mut script = String::new();
+        for i in 1..=30 {
+            script.push_str(&format!("line-{i}\r\n"));
+        }
+        state.process(&script);
+        let live = state.parser.screen();
+        let live_history = history_rows(live);
+        assert!(live_history.len() > 10, "script must overflow the screen");
+        assert_eq!(live_history[0], "line-1");
+
+        let snap = state.snapshot();
+        // History precedes the state dump in stream order.
+        let dump_at = snap
+            .data
+            .find("\x1b[H\x1b[J")
+            .expect("state dump must home and erase");
+        let history = &snap.data["\x1bc".len()..dump_at];
+        for row in &live_history {
+            assert!(
+                history.contains(row.as_str()),
+                "history segment must carry {row:?}"
+            );
+        }
+
+        // A fresh renderer replays the history into its own scroll buffer
+        // before the visible screen is repainted over it.
+        let mut restored = vt100::Parser::new(10, 80, 500);
+        restored.process(snap.data.as_bytes());
+        assert_eq!(
+            restored.screen().contents(),
+            live.contents(),
+            "visible screen must repaint exactly"
+        );
+        // The trailing blank scrolls push every history row off the
+        // visible screen before the repaint, so the round trip is exact.
+        assert_eq!(history_rows(restored.screen()), live_history);
+    }
+
+    #[test]
+    fn snapshot_preserves_primary_scrollback_behind_alternate_screen() {
+        let mut state = ScreenState::new(10, 80);
+        let mut script = String::new();
+        for i in 1..=15 {
+            script.push_str(&format!("line-{i}\r\n"));
+        }
+        script.push_str("\x1b[?1049h_alt-view");
+        state.process(&script);
+        assert!(state.parser.screen().alternate_screen());
+
+        let snap = state.snapshot();
+        assert!(
+            snap.data.contains("line-1"),
+            "primary history must survive behind alt screen"
+        );
+        let mut restored = vt100::Parser::new(10, 80, 500);
+        restored.process(snap.data.as_bytes());
+        assert!(restored.screen().alternate_screen());
+        assert!(restored.screen().contents().contains("alt-view"));
+        restored.process(b"\x1b[?1049l");
+        state.process("\x1b[?1049l");
+        assert_eq!(
+            restored.screen().contents(),
+            state.parser.screen().contents(),
+            "primary screen must match after leaving alt"
+        );
+        assert!(
+            history_rows(restored.screen()).contains(&"line-1".to_string()),
+            "primary history must survive the round trip"
+        );
     }
 }
 

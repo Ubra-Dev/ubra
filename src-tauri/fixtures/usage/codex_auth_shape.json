@@ -1,0 +1,11 @@
+{
+  "OPENAI_API_KEY": null,
+  "auth_mode": "<redacted>",
+  "last_refresh": "<redacted>",
+  "tokens": {
+    "access_token": "<redacted>",
+    "account_id": "<redacted>",
+    "id_token": "<redacted>",
+    "refresh_token": "<redacted>"
+  }
+}

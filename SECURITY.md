@@ -9,8 +9,9 @@
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Instead, open a
-[private security advisory](https://github.com/stackwares/ubra-tauri/security/advisories/new)
-or email `nemoryoliver@gmail.com`.
+[private security advisory](https://github.com/Ubra-Dev/ubra/security/advisories/new),
+email `security@getubra.com`, or reach us via
+[getubra.com/contact](https://getubra.com/contact).
 
 Include: what you did, what you expected, what happened, and the OS / app
 version details if available. Expect an initial response within 7 days.

@@ -1,18 +1,21 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  branchTooltip,
+  crumbDotClass,
   deliveryLabel,
+  downloadPercent,
   fleetSummary,
-  layoutTotalsLabel,
-  platformLabel,
+  friendlyUpdateError,
+  notifyTooltip,
   saveState,
+  sidebarUpdateState,
   soundLabel,
+  updateSegment,
+  USAGE_WARN_THRESHOLD,
+  usageWarning,
 } from "../src/lib/statusBar.ts";
-import {
-  defaultLayout,
-  defaultWorkspace,
-  gridTab,
-} from "../src/lib/layout.ts";
+import type { CliUsage } from "../src/lib/usage.ts";
 
 describe("fleetSummary", () => {
   it("returns null when there is nothing to report", () => {
@@ -42,34 +45,332 @@ describe("saveState", () => {
   });
 });
 
-describe("layoutTotalsLabel", () => {
-  it("returns an empty label without a layout", () => {
-    assert.equal(layoutTotalsLabel(null), "");
+describe("updateSegment", () => {
+  const base = {
+    version: null as string | null,
+    downloadedBytes: 0,
+    totalBytes: null as number | null,
+    error: null as string | null,
+  };
+
+  it("offers a manual check until the first check completes", () => {
+    assert.deepEqual(updateSegment({ ...base, phase: "idle", checked: false }), {
+      text: "Check for updates",
+      title: "Never checked — click to check for updates",
+      action: "check",
+    });
+    assert.equal(updateSegment({ ...base, phase: "idle", checked: true }), null);
   });
 
-  it("uses singular nouns for a fresh layout", () => {
-    assert.equal(layoutTotalsLabel(defaultLayout()), "1 workspace · 1 tab · 1 pane");
+  it("reports checking without an action", () => {
+    assert.deepEqual(updateSegment({ ...base, phase: "checking", checked: false }), {
+      text: "Checking for updates…",
+      title: "Checking for updates…",
+      action: null,
+    });
   });
 
-  it("counts tabs and panes across workspaces", () => {
-    const layout = defaultLayout();
-    const extra = defaultWorkspace("extra");
-    extra.tabs = [gridTab(), gridTab("second")];
-    layout.workspaces.push(extra);
-    assert.equal(layoutTotalsLabel(layout), "2 workspaces · 3 tabs · 9 panes");
+  it("names the version when one is available", () => {
+    assert.deepEqual(
+      updateSegment({ ...base, phase: "available", checked: true, version: "0.2.0" }),
+      {
+        text: "Update to 0.2.0",
+        title: "Version 0.2.0 available — click to download and install",
+        action: "download",
+      },
+    );
+    assert.deepEqual(updateSegment({ ...base, phase: "available", checked: true }), {
+      text: "Update available",
+      title: "Version unknown available — click to download and install",
+      action: "download",
+    });
+  });
+
+  it("shows download progress capped below 100%", () => {
+    assert.deepEqual(
+      updateSegment({
+        ...base,
+        phase: "downloading",
+        checked: true,
+        downloadedBytes: 512,
+        totalBytes: 1024,
+      }),
+      {
+        text: "Downloading update 50%",
+        title: "Downloading update…",
+        action: null,
+      },
+    );
+    assert.deepEqual(
+      updateSegment({
+        ...base,
+        phase: "downloading",
+        checked: true,
+        downloadedBytes: 2048,
+        totalBytes: 1024,
+      }),
+      {
+        text: "Downloading update 99%",
+        title: "Downloading update…",
+        action: null,
+      },
+    );
+    assert.deepEqual(updateSegment({ ...base, phase: "downloading", checked: true }), {
+      text: "Downloading update…",
+      title: "Downloading update…",
+      action: null,
+    });
+  });
+
+  it("asks for a restart when ready", () => {
+    assert.deepEqual(
+      updateSegment({ ...base, phase: "ready", checked: true, version: "0.2.0" }),
+      {
+        text: "Restart to update",
+        title: "Update installed — click to restart",
+        action: "relaunch",
+      },
+    );
+  });
+
+  it("offers a retry with the error in the tooltip", () => {
+    assert.deepEqual(
+      updateSegment({ ...base, phase: "error", checked: true, error: "net down" }),
+      {
+        text: "Update failed",
+        title: "net down — click to retry",
+        action: "check",
+      },
+    );
   });
 });
 
-describe("platformLabel", () => {
-  it("maps navigator.platform values to display names", () => {
-    assert.equal(platformLabel("MacIntel"), "macOS");
-    assert.equal(platformLabel("Win32"), "Windows");
-    assert.equal(platformLabel("Linux x86_64"), "Linux");
+describe("downloadPercent", () => {
+  it("returns null without a usable total", () => {
+    assert.equal(downloadPercent(0, null), null);
+    assert.equal(downloadPercent(100, 0), null);
+    assert.equal(downloadPercent(100, -5), null);
   });
 
-  it("returns null when the platform is unrecognized", () => {
-    assert.equal(platformLabel(""), null);
-    assert.equal(platformLabel("FreeBSD x64"), null);
+  it("caps below 100% until installed", () => {
+    assert.equal(downloadPercent(512, 1024), 50);
+    assert.equal(downloadPercent(1024, 1024), 99);
+    assert.equal(downloadPercent(2048, 1024), 99);
+  });
+});
+
+describe("friendlyUpdateError", () => {
+  it("maps reachability failures to plain language", () => {
+    assert.equal(
+      friendlyUpdateError("http 404 not found"),
+      "Couldn't reach the update server (not found).",
+    );
+    assert.equal(
+      friendlyUpdateError("fetch failed: connection refused"),
+      "Couldn't reach the update server. Check your connection and retry.",
+    );
+  });
+
+  it("maps verification failures without leaking jargon", () => {
+    assert.equal(
+      friendlyUpdateError("signature verification failed"),
+      "The update couldn't be verified and was blocked for safety.",
+    );
+  });
+
+  it("falls back to the raw message or a generic line", () => {
+    assert.equal(friendlyUpdateError("teapot"), "teapot");
+    assert.equal(friendlyUpdateError(""), "Couldn't check for updates.");
+    assert.equal(friendlyUpdateError(null), "Couldn't check for updates.");
+  });
+});
+
+describe("sidebarUpdateState", () => {
+  const base = {
+    version: null as string | null,
+    downloadedBytes: 0,
+    totalBytes: null as number | null,
+    error: null as string | null,
+  };
+
+  it("stays hidden when idle", () => {
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: false }), {
+      icon: "download",
+      label: "Check for updates",
+      visible: false,
+      busy: false,
+      progress: null,
+    });
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "idle", checked: true }), {
+      icon: "download",
+      label: "You're up to date — open Updates",
+      visible: false,
+      busy: false,
+      progress: null,
+    });
+  });
+
+  it("stays hidden while checking", () => {
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "checking", checked: false }), {
+      icon: "download",
+      label: "Checking for updates…",
+      visible: false,
+      busy: true,
+      progress: null,
+    });
+  });
+
+  it("appears when an update is available or ready", () => {
+    assert.deepEqual(
+      sidebarUpdateState({ ...base, phase: "available", checked: true, version: "0.2.0" }),
+      {
+        icon: "download",
+        label: "Ubra 0.2.0 available — open Updates to install",
+        visible: true,
+        busy: false,
+        progress: null,
+      },
+    );
+    assert.deepEqual(sidebarUpdateState({ ...base, phase: "ready", checked: true }), {
+      icon: "refresh",
+      label: "Update installed — open Updates to restart",
+      visible: true,
+      busy: false,
+      progress: null,
+    });
+  });
+
+  it("appears with download progress", () => {
+    assert.deepEqual(
+      sidebarUpdateState({
+        ...base,
+        phase: "downloading",
+        checked: true,
+        downloadedBytes: 512,
+        totalBytes: 1024,
+      }),
+      {
+        icon: "download",
+        label: "Downloading update 50% — open Updates for details",
+        visible: true,
+        busy: true,
+        progress: 50,
+      },
+    );
+  });
+
+  it("stays hidden on failure; Settings and the status bar carry the retry", () => {
+    assert.deepEqual(
+      sidebarUpdateState({ ...base, phase: "error", checked: true, error: "net down" }),
+      {
+        icon: "alert",
+        label: "net down — open Updates to retry",
+        visible: false,
+        busy: false,
+        progress: null,
+      },
+    );
+  });
+});
+
+describe("usageWarning", () => {
+  function entry(cli: string, percents: (number | undefined)[], resetsAt = 7_200): CliUsage {
+    return {
+      cli,
+      status: "ready",
+      snapshot: {
+        cli,
+        source: "test",
+        windows: percents.map((percentUsed, i) => ({
+          label: `window ${i}`,
+          percentUsed,
+          resetsAt: resetsAt + i,
+        })),
+        fetchedAt: 0,
+      },
+    };
+  }
+
+  it("stays hidden below the threshold", () => {
+    assert.equal(USAGE_WARN_THRESHOLD, 80);
+    assert.equal(usageWarning({}, {}, 3_600), null);
+    assert.equal(
+      usageWarning({ codex: entry("codex", [79]) }, { codex: "Codex" }, 3_600),
+      null,
+    );
+  });
+
+  it("ignores entries that are not ready usage", () => {
+    const offline: CliUsage = { cli: "codex", status: "offline" };
+    const noPercent = entry("codex", [undefined]);
+    assert.equal(usageWarning({ codex: offline }, {}, 3_600), null);
+    assert.equal(usageWarning({ codex: noPercent }, {}, 3_600), null);
+  });
+
+  it("warns on the worst window with a reset countdown", () => {
+    const warning = usageWarning(
+      { codex: entry("codex", [42, 82]) },
+      { codex: "Codex" },
+      3_600,
+    );
+    assert.deepEqual(warning, {
+      text: "Codex 82%",
+      title: "Codex 82% (resets in 1h 0m) — open Usage",
+    });
+  });
+
+  it("ranks clis worst-first and falls back to the cli stem", () => {
+    const warning = usageWarning(
+      {
+        codex: entry("codex", [81]),
+        claude: entry("claude", [95]),
+      },
+      { codex: "Codex" },
+      3_600,
+    );
+    assert.deepEqual(warning, {
+      text: "claude 95% +1",
+      title: "claude 95% (resets in 1h 0m) · Codex 81% (resets in 1h 0m) — open Usage",
+    });
+  });
+});
+
+describe("crumbDotClass", () => {
+  it("maps live rollups to dot classes", () => {
+    assert.equal(crumbDotClass("working", true), "working");
+    assert.equal(crumbDotClass("blocked", true), "blocked");
+    assert.equal(crumbDotClass("attention", true), "attention");
+  });
+
+  it("hides the dot without an agent or a quiet rollup", () => {
+    assert.equal(crumbDotClass("working", false), null);
+    assert.equal(crumbDotClass("idle", true), null);
+    assert.equal(crumbDotClass("done", true), null);
+    assert.equal(crumbDotClass("unknown", true), null);
+  });
+});
+
+describe("branchTooltip", () => {
+  it("counts changes with singular grammar", () => {
+    assert.equal(
+      branchTooltip({ branch: "main", changes: 0 }),
+      "main · clean — open Source Control",
+    );
+    assert.equal(
+      branchTooltip({ branch: "main", changes: 1 }),
+      "main · 1 change — open Source Control",
+    );
+    assert.equal(
+      branchTooltip({ branch: "feat/x", changes: 3 }),
+      "feat/x · 3 changes — open Source Control",
+    );
+  });
+
+  it("reports unknown status", () => {
+    assert.equal(
+      branchTooltip({ branch: "main", changes: null }),
+      "main · status unknown — open Source Control",
+    );
   });
 });
 
@@ -85,5 +386,29 @@ describe("soundLabel", () => {
   it("labels the sound switch", () => {
     assert.equal(soundLabel(true), "On");
     assert.equal(soundLabel(false), "Off");
+  });
+});
+
+describe("notifyTooltip", () => {
+  it("describes delivery and sound with the toggle hint", () => {
+    assert.equal(
+      notifyTooltip({ delivery: "system", soundEnabled: true, mutedCount: 0 }),
+      "Notifications: System · Sound On — click to toggle sound",
+    );
+    assert.equal(
+      notifyTooltip({ delivery: "inapp", soundEnabled: false, mutedCount: 0 }),
+      "Notifications: In-app · Sound Off — click to toggle sound",
+    );
+  });
+
+  it("counts muted agents with singular grammar", () => {
+    assert.equal(
+      notifyTooltip({ delivery: "system", soundEnabled: true, mutedCount: 1 }),
+      "Notifications: System · Sound On · 1 muted agent — click to toggle sound",
+    );
+    assert.equal(
+      notifyTooltip({ delivery: "system", soundEnabled: true, mutedCount: 2 }),
+      "Notifications: System · Sound On · 2 muted agents — click to toggle sound",
+    );
   });
 });

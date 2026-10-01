@@ -1,27 +1,35 @@
 pub mod agent_clis;
+pub mod agent_session;
 pub mod agent_status;
 pub mod agent_watch;
-pub mod cli;
-pub mod daemon;
+pub mod files;
+pub mod git;
 pub mod git_branch;
 pub mod layout_store;
+pub mod macos_notify;
 mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
 pub mod sound;
+pub mod telemetry;
 mod terminal_state;
+pub mod tray;
+pub mod usage;
+mod window_geometry;
 
-use agent_status::{AgentStatusService, AgentUpdate};
+use agent_status::AgentStatusService;
 use layout_store::{data_dir, load_layout_from, save_layout_to};
-use pty_manager::{PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySnapshot};
+use pty_manager::{
+    PaneId, PtyEventSink, PtyExit, PtyManager, PtyOutput, PtySessionInfo, PtySnapshot, SpawnOptions,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
+use tray::{build_tray, show_main, TrayState};
 
 struct TauriSink(AppHandle);
 
@@ -35,48 +43,123 @@ impl PtyEventSink for TauriSink {
     }
 }
 
+/// Where PTYs live: always in-process. Quitting stops every pane.
+struct PtyBackend {
+    manager: Arc<PtyManager>,
+    statuses: AgentStatusService,
+}
+
+impl PtyBackend {
+    fn spawn(
+        &self,
+        shell: Option<String>,
+        cwd: Option<String>,
+        args: Vec<String>,
+        cols: u16,
+        rows: u16,
+        key: Option<String>,
+    ) -> Result<PaneId, String> {
+        self.manager
+            .spawn(SpawnOptions {
+                shell,
+                cwd,
+                args,
+                cols,
+                rows,
+                key,
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    fn list(&self) -> Result<Vec<PtySessionInfo>, String> {
+        Ok(self.manager.list())
+    }
+
+    fn write(&self, id: PaneId, data: &str) -> Result<(), String> {
+        self.manager.write(id, data).map_err(|e| e.to_string())
+    }
+
+    fn resize(&self, id: PaneId, cols: u16, rows: u16) -> Result<(), String> {
+        self.manager
+            .resize(id, cols, rows)
+            .map_err(|e| e.to_string())
+    }
+
+    fn kill(&self, id: PaneId) -> Result<(), String> {
+        self.manager.kill(id).map_err(|e| e.to_string())
+    }
+
+    fn snapshot(&self, id: PaneId) -> Result<PtySnapshot, String> {
+        self.manager.snapshot(id).map_err(|e| e.to_string())
+    }
+
+    fn agent_states(&self) -> Result<serde_json::Value, String> {
+        let snapshot = self.statuses.snapshot();
+        Ok(serde_json::json!({
+            "revision": snapshot.revision,
+            "states": snapshot.states,
+        }))
+    }
+
+    /// Stop every pane. Runs on all exit paths.
+    fn shutdown(&self) {
+        if let Err(error) = self.manager.shutdown() {
+            eprintln!("ubra: PTY shutdown failed: {error}");
+        }
+    }
+}
+
 #[tauri::command]
 fn pty_spawn(
-    manager: State<'_, Arc<PtyManager>>,
+    backend: State<'_, PtyBackend>,
     shell: Option<String>,
     cwd: Option<String>,
     args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
+    key: Option<String>,
 ) -> Result<PaneId, String> {
-    manager
-        .spawn(shell, cwd, args.unwrap_or_default(), cols, rows)
-        .map_err(|e| e.to_string())
+    backend.spawn(shell, cwd, args.unwrap_or_default(), cols, rows, key)
 }
 
 #[tauri::command]
-fn pty_write(manager: State<'_, Arc<PtyManager>>, id: PaneId, data: String) -> Result<(), String> {
-    manager.write(id, &data).map_err(|e| e.to_string())
+fn pty_list(backend: State<'_, PtyBackend>) -> Result<Vec<PtySessionInfo>, String> {
+    backend.list()
+}
+
+#[tauri::command]
+fn pty_write(backend: State<'_, PtyBackend>, id: PaneId, data: String) -> Result<(), String> {
+    backend.write(id, &data)
 }
 
 #[tauri::command]
 fn pty_resize(
-    manager: State<'_, Arc<PtyManager>>,
+    backend: State<'_, PtyBackend>,
     id: PaneId,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    manager.resize(id, cols, rows).map_err(|e| e.to_string())
+    backend.resize(id, cols, rows)
 }
 
 #[tauri::command]
-fn pty_kill(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<(), String> {
-    manager.kill(id).map_err(|e| e.to_string())
+fn pty_kill(backend: State<'_, PtyBackend>, id: PaneId) -> Result<(), String> {
+    backend.kill(id)
 }
 
 #[tauri::command]
-fn pty_snapshot(manager: State<'_, Arc<PtyManager>>, id: PaneId) -> Result<PtySnapshot, String> {
-    manager.snapshot(id).map_err(|e| e.to_string())
+fn pty_snapshot(backend: State<'_, PtyBackend>, id: PaneId) -> Result<PtySnapshot, String> {
+    backend.snapshot(id)
 }
 
 #[tauri::command]
-fn agent_snapshot(service: State<'_, AgentStatusService>) -> AgentUpdate {
-    service.snapshot()
+fn agent_snapshot(backend: State<'_, PtyBackend>) -> Result<serde_json::Value, String> {
+    let snapshot = backend.agent_states()?;
+    Ok(serde_json::json!({
+        "revision": snapshot["revision"],
+        "states": snapshot["states"],
+        "transitions": [],
+    }))
 }
 
 #[tauri::command]
@@ -87,6 +170,25 @@ fn git_branch(path: String) -> Option<String> {
 #[tauri::command]
 fn detect_agent_clis() -> Vec<agent_clis::DetectedCli> {
     agent_clis::detect()
+}
+
+#[tauri::command]
+fn supported_agent_clis() -> Vec<agent_clis::SupportedCli> {
+    agent_clis::supported()
+}
+
+#[tauri::command]
+fn supported_usage_clis() -> Vec<usage::SupportedCli> {
+    usage::supported_clis()
+}
+
+#[tauri::command]
+async fn cli_usage(
+    cache: State<'_, usage::UsageCache>,
+    cli: String,
+    force: bool,
+) -> Result<usage::CliUsage, String> {
+    Ok(cache.usage(&cli, force).await)
 }
 
 #[tauri::command]
@@ -114,32 +216,73 @@ fn reset_layout(app: AppHandle, layout: serde_json::Value) -> Result<Option<Stri
 }
 
 #[tauri::command]
-fn load_saved_setups(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::load_saved_setups_from(&dir).map_err(|e| e.to_string())
+fn fs_list_dir(root: String, path: String) -> Result<files::DirListing, String> {
+    files::list_dir(&root, &path)
 }
 
 #[tauri::command]
-fn save_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<(), String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::save_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
+fn fs_read_file(root: String, path: String) -> Result<files::FileContent, String> {
+    files::read_file(&root, &path)
 }
 
 #[tauri::command]
-fn export_saved_setups(app: AppHandle) -> Result<String, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::backup_saved_setups_from(&dir).map_err(|e| e.to_string())
+fn git_status(root: String) -> Result<git::GitStatus, String> {
+    git::status(&root)
 }
 
 #[tauri::command]
-fn reset_saved_setups(app: AppHandle, setups: serde_json::Value) -> Result<Option<String>, String> {
-    let dir = data_dir(&app).map_err(|e| e.to_string())?;
-    layout_store::reset_saved_setups_to(&dir, &setups).map_err(|e| e.to_string())
+fn git_diff_file(root: String, path: String, staged: bool) -> Result<git::GitDiff, String> {
+    git::diff_file(&root, &path, staged)
 }
 
 #[tauri::command]
-fn quit_app(app: AppHandle, manager: State<'_, Arc<PtyManager>>) -> Result<(), String> {
-    manager.shutdown().map_err(|e| e.to_string())?;
+fn git_stage(root: String, paths: Vec<String>) -> Result<String, String> {
+    git::stage(&root, &paths)
+}
+
+#[tauri::command]
+fn git_unstage(root: String, paths: Vec<String>) -> Result<String, String> {
+    git::unstage(&root, &paths)
+}
+
+#[tauri::command]
+fn git_commit(root: String, message: String) -> Result<String, String> {
+    git::commit(&root, &message)
+}
+
+#[tauri::command]
+fn git_push(root: String) -> Result<String, String> {
+    git::push(&root)
+}
+
+#[tauri::command]
+fn git_pull(root: String) -> Result<String, String> {
+    git::pull(&root)
+}
+
+#[tauri::command]
+fn git_branches(root: String) -> Result<git::GitBranches, String> {
+    git::branches(&root)
+}
+
+#[tauri::command]
+fn git_worktrees(root: String) -> Result<Vec<git::GitWorktree>, String> {
+    git::worktrees(&root)
+}
+
+#[tauri::command]
+fn git_switch(root: String, branch: String) -> Result<String, String> {
+    git::switch(&root, &branch)
+}
+
+#[tauri::command]
+fn git_init(root: String) -> Result<String, String> {
+    git::init(&root)
+}
+
+/// Quit the GUI. PTYs run in-process, so quitting stops every pane.
+#[tauri::command]
+fn quit_app(app: AppHandle) -> Result<(), String> {
     app.state::<ShellState>()
         .quitting
         .store(true, Ordering::SeqCst);
@@ -177,35 +320,58 @@ fn app_info() -> AppInfo {
     }
 }
 
+/// User home directory for the empty-workspace starting point.
 #[tauri::command]
-fn notify_agent(
+fn home_dir() -> Result<String, String> {
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME");
+    home.map_err(|_| "Home directory is unavailable.".to_string())
+}
+
+#[tauri::command]
+async fn notify_agent(
     app: AppHandle,
     title: String,
     body: String,
     kind: Option<sound::SoundKind>,
-) -> Result<(), String> {
+) -> Result<macos_notify::NotifyOutcome, String> {
     if let Some(kind) = kind {
         eprintln!("ubra: agent notification ({kind:?}): {title}");
     }
+    #[cfg(target_os = "macos")]
+    if macos_notify::is_bundled() {
+        return Ok(macos_notify::notify(&title, &body).await);
+    }
+    // Legacy fire-and-forget path: macOS dev binaries (no bundle proxy for
+    // UN) and other desktop platforms. The plugin reports Ok once the payload
+    // is queued, so delivery is unconfirmed by construction.
     let result = app.notification().builder().title(title).body(body).show();
     if let Err(e) = &result {
         eprintln!("ubra: system notification failed: {e}");
+        return Ok(macos_notify::NotifyOutcome::unavailable(e.to_string()));
     }
-    result.map_err(|e| e.to_string())
+    Ok(macos_notify::NotifyOutcome::Attempted)
+}
+
+/// Query-only authorization state; never prompts. macOS dev binaries report
+/// `Unknown` (UN raises without a bundle), other platforms `Granted`.
+#[tauri::command]
+async fn notification_permission() -> macos_notify::NotifyPermission {
+    macos_notify::permission_state().await
+}
+
+/// Ask macOS for permission; shows the OS prompt only while undecided.
+/// Call only from the Settings Test button, never from an agent finish.
+#[tauri::command]
+async fn request_notification_permission() -> macos_notify::NotifyPermission {
+    macos_notify::request_permission().await
 }
 
 #[tauri::command]
-fn play_sound(
-    kind: sound::SoundKind,
-    style: Option<sound::ChimeStyle>,
-    file: Option<String>,
-) -> Result<(), String> {
-    sound::play(kind, style.unwrap_or_default(), file.as_deref()).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn check_sound_file(path: String) -> bool {
-    sound::file_decodes(&path)
+fn play_sound(kind: sound::SoundKind, file: Option<String>) -> Result<(), String> {
+    sound::play(kind, file.as_deref()).map_err(|e| e.to_string())
 }
 
 #[derive(Default)]
@@ -213,69 +379,6 @@ struct ShellState {
     quitting: AtomicBool,
     tray_available: AtomicBool,
     close_warning_pending: AtomicBool,
-}
-
-fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    #[cfg(debug_assertions)]
-    if std::env::var_os("UBRA_DISABLE_TRAY").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return Err(std::io::Error::other("tray disabled for development smoke").into());
-    }
-    let show = MenuItem::with_id(app, "show", "Show Ubra", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Ubra", true, None::<&str>)?;
-    let menu = Menu::new(app)?;
-    menu.append(&show)?;
-    menu.append(&quit)?;
-
-    let mut builder = TrayIconBuilder::new()
-        .menu(&menu)
-        .tooltip("Ubra")
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => show_main(app),
-            "quit" => {
-                app.state::<ShellState>()
-                    .quitting
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    match window.is_visible() {
-                        Ok(true) => {
-                            let _ = window.hide();
-                        }
-                        _ => show_main(app),
-                    }
-                }
-            }
-        });
-
-    match app.default_window_icon() {
-        Some(icon) => {
-            builder = builder.icon(icon.clone());
-        }
-        None => {
-            eprintln!("ubra: no default window icon available; tray icon will be blank");
-        }
-    }
-    builder.build(app)?;
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -291,11 +394,40 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Err(error) = window_geometry::keep_main_window_on_screen(&webview.window()) {
+                    eprintln!("ubra: could not normalize main window bounds: {error}");
+                }
+            }
+        })
         .setup(|app| {
+            let rules_dir = match data_dir(app.handle()) {
+                Ok(dir) => Some(dir.join("agent-detection")),
+                Err(e) => {
+                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
+                    None
+                }
+            };
             let manager = Arc::new(PtyManager::new(Arc::new(TauriSink(app.handle().clone()))));
-            app.manage(manager.clone());
+            let poll_app = app.handle().clone();
+            let statuses = AgentStatusService::start(&manager, rules_dir, move |update| {
+                let _ = poll_app.emit("agent-state-update", &update);
+            });
+            app.manage(PtyBackend { manager, statuses });
             app.manage(ShellState::default());
+            app.manage(TrayState::default());
+            app.manage(usage::UsageCache::new());
+            match data_dir(app.handle()) {
+                Ok(dir) => {
+                    telemetry::init_from_disk(&dir);
+                }
+                Err(e) => eprintln!("ubra: telemetry init skipped: {e}"),
+            }
             match build_tray(app.handle()) {
                 Ok(()) => app
                     .state::<ShellState>()
@@ -310,18 +442,6 @@ pub fn run() {
                         .show(|_| {});
                 }
             }
-            let poll_app = app.handle().clone();
-            let rules_dir = match data_dir(app.handle()) {
-                Ok(dir) => Some(dir.join("agent-detection")),
-                Err(e) => {
-                    eprintln!("ubra: data dir unavailable, bundled detection rules only: {e}");
-                    None
-                }
-            };
-            let service = AgentStatusService::start(&manager, rules_dir, move |update| {
-                let _ = poll_app.emit("agent-state-update", &update);
-            });
-            app.manage(service);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -343,7 +463,7 @@ pub fn run() {
                                 .builder()
                                 .title("Ubra keeps running")
                                 .body(
-                                    "Agents continue in the tray. Quit from the tray or Settings.",
+                                    "Agents continue in the tray. Quit from the tray or app menu.",
                                 )
                                 .show();
                             return;
@@ -361,9 +481,7 @@ pub fn run() {
                                     app.state::<ShellState>()
                                         .close_warning_pending
                                         .store(false, Ordering::SeqCst);
-                                    if let Err(error) =
-                                        quit_app(app.clone(), app.state::<Arc<PtyManager>>())
-                                    {
+                                    if let Err(error) = quit_app(app.clone()) {
                                         eprintln!("ubra: close failed: {error}");
                                         app.dialog()
                                             .message(error)
@@ -376,56 +494,175 @@ pub fn run() {
                         }
                     }
                 }
-                if let Err(error) = window.state::<Arc<PtyManager>>().shutdown() {
-                    api.prevent_close();
-                    eprintln!("ubra: close failed: {error}");
-                    let _ = window
-                        .notification()
-                        .builder()
-                        .title("Unable to close Ubra")
-                        .body(error.to_string())
-                        .show();
-                    return;
-                }
                 shell.quitting.store(true, Ordering::SeqCst);
                 window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
+            pty_list,
             pty_write,
             pty_resize,
             pty_kill,
             pty_snapshot,
             agent_snapshot,
             detect_agent_clis,
+            supported_agent_clis,
+            supported_usage_clis,
+            cli_usage,
             git_branch,
             load_layout,
             save_layout,
             export_layout,
             reset_layout,
-            load_saved_setups,
-            save_saved_setups,
-            export_saved_setups,
-            reset_saved_setups,
+            fs_list_dir,
+            fs_read_file,
+            git_status,
+            git_diff_file,
+            git_stage,
+            git_unstage,
+            git_commit,
+            git_push,
+            git_pull,
+            git_branches,
+            git_worktrees,
+            git_switch,
+            git_init,
             quit_app,
             autostart_enabled,
             autostart_set,
+            telemetry::telemetry_status,
+            telemetry::telemetry_set_consent,
+            telemetry::telemetry_set_distinct_id,
+            telemetry::telemetry_capture,
+            telemetry::telemetry_flag,
             notify_agent,
+            notification_permission,
+            request_notification_permission,
             play_sound,
-            check_sound_file,
-            app_info
+            tray::tray_update,
+            app_info,
+            home_dir
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                if let Err(error) = app.state::<Arc<PtyManager>>().shutdown() {
-                    eprintln!("ubra: shutdown failed: {error}");
-                }
+            if matches!(&event, tauri::RunEvent::Exit) {
+                // The backend owns its panes, so stop them on every exit path.
+                app.state::<PtyBackend>().shutdown();
+                telemetry::shutdown_flush();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    enum Event {
+        Output(PaneId, String),
+        Exit(PaneId, bool),
+    }
+
+    struct ChannelSink {
+        tx: std::sync::mpsc::Sender<Event>,
+    }
+
+    impl PtyEventSink for ChannelSink {
+        fn output(&self, id: PaneId, data: String, _sequence: u64) {
+            let _ = self.tx.send(Event::Output(id, data));
+        }
+
+        fn exited(&self, id: PaneId, success: bool, _code: Option<i32>) {
+            let _ = self.tx.send(Event::Exit(id, success));
+        }
+    }
+
+    fn local_backend(tx: std::sync::mpsc::Sender<Event>) -> PtyBackend {
+        let manager = Arc::new(PtyManager::new(Arc::new(ChannelSink { tx })));
+        let statuses = AgentStatusService::start(&manager, None, |_| {});
+        PtyBackend { manager, statuses }
+    }
+
+    fn echo_command() -> (Option<String>, Vec<String>) {
+        #[cfg(windows)]
+        return (
+            Some("cmd.exe".to_string()),
+            vec!["/C".to_string(), "echo hello-local".to_string()],
+        );
+        #[cfg(not(windows))]
+        return (
+            Some("sh".to_string()),
+            vec!["-c".to_string(), "echo hello-local".to_string()],
+        );
+    }
+
+    fn interactive_shell() -> Option<String> {
+        #[cfg(windows)]
+        return Some("cmd.exe".to_string());
+        #[cfg(not(windows))]
+        return Some("sh".to_string());
+    }
+
+    /// The backend drives real in-process PTYs: a quick echo pane runs
+    /// to exit, a live shell lists and kills cleanly, and agent states
+    /// keep their wire shape.
+    #[test]
+    fn backend_round_trip() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = local_backend(tx);
+
+        // Quick pane: output event, then a successful exit event.
+        let (shell, args) = echo_command();
+        let quick = backend
+            .spawn(shell, None, args, 80, 24, None)
+            .expect("local spawn");
+        assert_ne!(quick, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut transcript = String::new();
+        let mut handshake_answered = false;
+        let exited_success = loop {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(timeout) {
+                Ok(Event::Output(got, data)) => {
+                    assert_eq!(got, quick);
+                    transcript.push_str(&data);
+                    // ConPTY startup query (Windows only): answer it or the
+                    // pane withholds all further output. Silent no-op on Unix.
+                    if !handshake_answered && transcript.contains("\u{1b}[6n") {
+                        handshake_answered = true;
+                        let _ = backend.write(quick, "\u{1b}[1;1R");
+                    }
+                }
+                Ok(Event::Exit(got, success)) => {
+                    assert_eq!(got, quick);
+                    break success;
+                }
+                Err(_) => panic!("timed out waiting for pane exit; got: {transcript:?}"),
+            }
+        };
+        assert!(exited_success, "pane should exit 0");
+        assert!(
+            transcript.contains("hello-local"),
+            "transcript should contain echo output, got: {transcript:?}"
+        );
+
+        // Live pane: listed while alive, gone after kill.
+        let live = backend
+            .spawn(interactive_shell(), None, Vec::new(), 80, 24, None)
+            .expect("local spawn");
+        assert!(backend.list().unwrap().iter().any(|s| s.id == live));
+        backend
+            .snapshot(live)
+            .expect("live pane snapshots while alive");
+        backend.resize(live, 100, 30).expect("local resize");
+        backend.kill(live).expect("local kill");
+        assert!(backend.snapshot(live).is_err(), "killed pane must be gone");
+
+        let states = backend.agent_states().unwrap();
+        assert!(states["revision"].as_u64().is_some());
+        assert!(states["states"].is_object());
+        backend.shutdown();
+    }
 }

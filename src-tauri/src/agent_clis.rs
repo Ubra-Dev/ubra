@@ -9,6 +9,7 @@ use crate::agent_watch::AGENT_TABLE;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::mpsc;
@@ -22,6 +23,26 @@ pub struct DetectedCli {
     pub cli: String,
     pub label: String,
     pub path: String,
+}
+
+/// A known agent CLI: install guidance for the fleet screen when detection
+/// finds nothing installed. Names only — install one-liners stay out until
+/// each is verified against its vendor docs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SupportedCli {
+    pub cli: String,
+    pub label: String,
+}
+
+/// Every agent CLI Ubra knows, in [`AGENT_TABLE`] order.
+pub fn supported() -> Vec<SupportedCli> {
+    AGENT_TABLE
+        .iter()
+        .map(|(stem, label)| SupportedCli {
+            cli: (*stem).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
 }
 
 /// How long to wait for the login shell before falling back to PATH-only.
@@ -122,7 +143,9 @@ fn scan_path(
 }
 
 fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
+    // metadata() follows symlinks: version-manager shims and `sh` itself
+    // are links, and rejecting them blinds detection on Ubuntu and friends.
+    let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
     if !meta.is_file() {
@@ -223,6 +246,20 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    #[test]
+    fn supported_lists_every_known_cli_in_table_order() {
+        let supported = supported();
+        assert_eq!(supported.len(), AGENT_TABLE.len());
+        assert!(supported.len() > 2);
+        for (entry, (stem, label)) in supported.iter().zip(AGENT_TABLE.iter()) {
+            assert_eq!(entry.cli, *stem);
+            assert_eq!(entry.label, *label);
+        }
+        assert!(supported
+            .iter()
+            .any(|entry| entry.cli == "claude" && entry.label == "Claude Code"));
+    }
+
     fn temp_bin(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ubra-agent-clis-{name}-{}-{}",
@@ -313,6 +350,18 @@ mod tests {
         let found = parse_probe_output(stdout.as_bytes(), &["codex", "nope", "claude"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found.get("codex"), Some(&target));
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_follows_symlinks_to_executables() {
+        let bin = temp_bin("link");
+        let target = write_bin(&bin, "real", true);
+        let link = bin.join("codex");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let found = scan_path(&["codex"], &join_path(std::slice::from_ref(&bin)), &[]);
+        assert_eq!(found.get("codex"), Some(&link));
         let _ = std::fs::remove_dir_all(&bin);
     }
 

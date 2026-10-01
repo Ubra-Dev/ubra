@@ -11,3 +11,9 @@ vite.config.ts.timestamp-*
 
 # Local toolchain (rustup/cargo/npm-cache used by this workspace)
 .tooling/
+
+# Personal scratch / planning notes
+tasks/
+
+# Local git worktrees (kept inside the workspace root)
+/.worktrees/

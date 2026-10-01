@@ -4,7 +4,7 @@
 //! thread per pane that forwards output through a [`PtyEventSink`]. The sink
 //! abstraction keeps the manager testable without a Tauri runtime.
 
-use crate::terminal_state::{ScreenState, TerminalQueries};
+use crate::terminal_state::ScreenState;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
@@ -35,13 +35,21 @@ pub struct PtyExit {
     pub code: Option<i32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtySnapshot {
     pub data: String,
     pub sequence: u64,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// Live session identity for frontend reattach and orphan sweeps.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PtySessionInfo {
+    pub id: PaneId,
+    pub key: Option<String>,
 }
 /// Receives pane events. Implemented by the Tauri event bridge in production
 /// and by an in-memory channel in tests.
@@ -62,8 +70,38 @@ pub fn validate_dimensions(cols: u16, rows: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Session keys are stable pane identities for reattach, so the charset
+/// is restricted to filename-safe characters. GUI pane ids (`pane-<uuid>`)
+/// comply.
+pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !key.is_empty()
+            && key.len() <= 128
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
+        "session key must be 1..=128 ASCII letters, digits, '-' or '_'"
+    );
+    Ok(())
+}
+
+/// Parameters for [`PtyManager::spawn`]. `cols`/`rows` are required and
+/// validated; everything else defaults to an unkeyed attached shell pane.
+#[derive(Debug, Default)]
+pub struct SpawnOptions {
+    pub shell: Option<String>,
+    pub cwd: Option<String>,
+    pub args: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub key: Option<String>,
+}
+
 struct Session {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// `None` once the pane is reaped: on Windows the exit reaper takes the
+    /// master so dropping it runs ClosePseudoConsole, which releases the
+    /// reader blocked in a pipe read that ConPTY never EOFs.
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PID of the process spawned directly in the PTY (0 when unknown).
@@ -73,9 +111,16 @@ struct Session {
     screen: Mutex<ScreenState>,
     size: Mutex<(u16, u16)>,
     deliberate_close: AtomicBool,
+    /// Exit bookkeeping (registry removal, exit event) runs exactly once:
+    /// on Windows the reader and the exit reaper race, and whoever claims
+    /// this first finishes while the other stands down.
+    exit_done: AtomicBool,
     owner: crate::process_tree::ProcessOwner,
-    headless: bool,
     screen_revision: AtomicU64,
+    /// Stable frontend pane identity (`pane-<uuid>`). Survives frontend-only
+    /// restarts so a remount can reattach instead of spawning a replacement.
+    /// `None` for unkeyed sessions, which address sessions by numeric id.
+    key: Option<String>,
 }
 
 /// Lifecycle evidence consumed once by the status worker, never by queries.
@@ -94,26 +139,15 @@ pub struct PtyManager {
     activity: mpsc::SyncSender<()>,
     activity_rx: Mutex<Option<mpsc::Receiver<()>>>,
     exits: Arc<Mutex<VecDeque<AgentExit>>>,
-    headless: bool,
     lifecycle: Mutex<()>,
     closing: AtomicBool,
 }
 
 impl PtyManager {
     pub fn new(sink: Arc<dyn PtyEventSink>) -> Self {
-        Self::with_headless(sink, false)
-    }
-
-    /// A headless pane has one query responder, never competing with xterm.
-    pub fn new_headless(sink: Arc<dyn PtyEventSink>) -> Self {
-        Self::with_headless(sink, true)
-    }
-
-    fn with_headless(sink: Arc<dyn PtyEventSink>, headless: bool) -> Self {
         let (activity, activity_rx) = mpsc::sync_channel(1);
         Self {
             sink,
-            headless,
             lifecycle: Mutex::new(()),
             closing: AtomicBool::new(false),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -137,15 +171,28 @@ impl PtyManager {
     }
 
     /// Spawn a pane running `shell` (or the platform default) with `args`.
-    pub fn spawn(
-        &self,
-        shell: Option<String>,
-        cwd: Option<String>,
-        args: Vec<String>,
-        cols: u16,
-        rows: u16,
-    ) -> anyhow::Result<PaneId> {
+    ///
+    /// `key` is the caller's stable identity for later reattach (the GUI
+    /// passes its pane node id). Keys are advisory, never exclusive: a
+    /// duplicate key spawns a second session rather than killing the first,
+    /// since killing on collision could destroy a live agent during a
+    /// double-mount race. Reattach picks the lowest id for a key.
+    ///
+    /// Device queries are left to the attached renderer (xterm.js answers
+    /// them); the backend never responds.
+    pub fn spawn(&self, options: SpawnOptions) -> anyhow::Result<PaneId> {
+        let SpawnOptions {
+            shell,
+            cwd,
+            args,
+            cols,
+            rows,
+            key,
+        } = options;
         validate_dimensions(cols, rows)?;
+        if let Some(key) = &key {
+            validate_session_key(key)?;
+        }
         if let Some(cwd) = &cwd {
             match std::fs::metadata(cwd) {
                 Ok(metadata) => {
@@ -176,6 +223,9 @@ impl PtyManager {
             cmd.arg(arg);
         }
         cmd.cwd(cwd.or_else(default_cwd).unwrap_or_else(|| ".".to_string()));
+        // Fixed color-capable identity for the xterm.js renderer; see
+        // `apply_terminal_env` for why this never inherits the parent env.
+        apply_terminal_env(&mut cmd);
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let root_pid = child.process_id().unwrap_or(0);
@@ -198,16 +248,17 @@ impl PtyManager {
             }
         };
         let session = Arc::new(Session {
-            master: Mutex::new(pair.master),
+            master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             root_pid,
             owner,
-            headless: self.headless,
             screen: Mutex::new(ScreenState::new(rows, cols)),
             size: Mutex::new((cols, rows)),
             deliberate_close: AtomicBool::new(false),
+            exit_done: AtomicBool::new(false),
             screen_revision: AtomicU64::new(0),
+            key,
         });
         self.sessions.lock().insert(id, Arc::clone(&session));
 
@@ -239,6 +290,38 @@ impl PtyManager {
             return Err(e.into());
         }
 
+        // Windows exit detection cannot rely on pipe EOF (see reaper_loop),
+        // so each pane also gets a reaper polling the child handle. Unix
+        // keeps the reader-only path: EOF there already reports every exit.
+        #[cfg(windows)]
+        {
+            let reaper_session = Arc::clone(&session);
+            let reaper_sessions = Arc::clone(&self.sessions);
+            let reaper_sink = Arc::clone(&self.sink);
+            let reaper_activity = self.activity.clone();
+            let reaper_exits = self.exits.clone();
+            if let Err(e) = thread::Builder::new()
+                .name(format!("ubra-pty-reaper-{id}"))
+                .spawn(move || {
+                    reaper_loop(
+                        id,
+                        &reaper_session,
+                        &reaper_sessions,
+                        &reaper_sink,
+                        &reaper_activity,
+                        &reaper_exits,
+                    )
+                })
+            {
+                self.sessions.lock().remove(&id);
+                let _ = session.owner.terminate();
+                let mut child = session.child.lock();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        }
+
         self.wake_status();
         Ok(id)
     }
@@ -266,12 +349,17 @@ impl PtyManager {
         if *size == (cols, rows) {
             return Ok(());
         }
-        session.master.lock().resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        session
+            .master
+            .lock()
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("pane exited"))?
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })?;
         session
             .screen
             .lock()
@@ -308,6 +396,24 @@ impl PtyManager {
                 .screen_revision
                 .load(Ordering::Acquire),
         )
+    }
+
+    /// Snapshot of live sessions and their stable keys. The frontend uses
+    /// this after a restart to adopt its surviving sessions (reattach) and
+    /// to reap sessions whose keys are no longer in the layout (orphans).
+    /// Unkeyed sessions report `key: None` and are never adopted or swept.
+    pub fn list(&self) -> Vec<PtySessionInfo> {
+        let mut sessions: Vec<PtySessionInfo> = self
+            .sessions
+            .lock()
+            .iter()
+            .map(|(id, s)| PtySessionInfo {
+                id: *id,
+                key: s.key.clone(),
+            })
+            .collect();
+        sessions.sort_by_key(|s| s.id);
+        sessions
     }
 
     /// Snapshot of live panes and their root PIDs for the agent watcher.
@@ -398,16 +504,10 @@ fn publish_output(
     session: &Session,
     sink: &Arc<dyn PtyEventSink>,
     activity: &mpsc::SyncSender<()>,
-    queries: &mut TerminalQueries,
 ) {
     let sequence = {
         let mut state = session.screen.lock();
         state.process(&text);
-        if session.headless {
-            queries.respond(&text, state.parser.screen(), |reply| {
-                let _ = session.writer.lock().write_all(reply.as_bytes());
-            });
-        }
         state.sequence
     };
     session.screen_revision.fetch_add(1, Ordering::Release);
@@ -425,7 +525,6 @@ fn reader_loop(
     exits: &Mutex<VecDeque<AgentExit>>,
 ) {
     let mut decoder = Utf8Splitter::new();
-    let mut queries = TerminalQueries::default();
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -433,7 +532,7 @@ fn reader_loop(
             Ok(n) => {
                 let text = decoder.push(&buf[..n]);
                 if !text.is_empty() {
-                    publish_output(id, text, session, sink, activity, &mut queries);
+                    publish_output(id, text, session, sink, activity);
                 }
             }
             // The PTY reader performs a raw read without EINTR retry, so a
@@ -444,7 +543,7 @@ fn reader_loop(
     }
     let tail = decoder.flush();
     if !tail.is_empty() {
-        publish_output(id, tail, session, sink, activity, &mut queries);
+        publish_output(id, tail, session, sink, activity);
     }
 
     // Reap the exit status without blocking forever.
@@ -473,6 +572,14 @@ fn reader_loop(
         if status.is_none() {
             status = session.child.lock().try_wait().ok().flatten();
         }
+    }
+    // Whoever observes the exit first finishes it: on Windows the reaper
+    // below races this reader, so an already-claimed exit stands down here.
+    // (Unix has no reaper, so this always proceeds there.)
+    if session.exit_done.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if !session.deliberate_close.load(Ordering::SeqCst) {
         sessions.lock().remove(&id);
     }
     let (success, code) = match status {
@@ -492,6 +599,79 @@ fn reader_loop(
     }
     let _ = activity.try_send(());
     sink.exited(id, success, code);
+}
+
+/// Windows-only exit reaper: ConPTY does not reliably EOF the output pipe
+/// when the last client dies (fast `cmd /C` commands, job kills), which
+/// would leave the reader blocked forever with no exit event and no
+/// history save. Polling the child handle instead reports every exit;
+/// whoever observes it first (reader or reaper) finishes it exactly once
+/// via `exit_done`, and the reaper additionally drops the master so
+/// ClosePseudoConsole releases the reader's blocked pipe read.
+#[cfg(windows)]
+fn reaper_loop(
+    id: PaneId,
+    session: &Session,
+    sessions: &Mutex<HashMap<PaneId, Arc<Session>>>,
+    sink: &Arc<dyn PtyEventSink>,
+    activity: &mpsc::SyncSender<()>,
+    exits: &Mutex<VecDeque<AgentExit>>,
+) {
+    loop {
+        thread::sleep(Duration::from_millis(50));
+        if session.exit_done.load(Ordering::SeqCst) {
+            return; // Reader observed EOF first and finished.
+        }
+        // GetExitCodeProcess is cheap. A 259 (STILL_ACTIVE) exit code reads
+        // as alive and simply keeps polling, falling back to the reader.
+        let status = session.child.lock().try_wait().ok().flatten();
+        let Some(status) = status else { continue };
+        let deliberate = session.deliberate_close.load(Ordering::SeqCst);
+        // Mirror the reader: natural exits release the whole ownership set.
+        // Best-effort here, never fail-closed: the process is verifiably
+        // dead, so the exit event must fire even if this errors.
+        if !deliberate {
+            let _ = session.owner.terminate();
+        }
+        if session.exit_done.swap(true, Ordering::SeqCst) {
+            return; // Reader won the race.
+        }
+        if !deliberate {
+            sessions.lock().remove(&id);
+        }
+        let (success, code) = (status.success(), Some(status.exit_code() as i32));
+        if !deliberate {
+            record_exit(
+                exits,
+                AgentExit {
+                    id,
+                    root_pid: session.root_pid,
+                    success: code.map(|_| success),
+                    deliberate: false,
+                },
+            );
+        }
+        let _ = activity.try_send(());
+        sink.exited(id, success, code);
+        // Tear down ConPTY so the reader's pending read completes and its
+        // thread exits; without this the reader (and session) leaks.
+        let master = session.master.lock().take();
+        drop(master);
+        return;
+    }
+}
+
+/// Advertise a fixed color-capable terminal to pane processes.
+///
+/// The renderer is always xterm.js, so panes get `xterm-256color` plus
+/// truecolor rather than inheriting this process's launch-time environment:
+/// a stale environment would otherwise freeze values — notably a `NO_COLOR`
+/// exported only in the terminal the app happened to be launched from —
+/// into every future pane, silently disabling TUI colors.
+fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env_remove("NO_COLOR");
 }
 
 fn default_shell() -> String {
@@ -566,6 +746,26 @@ impl Utf8Splitter {
 #[cfg(test)]
 mod tests {
     use super::Utf8Splitter;
+    use portable_pty::CommandBuilder;
+
+    #[test]
+    fn pane_env_advertises_color_and_drops_stale_no_color() {
+        let mut cmd = CommandBuilder::new("sh");
+        // Simulate a spawner launched from a colorless terminal session.
+        cmd.env("TERM", "dumb");
+        cmd.env_remove("COLORTERM");
+        cmd.env("NO_COLOR", "1");
+        super::apply_terminal_env(&mut cmd);
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(cmd.get_env("NO_COLOR"), None);
+    }
 
     #[test]
     fn close_bursts_preserve_every_deliberate_exit_until_consumed() {

@@ -1,8 +1,13 @@
 <script lang="ts">
   import { agent } from "./agent.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
+  import { gitSummaryTitle, gitSyncLabel } from "./git";
   import Icon from "./Icon.svelte";
   import { isMacPlatform, modLabel } from "./shortcuts";
+  import Spinner from "./Spinner.svelte";
+  import { sidebarUpdateState } from "./statusBar";
+  import { updater } from "./updater.svelte";
+  import { frameCoalescer } from "./schedule";
   import {
     MAX_SIDEBAR_WIDTH,
     MIN_SIDEBAR_WIDTH,
@@ -60,8 +65,6 @@
         editing = ws.id;
         draft = ws.name;
       }
-    } else if (action === "save-template") {
-      store.openSavedSetups(m.id);
     } else if (action === "close") {
       store.requestCloseWorkspace(m.id);
     }
@@ -88,18 +91,24 @@
     e.preventDefault();
   }
 
+  // Drags coalesce to one layout update per frame and persist once on
+  // release, so pointermove bursts never queue layout + storage work.
+  const splitFrame = frameCoalescer();
+  const widthFrame = frameCoalescer();
+
   function moveSplitDrag(e: PointerEvent): void {
     if (!splitDrag) return;
-    store.setSidebarSplit(
-      effectiveSplitRatio(
-        ratioFromPointer(e.clientY, splitDrag.top, splitDrag.height),
-        splitDrag.height,
-      ),
+    const ratio = effectiveSplitRatio(
+      ratioFromPointer(e.clientY, splitDrag.top, splitDrag.height),
+      splitDrag.height,
     );
+    splitFrame.schedule(() => store.setSidebarSplitLive(ratio));
   }
 
   function endSplitDrag(): void {
     splitDrag = null;
+    splitFrame.flush();
+    store.saveSidebarSplit();
   }
 
   function onSplitKey(e: KeyboardEvent): void {
@@ -132,11 +141,14 @@
 
   function moveWidthDrag(e: PointerEvent): void {
     if (!widthDrag) return;
-    store.setSidebarWidth(widthDrag.startWidth + (e.clientX - widthDrag.startX));
+    const width = widthDrag.startWidth + (e.clientX - widthDrag.startX);
+    widthFrame.schedule(() => store.setSidebarWidthLive(width));
   }
 
   function endWidthDrag(): void {
     widthDrag = null;
+    widthFrame.flush();
+    store.saveSidebarWidth();
   }
 
   function onWidthKey(e: KeyboardEvent): void {
@@ -208,9 +220,46 @@
     }
   }
 
+  const updateState = $derived(
+    sidebarUpdateState({
+      phase: updater.phase,
+      checked: updater.checked,
+      version: updater.version,
+      downloadedBytes: updater.downloadedBytes,
+      totalBytes: updater.totalBytes,
+      error: updater.error,
+    }),
+  );
+
+  // One atomic status per phase for screen readers; progress percent stays
+  // in the button tooltip so downloads don't chatter on every chunk.
+  const updateAnnounce = $derived.by((): string => {
+    switch (updater.phase) {
+      case "available":
+        return updater.version
+          ? `Update available: Ubra ${updater.version}`
+          : "Update available";
+      case "downloading":
+        return "Downloading update";
+      case "ready":
+        return "Update installed. Restart to apply it.";
+      case "error":
+        return "Update failed. Open Updates to retry.";
+      case "checking":
+        return "Checking for updates";
+      default:
+        return "";
+    }
+  });
+
+  function openUpdates(): void {
+    store.settingsOpenSection = "app";
+    store.settingsOpen = true;
+  }
+
 </script>
 
-{#if store.layout}
+{#if store.layout && store.leftPanelOpen}
   <aside class="sidebar" style="width: {store.sidebarWidth}px">
     <div class="split" bind:this={splitEl} bind:clientHeight={splitHeight}>
       <section class="pane" aria-label="Workspaces" style:flex-grow={splitRatio}>
@@ -219,6 +268,8 @@
     {#each store.layout.workspaces as ws (ws.id)}
       {@const rollup = agent.workspaceRollup(ws)}
       {@const branch = workspaceGit.branchFor(ws.id)}
+      {@const git = workspaceGit.summaryFor(ws.id)}
+      {@const sync = git ? gitSyncLabel(git) : ""}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="ws"
@@ -268,6 +319,17 @@
               <span class="ws-branch">
                 <Icon name="git-branch" size={10} />
                 <span class="ws-branch-name">{branch}</span>
+                {#if git && (git.changed > 0 || sync)}
+                  <span class="ws-git-divider" aria-hidden="true">|</span>
+                  {#if git.changed > 0}
+                    <span class="ws-git-dirty" title={gitSummaryTitle(git)}>
+                      <span class="ws-git-dot" aria-hidden="true"></span>{git.changed}{git.truncated ? "+" : ""}
+                    </span>
+                  {/if}
+                  {#if sync}
+                    <span class="ws-git-sync" title={gitSummaryTitle(git)}>{sync}</span>
+                  {/if}
+                {/if}
               </span>
             {/if}
           </button>
@@ -336,7 +398,7 @@
       {#each agents as g (g.wsId)}
         <div class="agent-ws">{g.wsName}</div>
         {#each g.agents as a (a.nodeId)}
-          <div class="agent-item">
+          <div class="agent-item" class:active={store.focusedPaneId === a.nodeId}>
             <button
               class="agent-row"
               title={a.dirPath
@@ -356,7 +418,9 @@
               {/if}
               <span class="agent-name">{a.dir}</span>
               {#if a.cli}
-                <span class="agent-cli">{a.cli}</span>
+                <span class="agent-cli">
+                  {a.cli}
+                </span>
               {/if}
             </button>
             <button
@@ -378,22 +442,38 @@
       </section>
     </div>
     <div class="footer">
-      <button
-        class="settings-btn"
-        title={`Settings (${mod},)`}
-        onclick={() => (store.settingsOpen = true)}
-      >
-        <Icon name="settings" size={13} />
-        <span>Settings</span>
-      </button>
-      <button
-        class="settings-btn"
-        title="Saved Setups"
-        onclick={() => store.openSavedSetups()}
-      >
-        <Icon name="layers" size={13} />
-        <span>Saved Setups</span>
-      </button>
+      <div class="footer-row">
+        <button
+          class="settings-btn"
+          title={`Settings (${mod},)`}
+          onclick={() => (store.settingsOpen = true)}
+        >
+          <Icon name="settings" size={13} />
+          <span>Settings</span>
+        </button>
+        {#if updateState.visible}
+          <button
+            class="update-btn"
+            title={updateState.label}
+            aria-label={updateState.label}
+            onclick={openUpdates}
+          >
+            {#if updateState.busy}
+              <Spinner size={13} />
+            {:else}
+              <Icon name={updateState.icon} size={13} />
+            {/if}
+            {#if updateState.progress !== null}
+              <span class="update-progress" aria-hidden="true">
+                <span style="width: {updateState.progress}%"></span>
+              </span>
+            {/if}
+          </button>
+        {/if}
+      </div>
+      {#if updateAnnounce}
+        <span class="sr-only" role="status">{updateAnnounce}</span>
+      {/if}
     {#if menu}
       <ContextMenu
         x={menu.x}
@@ -401,7 +481,6 @@
         opener={menu.opener}
         items={[
           { id: "rename", label: "Rename", icon: "edit" },
-          { id: "save-template", label: "Save as template", icon: "layers" },
           { id: "close", label: "Close", danger: true, icon: "x" },
         ]}
         onPick={onPick}
@@ -598,6 +677,30 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .ws-git-divider {
+    flex: 0 0 auto;
+    color: var(--text-subtle);
+    opacity: 0.6;
+  }
+  .ws-git-dirty {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 3px;
+    color: var(--attention);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ws-git-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--attention);
+  }
+  .ws-git-sync {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
   .close {
     display: inline-flex;
     align-items: center;
@@ -711,6 +814,12 @@
     min-width: 0;
     border-radius: 6px;
   }
+  .agent-item.active {
+    background: var(--surface-active);
+  }
+  .agent-item.active .agent-name {
+    color: var(--text-strong);
+  }
   .agent-row {
     display: flex;
     align-items: center;
@@ -744,13 +853,17 @@
     text-overflow: ellipsis;
   }
   .agent-cli {
+    display: inline-flex;
     flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
     margin-left: auto;
-    max-width: 96px;
+    max-width: 112px;
     color: var(--text-subtle);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .footer {
     margin-top: auto;
@@ -759,11 +872,17 @@
     border-top: 1px solid var(--border);
     color: var(--text-muted);
   }
+  .footer-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
   .settings-btn {
     display: flex;
     align-items: center;
     gap: 7px;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
     box-sizing: border-box;
     background: transparent;
     border: none;
@@ -777,6 +896,59 @@
   .settings-btn:hover {
     color: var(--text-strong);
     background: var(--surface-bg);
+  }
+  /* Update shortcut: only rendered while an update is actionable.
+     Filled accent circle; the glyph uses the app background for contrast
+     in both dark and light themes. Opens Settings → App. */
+  .update-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    border: none;
+    border-radius: 50%;
+    color: var(--app-bg);
+    cursor: pointer;
+  }
+  .update-btn:hover {
+    background: var(--accent-hover);
+    color: var(--app-bg);
+  }
+  .update-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  /* The spinner arc follows the theme accent by default; on the filled
+     circle it must match the glyph instead. */
+  .update-btn :global(.spinner .arc) {
+    fill: var(--app-bg);
+  }
+  .update-progress {
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 4px;
+    height: 2px;
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  .update-progress > span {
+    display: block;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--app-bg);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .attention {
     display: flex;

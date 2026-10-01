@@ -3,6 +3,7 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
   import { WebLinksAddon } from "@xterm/addon-web-links";
+  import type { WebglAddon } from "@xterm/addon-webgl";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -18,7 +19,10 @@
   } from "./clipboard";
   import { findTabByPane } from "./layout";
   import { acquireSession, closeSession, dropSession, type SessionLease } from "./ptySessions";
-  import { TerminalAttachment, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
+  import { frameCoalescer, trailingDebouncer } from "./schedule";
+  import { terminalCommands } from "./terminalCommands";
+  import { disableGpuRenderer, enableGpuRenderer } from "./terminalGpu";
+  import { TerminalAttachment, type PtySessionInfo, type TerminalOutput, type TerminalExit, type TerminalSnapshot } from "./terminalLifecycle";
   import { store } from "./store.svelte";
   import { withAlpha, type AppTheme } from "./themes";
   import { toasts } from "./toasts.svelte.ts";
@@ -37,8 +41,15 @@
     findToken: number;
     /** Scrollback lines kept. */
     scrollback: number;
+    /** False forces the canvas renderer (Settings toggle). */
+    gpuEnabled: boolean;
     onExit?: () => void;
-    onSpawn?: (liveId: number) => void;
+    /**
+     * Fired once the live PTY id is known. `attached` means a surviving
+     * backend session was adopted (never rerun the agent); `firstDelivery`
+     * is true only for the first mount delivering this lease.
+     */
+    onSpawn?: (liveId: number, attached: boolean, firstDelivery: boolean) => void;
     onDispose?: (liveId: number) => void;
   }
   let {
@@ -50,6 +61,7 @@
     focusToken,
     findToken,
     scrollback,
+    gpuEnabled,
     onExit,
     onSpawn,
     onDispose,
@@ -58,6 +70,7 @@
   let container: HTMLDivElement | undefined = $state();
   let terminal: Terminal | null = null;
   let refit: (() => void) | null = null;
+  let setGpuEnabled: ((on: boolean) => void) | null = null;
   let searchAddon: SearchAddon | null = null;
   let finding = $state(false);
   let findText = $state("");
@@ -114,6 +127,13 @@
     if (terminal) terminal.options.scrollback = lines;
   });
 
+  $effect(() => {
+    const on = gpuEnabled;
+    // Null until onMount installs the handler; the mount path reads the
+    // initial prop directly, so a pre-mount run is safely skipped.
+    setGpuEnabled?.(on);
+  });
+
   onMount(() => {
     const term = new Terminal({
       cursorBlink: true,
@@ -139,10 +159,50 @@
 
     let paneId: number | null = null;
     let disposed = false;
+    // GPU renderer state: visible panes upgrade to WebGL while hidden ones
+    // stay on (or drop back to) canvas, so background tabs never hold GPU
+    // contexts. A failed attempt waits for the next hide/show cycle instead
+    // of logging once per frame during resize bursts.
+    let gpu: WebglAddon | null = null;
+    let gpuFailed = false;
+    let gpuWanted = gpuEnabled;
+    const ensureGpu = (): void => {
+      if (disposed || gpu !== null || gpuFailed || !gpuWanted) return;
+      gpu = enableGpuRenderer(term);
+      if (gpu !== null) console.debug(`ubra: GPU terminal renderer active (${sessionKey})`);
+      else gpuFailed = true;
+    };
+    const dropGpu = (): void => {
+      gpuFailed = false;
+      gpu = disableGpuRenderer(gpu);
+    };
+    setGpuEnabled = (on: boolean) => {
+      gpuWanted = on;
+      if (disposed) return;
+      if (!on) dropGpu();
+      else if (
+        container &&
+        container.clientWidth >= 10 &&
+        container.clientHeight >= 10
+      )
+        ensureGpu();
+      // Hidden panes upgrade on show via doFit.
+    };
     const unlistens: UnlistenFn[] = [];
     const attachment = new TerminalAttachment();
     let lease: SessionLease | null = null;
     let exited = false;
+    const unregisterCommands = terminalCommands.register(sessionKey, {
+      selection: () => term.getSelection(),
+      paste: (text) => {
+        if (!disposed && !exited && paneId !== null) { term.focus(); term.paste(text); }
+      },
+      selectAll: () => { if (!disposed) term.selectAll(); },
+      running: () => !disposed && !exited && paneId !== null,
+    });
+    const menuSelectionDispose = term.onSelectionChange(() => terminalCommands.changed());
+    // The document capture handler owns app shortcuts before xterm handles them.
+    term.attachCustomKeyEventHandler((event) => !event.defaultPrevented);
 
     const handleExit = (success: boolean, code: number | null) => {
       if (exited) return;
@@ -195,25 +255,49 @@
 
     // Hidden panes (inactive tabs/workspaces) have zero size: skip fitting
     // until visible. The ResizeObserver fires on show.
-    let lastResize: { id: number; cols: number; rows: number } | null = null;
-    const ensureFit = () => {
+    //
+    // Resize bursts (window/sidebar/pane drags) collapse in two stages: the
+    // canvas refits at most once per frame for smooth visuals, while the
+    // backend PTY resize fires once the burst goes quiet. Shells and CLIs
+    // then see one stable size instead of a resize storm.
+    const PTY_RESIZE_DEBOUNCE_MS = 120;
+    const fitFrame = frameCoalescer();
+    const ptyResize = trailingDebouncer(PTY_RESIZE_DEBOUNCE_MS);
+    let lastSent: { id: number; cols: number; rows: number } | null = null;
+    const sendPtyResize = (): void => {
+      if (disposed || paneId === null) return;
+      const cols = term.cols;
+      const rows = term.rows;
+      if (
+        lastSent?.id === paneId &&
+        lastSent.cols === cols &&
+        lastSent.rows === rows
+      )
+        return;
+      const size = { id: paneId, cols, rows };
+      lastSent = size;
+      invoke("pty_resize", size).catch((error) => {
+        if (lastSent === size) lastSent = null;
+        console.error(error);
+      });
+    };
+    const doFit = (): void => {
       if (
         disposed ||
         !container ||
         container.clientWidth < 10 ||
         container.clientHeight < 10
-      )
+      ) {
+        // Hidden: release the GPU context; re-acquired on show.
+        dropGpu();
         return;
-      fit.fit();
-      if (paneId !== null && (lastResize?.id !== paneId ||
-        lastResize.cols !== term.cols || lastResize.rows !== term.rows)) {
-        const size = { id: paneId, cols: term.cols, rows: term.rows };
-        lastResize = size;
-        invoke("pty_resize", size).catch((error) => {
-          if (lastResize === size) lastResize = null;
-          console.error(error);
-        });
       }
+      ensureGpu();
+      fit.fit();
+      ptyResize.schedule(sendPtyResize);
+    };
+    const ensureFit = (): void => {
+      fitFrame.schedule(doFit);
     };
     ensureFit();
     refit = ensureFit;
@@ -252,14 +336,37 @@
           invoke("pty_write", { id: paneId, data }).catch(console.error);
         }
       });
-      lease = acquireSession(sessionKey, () => {
+      lease = acquireSession(sessionKey, async () => {
         const argv = store.commandForSpawn(sessionKey);
+        // Adopt a surviving backend session with our stable key (e.g. after
+        // a webview reload with the backend alive) instead of spawning a
+        // blank replacement and orphaning the old process.
+        try {
+          const sessions = await invoke<PtySessionInfo[]>("pty_list");
+          const owned = sessions
+            .filter((s) => s.key === sessionKey)
+            .map((s) => s.id)
+            .sort((a, b) => a - b);
+          for (const candidate of owned) {
+            try {
+              await invoke("pty_snapshot", { id: candidate });
+              lease!.attached = true;
+              return candidate;
+            } catch {
+              // Exited between list and adopt; try the next duplicate.
+            }
+          }
+        } catch (error) {
+          console.error("ubra: session adopt failed, spawning", error);
+        }
+        lease!.attached = false;
         return invoke<number>("pty_spawn", {
           shell: argv?.[0] ?? null,
           cwd: cwd ?? null,
           args: argv?.slice(1) ?? null,
           cols: Math.max(term.cols, 2),
           rows: Math.max(term.rows, 1),
+          key: sessionKey,
         });
       }, (id) => invoke("pty_kill", { id }));
       const id = await lease.ready;
@@ -273,10 +380,16 @@
       }
       if (disposed || lease.cancelled) return;
       paneId = id;
-      onSpawn?.(id);
+      terminalCommands.changed();
+      const firstDelivery = !lease.restoreTaken;
+      lease.restoreTaken = true;
+      onSpawn?.(id, lease.attached, firstDelivery);
       if (snapshot) term.resize(snapshot.cols, snapshot.rows);
+      if (disposed || lease.cancelled) return;
       const restored = attachment.restore(id, snapshot);
-      for (const chunk of restored.chunks) term.write(chunk);
+      restored.chunks.forEach((chunk) => {
+        term.write(chunk);
+      });
       if (restored.exit) handleExit(restored.exit.success, restored.exit.code);
       else if (snapshotError) {
         // A session that exited while unmounted must show respawn, not silently
@@ -298,14 +411,23 @@
       disposed = true;
       terminal = null;
       refit = null;
+      setGpuEnabled = null;
       searchAddon = null;
+      dropGpu();
+      fitFrame.cancel();
+      ptyResize.cancel();
       if (copyTimer) clearTimeout(copyTimer);
       selectionDispose.dispose();
+      menuSelectionDispose.dispose();
+      unregisterCommands();
       host.removeEventListener("mouseup", onMouseUp);
       resizeObserver.disconnect();
       unlistens.forEach((u) => u());
+      // A null layout (boot/recovery/HMR windows) proves nothing: only a
+      // loaded layout missing the pane is a true close that may kill.
+      const layout = store.layout;
       const stillPlaced =
-        store.layout !== null && findTabByPane(store.layout, sessionKey) !== null;
+        layout === null || findTabByPane(layout, sessionKey) !== null;
       if (!stillPlaced) {
         if (paneId !== null) onDispose?.(paneId);
         closeSession(sessionKey);

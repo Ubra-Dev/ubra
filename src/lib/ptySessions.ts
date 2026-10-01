@@ -3,6 +3,10 @@ export interface SessionLease {
   readonly ready: Promise<number>;
   id: number | null;
   cancelled: boolean;
+  /** True when the lease adopted a surviving backend session (reattach). */
+  attached: boolean;
+  /** Consumed by the first mount that delivers this lease; gates restore. */
+  restoreTaken: boolean;
   kill: (id: number) => Promise<unknown>;
 }
 
@@ -18,6 +22,8 @@ export function acquireSession(
   const lease: SessionLease = {
     id: null,
     cancelled: false,
+    attached: false,
+    restoreTaken: false,
     kill,
     ready: Promise.resolve().then(spawn).then(async (id) => {
       lease.id = id;

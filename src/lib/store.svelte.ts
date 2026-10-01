@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { agentClis } from "./agentClis.svelte";
 import {
   activeTab,
   activeWorkspace,
@@ -15,13 +18,17 @@ import {
   findNeighbor,
   findPane,
   findTabByPane,
+  findWorkspaceByRoot,
   gridTab,
   moveWorkspace,
   preferredAgentCli as pickPreferredAgentCli,
   resizePaneInTab,
+  resolveWorkspaceRoot,
   sanitizeLayout,
   setZoomedPane,
   splitPaneInTab,
+  stampPaneAgentCli,
+  stampPaneAgentSession,
   swapPanesInTab,
   type Direction,
   type Layout,
@@ -29,14 +36,23 @@ import {
   type Tab,
   type Workspace,
 } from "./layout";
+import { implicitLaunchCommand } from "./agentLaunch";
+import { restoreCommandFor } from "./agentResume";
+import {
+  countLayoutPanes,
+  parseQuitAction,
+  QUIT_ACTION_KEY,
+  resolveQuitRequest,
+  type QuitAction,
+} from "./quitConfirm";
 import { PendingCommands } from "./pendingCommands";
-import { validateSetupInsertion } from "./savedSetups";
+import { type FleetLaunchPlan } from "./fleet";
+import type { PtySessionInfo } from "./terminalLifecycle";
+import { toasts } from "./toasts.svelte.ts";
 import { StartupCommands } from "./startupCommands";
 import {
-  DEFAULT_CHIME_STYLE,
   DEFAULT_DELIVERY,
   DEFAULT_TOAST_POSITION,
-  parseChimeStyle,
   parseDelivery,
   parseToastPosition,
   type NotifyDelivery,
@@ -56,6 +72,7 @@ import {
 } from "./uiFonts";
 import { DEFAULT_UI_SCALE, UI_SCALE_STEP, clampUiScale } from "./uiScale";
 import {
+  DEFAULT_RIGHT_PANEL_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
   DEFAULT_SPLIT_RATIO,
   clampSidebarWidth,
@@ -63,6 +80,7 @@ import {
 } from "./sidebarResize";
 
 export type CloseKind = "workspace" | "tab" | "pane";
+export type RightPanelView = "explorer" | "source-control";
 
 export interface PendingClose {
   kind: CloseKind;
@@ -74,6 +92,11 @@ export interface PendingClose {
   panes: number;
 }
 
+export interface PendingQuit {
+  panes: number;
+  agents: number;
+}
+
 export const DEFAULT_TERM_FONT_SIZE = 13;
 export const MIN_TERM_FONT_SIZE = 9;
 export const MAX_TERM_FONT_SIZE = 24;
@@ -82,16 +105,20 @@ export const SCROLLBACK_OPTIONS = [100, 1000, 5000, 10000];
 export const DEFAULT_TERM_OPACITY = 100;
 export const MIN_TERM_OPACITY = 10;
 export const MAX_TERM_OPACITY = 100;
+export const DEFAULT_TERM_GPU = true;
 
 class AppStore {
   layout = $state<Layout | null>(null);
   loaded = $state(false);
   firstRun = $state(false);
-  onboardingOpen = $state(false);
   loadError = $state<string | null>(null);
   saveError = $state<string | null>(null);
   /** True while a layout save is scheduled or in flight. */
   saving = $state(false);
+  rightPanelOpen = $state(true);
+  rightPanelView = $state<RightPanelView>("explorer");
+  rightPanelWidth = $state<number>(DEFAULT_RIGHT_PANEL_WIDTH);
+  leftPanelOpen = $state(true);
   recoveryRequired = $state(false);
   recoveryBusy = $state(false);
   recoveryError = $state<string | null>(null);
@@ -109,33 +136,43 @@ class AppStore {
   sidebarSplit = $state<number>(DEFAULT_SPLIT_RATIO);
   termScrollback = $state<number>(DEFAULT_TERM_SCROLLBACK);
   termOpacity = $state<number>(DEFAULT_TERM_OPACITY);
+  /** Prefer the GPU terminal renderer; canvas is the automatic fallback. */
+  termGpu = $state<boolean>(DEFAULT_TERM_GPU);
   notifyDelivery = $state<NotifyDelivery>(DEFAULT_DELIVERY);
   toastPosition = $state<ToastPosition>(DEFAULT_TOAST_POSITION);
   soundEnabled = $state<boolean>(true);
+  /** Global auto-launch for implicit agent starts; explicit picks bypass it. */
+  autoLaunchAgent = $state<boolean>(false);
+  /** Menu-bar agent count next to the tray icon (macOS/Linux; no-op on Windows). */
+  trayTitleEnabled = $state<boolean>(true);
+  /** Live agent list in the tray menu; when off the menu stays static. */
+  trayMenuListEnabled = $state<boolean>(true);
+  /** Silent background update check on boot + interval; installs stay manual. */
+  autoCheckUpdates = $state<boolean>(true);
   /** Lowercase agent clis muted for sounds (Herdr mutes droid by default). */
   mutedAgents = $state<string[]>(["droid"]);
-  /** Custom notification sound file (blank = synthesized default chime). */
-  soundFile = $state<string>("");
-  /** Selected chime: a built-in id or "custom" (uses soundFile). */
-  soundStyle = $state<string>(DEFAULT_CHIME_STYLE);
   settingsOpen = $state(false);
+  /** Section the Settings modal should open on; consumed on mount, then cleared. */
+  settingsOpenSection = $state<string | null>(null);
+  /** Revisit-mode onboarding opened from Settings (independent of firstRun). */
+  onboardingOpen = $state(false);
   /** Last-focused pane node id (session-only, for shortcuts). */
   focusedPaneId = $state<string | null>(null);
   /** Pane node id that should enter rename editing (F2); cleared on take. */
   paneRenameTarget = $state<string | null>(null);
   /** Close awaiting confirmation in the alert dialog; null when idle. */
   pendingClose = $state<PendingClose | null>(null);
+  /** Quit awaiting confirmation; null when idle. */
+  pendingQuit = $state<PendingQuit | null>(null);
+  /** Remembered Quit choice; `ask` shows the confirmation dialog. */
+  quitAction = $state<QuitAction>("ask");
   /** Pane node id whose terminal should take keyboard focus; cleared on take. */
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
-  savedSetupsRequest: { mode: "library" } | { mode: "capture"; workspaceId: string } | null =
-    $state(null);
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
-  /** Grid shape requested for the workspace the open onboarding will create. */
-  private pendingOnboardingGrid = false;
 
   get theme() {
     return THEMES[this.themeId];
@@ -178,6 +215,8 @@ class AppStore {
       if (savedOpacity !== null) {
         this.termOpacity = this.clampOpacity(Number(savedOpacity));
       }
+      const savedGpu = window.localStorage.getItem("ubra.termGpu");
+      if (savedGpu !== null) this.termGpu = savedGpu !== "false";
       const savedDelivery = window.localStorage.getItem("ubra.notifyDelivery");
       if (savedDelivery !== null) this.notifyDelivery = parseDelivery(savedDelivery);
       const savedPosition = window.localStorage.getItem("ubra.toastPosition");
@@ -197,12 +236,35 @@ class AppStore {
       } catch {
         // Keep the default mute list when the saved value is corrupt.
       }
-      const savedFile = window.localStorage.getItem("ubra.soundFile");
-      if (savedFile !== null) this.soundFile = savedFile;
-      const savedStyle = window.localStorage.getItem("ubra.soundStyle");
-      if (savedStyle !== null) this.soundStyle = parseChimeStyle(savedStyle);
+      // The chime is fixed; drop any selection persisted by older versions.
+      window.localStorage.removeItem("ubra.soundFile");
+      window.localStorage.removeItem("ubra.soundStyle");
+      const savedPanelOpen = window.localStorage.getItem("ubra.rightPanelOpen");
+      if (savedPanelOpen !== null) this.rightPanelOpen = savedPanelOpen !== "false";
+      const savedPanelWidth = window.localStorage.getItem("ubra.rightPanelWidth");
+      if (savedPanelWidth !== null) {
+        this.rightPanelWidth = clampSidebarWidth(
+          Number(savedPanelWidth),
+          DEFAULT_RIGHT_PANEL_WIDTH,
+        );
+      }
+      const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
+      if (savedLeftOpen !== null) this.leftPanelOpen = savedLeftOpen !== "false";
+      const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
+      if (savedPanelView === "explorer" || savedPanelView === "source-control") {
+        this.rightPanelView = savedPanelView;
+      }
       const savedAgentCli = window.localStorage.getItem("ubra.lastAgentCli");
       if (savedAgentCli?.trim()) this.lastUsedAgentCli = savedAgentCli.trim();
+      const savedAutoLaunch = window.localStorage.getItem("ubra.autoLaunchAgent");
+      if (savedAutoLaunch !== null) this.autoLaunchAgent = savedAutoLaunch === "true";
+      const savedTrayTitle = window.localStorage.getItem("ubra.trayTitle");
+      if (savedTrayTitle !== null) this.trayTitleEnabled = savedTrayTitle === "true";
+      const savedTrayMenuList = window.localStorage.getItem("ubra.trayMenuList");
+      if (savedTrayMenuList !== null) this.trayMenuListEnabled = savedTrayMenuList === "true";
+      const savedAutoCheck = window.localStorage.getItem("ubra.autoCheckUpdates");
+      if (savedAutoCheck !== null) this.autoCheckUpdates = savedAutoCheck !== "false";
+      this.quitAction = parseQuitAction(window.localStorage.getItem(QUIT_ACTION_KEY));
     } catch {
       // The app can still start with its defaults if storage is unavailable.
     }
@@ -229,6 +291,7 @@ class AppStore {
       this.recoveryRequired = false;
       this.loadError = null;
       this.saveError = null;
+      void this.sweepOrphanedPtys();
     } catch (e) {
       this.loadError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -266,6 +329,7 @@ class AppStore {
       this.recoveryRequired = false;
       this.loadError = null;
       this.saveError = null;
+      void this.sweepOrphanedPtys();
     } catch (e) {
       this.recoveryError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -364,22 +428,70 @@ class AppStore {
   }
 
   setSidebarWidth(px: number): void {
+    if (!this.setSidebarWidthLive(px)) return;
+    this.saveSidebarWidth();
+  }
+
+  /**
+   * Live drag update without persistence; drag handlers persist once on
+   * release via `saveSidebarWidth` so sync storage writes stay off the
+   * pointermove path. Returns true when the value changed.
+   */
+  setSidebarWidthLive(px: number): boolean {
     const clamped = clampSidebarWidth(px);
-    if (clamped === this.sidebarWidth) return;
+    if (clamped === this.sidebarWidth) return false;
     this.sidebarWidth = clamped;
+    return true;
+  }
+
+  saveSidebarWidth(): void {
     try {
-      window.localStorage.setItem("ubra.sidebarWidth", String(clamped));
+      window.localStorage.setItem("ubra.sidebarWidth", String(this.sidebarWidth));
     } catch (e) {
       console.error("ubra: failed to save sidebar width", e);
     }
   }
 
-  setSidebarSplit(ratio: number): void {
-    const clamped = clampSplitRatio(ratio);
-    if (clamped === this.sidebarSplit) return;
-    this.sidebarSplit = clamped;
+  setRightPanelWidth(px: number): void {
+    if (!this.setRightPanelWidthLive(px)) return;
+    this.saveRightPanelWidth();
+  }
+
+  /** Live drag update without persistence; see `setSidebarWidthLive`. */
+  setRightPanelWidthLive(px: number): boolean {
+    const clamped = clampSidebarWidth(px, DEFAULT_RIGHT_PANEL_WIDTH);
+    if (clamped === this.rightPanelWidth) return false;
+    this.rightPanelWidth = clamped;
+    return true;
+  }
+
+  saveRightPanelWidth(): void {
     try {
-      window.localStorage.setItem("ubra.sidebarSplit", String(clamped));
+      window.localStorage.setItem(
+        "ubra.rightPanelWidth",
+        String(this.rightPanelWidth),
+      );
+    } catch (e) {
+      console.error("ubra: failed to save right panel width", e);
+    }
+  }
+
+  setSidebarSplit(ratio: number): void {
+    if (!this.setSidebarSplitLive(ratio)) return;
+    this.saveSidebarSplit();
+  }
+
+  /** Live drag update without persistence; see `setSidebarWidthLive`. */
+  setSidebarSplitLive(ratio: number): boolean {
+    const clamped = clampSplitRatio(ratio);
+    if (clamped === this.sidebarSplit) return false;
+    this.sidebarSplit = clamped;
+    return true;
+  }
+
+  saveSidebarSplit(): void {
+    try {
+      window.localStorage.setItem("ubra.sidebarSplit", String(this.sidebarSplit));
     } catch (e) {
       console.error("ubra: failed to save sidebar split", e);
     }
@@ -438,14 +550,29 @@ class AppStore {
     this.savePref("ubra.soundEnabled", String(enabled));
   }
 
-  setSoundFile(path: string): void {
-    this.soundFile = path;
-    this.savePref("ubra.soundFile", path);
+  setTermGpu(enabled: boolean): void {
+    this.termGpu = enabled;
+    this.savePref("ubra.termGpu", String(enabled));
   }
 
-  setSoundStyle(style: string): void {
-    this.soundStyle = parseChimeStyle(style);
-    this.savePref("ubra.soundStyle", this.soundStyle);
+  setAutoLaunchAgent(enabled: boolean): void {
+    this.autoLaunchAgent = enabled;
+    this.savePref("ubra.autoLaunchAgent", String(enabled));
+  }
+
+  setTrayTitleEnabled(enabled: boolean): void {
+    this.trayTitleEnabled = enabled;
+    this.savePref("ubra.trayTitle", String(enabled));
+  }
+
+  setTrayMenuListEnabled(enabled: boolean): void {
+    this.trayMenuListEnabled = enabled;
+    this.savePref("ubra.trayMenuList", String(enabled));
+  }
+
+  setAutoCheckUpdates(enabled: boolean): void {
+    this.autoCheckUpdates = enabled;
+    this.savePref("ubra.autoCheckUpdates", String(enabled));
   }
 
   setAgentMuted(cli: string, muted: boolean): void {
@@ -454,6 +581,21 @@ class AppStore {
       ? [...new Set([...this.mutedAgents, lower])]
       : this.mutedAgents.filter((m) => m.toLowerCase() !== lower);
     this.savePref("ubra.mutedAgents", JSON.stringify(this.mutedAgents));
+  }
+
+  setRightPanelOpen(open: boolean): void {
+    this.rightPanelOpen = open;
+    this.savePref("ubra.rightPanelOpen", String(open));
+  }
+
+  setLeftPanelOpen(open: boolean): void {
+    this.leftPanelOpen = open;
+    this.savePref("ubra.leftPanelOpen", String(open));
+  }
+
+  setRightPanelView(view: RightPanelView): void {
+    this.rightPanelView = view;
+    this.savePref("ubra.rightPanelView", view);
   }
 
   isAgentMuted(cli: string): boolean {
@@ -500,9 +642,72 @@ class AppStore {
     }
   }
 
-  /** New workspaces always go through onboarding (folder + default CLI). */
+  /** New workspace: native folder picker, defaulting to the last used agent CLI. */
   addWorkspace(withGrid = false): void {
-    this.openOnboarding(withGrid);
+    void this.addWorkspaceFromPicker(withGrid);
+  }
+
+  async addWorkspaceFromPicker(withGrid = false): Promise<void> {
+    if (!this.layout) return;
+    let dir: string | string[] | null;
+    try {
+      dir = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a project folder",
+      });
+    } catch {
+      toasts.push("Couldn't open the folder picker. Try again.", "", "");
+      return;
+    }
+    if (typeof dir !== "string" || dir.trim() === "") return;
+    const existing = findWorkspaceByRoot(this.layout.workspaces, dir);
+    if (existing) {
+      this.switchWorkspace(existing.id);
+      toasts.push(`"${existing.name}" is already open.`, "", "", {
+        kind: "copy",
+      });
+      return;
+    }
+    this.createWorkspace(
+      dir,
+      implicitLaunchCommand(this.autoLaunchAgent, this.lastUsedAgentCli || null),
+      withGrid,
+    );
+  }
+
+  /** Build a workspace for a folder; every pane starts in that directory. */
+  createWorkspace(
+    projectDirectory: string,
+    command: string | null,
+    withGrid: boolean,
+  ): string | null {
+    if (!this.layout) return null;
+    const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
+    if (withGrid) {
+      const tab = gridTab();
+      workspace.tabs = [tab];
+      workspace.activeTabId = tab.id;
+    }
+    workspace.defaultCwd = projectDirectory;
+    workspace.root = projectDirectory;
+    this.layout.workspaces.push(workspace);
+    this.layout.activeWorkspaceId = workspace.id;
+    const tab = workspace.tabs[0];
+    for (const id of collectPaneIds(tab.root)) {
+      const node = findPane(tab.root, id);
+      if (node) node.cwd = projectDirectory;
+      this.queueAgentCommand(id, command ?? "");
+    }
+    const first = collectPaneIds(tab.root)[0];
+    const pane = first ? findPane(tab.root, first) : null;
+    if (!pane) return null;
+    if (withGrid) this.paneFocusTarget = pane.id;
+    if (command?.trim()) {
+      workspace.defaultCli = command.trim();
+    }
+    this.saveSoon(true);
+    return pane.id;
   }
 
   /** Blank workspace without onboarding; only the empty-state escape hatch. */
@@ -528,6 +733,28 @@ class AppStore {
       ws.name = name.trim();
       this.saveSoon();
     }
+  }
+
+  setWorkspaceRoot(id: string, root: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && root.trim()) {
+      ws.root = root;
+      this.saveSoon();
+    }
+  }
+
+  clearWorkspaceRoot(id: string): void {
+    const ws = this.layout?.workspaces.find((w) => w.id === id);
+    if (ws && ws.root !== undefined) {
+      delete ws.root;
+      this.saveSoon();
+    }
+  }
+
+  /** Folder the right sidebar shows for the active workspace, if any. */
+  activeWorkspaceRoot(): string | undefined {
+    const ws = this.workspace();
+    return ws ? resolveWorkspaceRoot(ws, this.focusedPaneId) : undefined;
   }
 
   moveWorkspace(
@@ -566,11 +793,8 @@ class AppStore {
       this.layout.activeWorkspaceId =
         this.layout.workspaces[this.layout.workspaces.length - 1]?.id ?? "";
     }
-    if (this.layout.workspaces.length === 0) {
-      // Closing the last workspace returns to onboarding instead of
-      // resurrecting a blank workspace.
-      this.openOnboarding();
-    }
+    // Closing the last workspace reveals the empty-state overlay instead of
+    // resurrecting a blank workspace.
     this.saveSoon(true);
   }
 
@@ -643,7 +867,8 @@ class AppStore {
       const source = findPane(found.tab.root, paneId);
       const cwd = source?.cwd ?? found.ws.defaultCwd;
       if (cwd) sibling.cwd = cwd;
-      if (found.ws.defaultCli) this.pendingTerminalCommands.queue(sibling.id, found.ws.defaultCli);
+      const siblingCli = implicitLaunchCommand(this.autoLaunchAgent, found.ws.defaultCli);
+      if (siblingCli) this.queueAgentCommand(sibling.id, siblingCli);
       // The new pane takes focus (outline + keyboard).
       this.focusedPaneId = sibling.id;
       this.paneFocusTarget = sibling.id;
@@ -656,7 +881,8 @@ class AppStore {
   /** Stamp a fresh pane with its workspace defaults (cwd + auto-run command). */
   private applyWorkspaceDefaults(ws: Workspace, node: PaneNode): void {
     if (ws.defaultCwd) node.cwd = ws.defaultCwd;
-    if (ws.defaultCli) this.pendingTerminalCommands.queue(node.id, ws.defaultCli);
+    const cli = implicitLaunchCommand(this.autoLaunchAgent, ws.defaultCli);
+    if (cli) this.queueAgentCommand(node.id, cli);
   }
 
   setWorkspaceDefaultCli(id: string, cli: string | null): void {
@@ -695,7 +921,7 @@ class AppStore {
   /** Split and queue an agent command to run in the new sibling pane. */
   splitPaneWithCommand(paneId: string, dir: "row" | "col", command: string): void {
     const siblingId = this.splitPane(paneId, dir);
-    if (siblingId) this.pendingTerminalCommands.queue(siblingId, command);
+    if (siblingId) this.queueAgentCommand(siblingId, command);
   }
 
   requestClosePane(paneId: string): void {
@@ -742,6 +968,45 @@ class AppStore {
 
   cancelPendingClose(): void {
     this.pendingClose = null;
+  }
+
+  /**
+   * Quit request from menus, shortcuts, or the tray. Warn whenever panes
+   * exist (quitting stops every pane) unless the user remembered a choice.
+   * `agents` is the attached-agent count for the dialog.
+   */
+  requestQuit(agents: number): void {
+    if (this.pendingQuit) return;
+    const panes = countLayoutPanes(this.layout);
+    if (resolveQuitRequest(this.quitAction, panes) === "dialog") {
+      this.pendingQuit = { panes, agents };
+      return;
+    }
+    void this.quitNow();
+  }
+
+  cancelQuit(): void {
+    this.pendingQuit = null;
+  }
+
+  confirmQuit(remember: boolean): void {
+    if (remember) this.setQuitAction("quit");
+    this.pendingQuit = null;
+    void this.quitNow();
+  }
+
+  private async quitNow(): Promise<void> {
+    try {
+      await invoke("quit_app");
+    } catch (e) {
+      console.error("ubra: quit failed", e);
+      toasts.push("Couldn't quit Ubra", String(e), "", { kind: "copy" });
+    }
+  }
+
+  setQuitAction(action: QuitAction): void {
+    this.quitAction = action;
+    this.savePref(QUIT_ACTION_KEY, action);
   }
 
   renamePane(paneId: string, name: string): void {
@@ -791,83 +1056,215 @@ class AppStore {
     return first ? { tab, paneId: first } : null;
   }
 
-  openOnboarding(withGrid = false): void {
-    if (!this.layout || this.firstRun) return;
-    this.settingsOpen = false;
-    this.pendingOnboardingGrid = withGrid;
-    this.onboardingOpen = true;
-  }
-
+  /**
+   * First-run welcome, reused when onboarding again after closing the last
+   * workspace. With no workspaces there is no current pane to configure, so
+   * build one instead of failing.
+   */
   completeOnboarding(
     projectDirectory: string | null,
     command: string | null,
   ): string | null {
-    if (!this.layout || (!this.firstRun && !this.onboardingOpen)) return null;
-
-    let pane: ReturnType<typeof findPane> = null;
-    let workspace: Workspace | null = null;
-    if (this.firstRun) {
-      const current = this.currentPane();
-      if (!current) return null;
-      pane = findPane(current.tab.root, current.paneId);
-      if (!pane) return null;
-      workspace = this.layout.workspaces.find((ws) =>
-        ws.tabs.some((tab) => tab.id === current.tab.id),
-      ) ?? null;
-      if (projectDirectory) {
-        pane.cwd = projectDirectory;
-        if (workspace) {
-          workspace.name = baseName(projectDirectory) || "Project";
-          workspace.defaultCwd = projectDirectory;
-        }
-      }
-      this.pendingTerminalCommands.queue(pane.id, command ?? "");
-    } else {
+    if (!this.layout) return null;
+    if (this.layout.workspaces.length === 0) {
       if (!projectDirectory) return null;
-      workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
-      if (this.pendingOnboardingGrid) {
-        const tab = gridTab();
-        workspace.tabs = [tab];
-        workspace.activeTabId = tab.id;
+      const paneId = this.createWorkspace(projectDirectory, command, false);
+      if (command?.trim()) {
+        this.lastUsedAgentCli = command.trim();
+        this.savePref("ubra.lastAgentCli", command.trim());
       }
-      workspace.defaultCwd = projectDirectory;
-      this.layout.workspaces.push(workspace);
-      this.layout.activeWorkspaceId = workspace.id;
-      const tab = workspace.tabs[0];
-      for (const id of collectPaneIds(tab.root)) {
-        const node = findPane(tab.root, id);
-        if (node) node.cwd = projectDirectory;
-        this.pendingTerminalCommands.queue(id, command ?? "");
-      }
-      const first = collectPaneIds(tab.root)[0];
-      pane = first ? findPane(tab.root, first) : null;
-      if (!pane) return null;
-      if (this.pendingOnboardingGrid) this.paneFocusTarget = pane.id;
+      return paneId;
     }
+    if (!this.firstRun) return null;
+
+    const current = this.currentPane();
+    if (!current) return null;
+    const pane = findPane(current.tab.root, current.paneId);
+    if (!pane) return null;
+    const workspace = this.layout.workspaces.find((ws) =>
+      ws.tabs.some((tab) => tab.id === current.tab.id),
+    ) ?? null;
+    if (projectDirectory) {
+      pane.cwd = projectDirectory;
+      if (workspace) {
+        workspace.name = baseName(projectDirectory) || "Project";
+        workspace.defaultCwd = projectDirectory;
+        workspace.root = projectDirectory;
+      }
+    }
+    this.queueAgentCommand(pane.id, command ?? "");
 
     if (workspace && command?.trim()) {
       workspace.defaultCli = command.trim();
       this.lastUsedAgentCli = command.trim();
       this.savePref("ubra.lastAgentCli", command.trim());
     }
-    this.pendingOnboardingGrid = false;
     this.firstRun = false;
-    this.onboardingOpen = false;
     this.saveSoon(true);
     return pane.id;
   }
 
-  skipOnboarding(): void {
-    this.pendingOnboardingGrid = false;
+  /**
+   * Revisit-mode onboarding: open the chosen folder as a NEW workspace,
+   * never mutating the current one. Returns the new pane id, or null when
+   * there is no layout yet.
+   */
+  completeOnboardingRevisit(
+    projectDirectory: string,
+    command: string | null,
+  ): string | null {
+    if (!this.layout) return null;
+    const existing = findWorkspaceByRoot(this.layout.workspaces, projectDirectory);
+    if (existing) {
+      this.switchWorkspace(existing.id);
+      this.onboardingOpen = false;
+      return collectPaneIds(activeTab(existing).root)[0] ?? null;
+    }
+    const paneId = this.createWorkspace(projectDirectory, command, false);
+    if (paneId && command?.trim()) {
+      this.lastUsedAgentCli = command.trim();
+      this.savePref("ubra.lastAgentCli", command.trim());
+    }
+    if (paneId) this.onboardingOpen = false;
+    return paneId;
+  }
+
+  /**
+   * First-run fleet launch: the rolled tab with a distinct agent CLI per
+   * pane, every pane in the project folder. Commands land largest-pane
+   * first, so the primary CLI takes the biggest pane and becomes the
+   * workspace default. Returns the fleet pane ids in priority order, or
+   * null when there is no layout to build in.
+   */
+  completeOnboardingFleet(
+    projectDirectory: string,
+    commands: string[],
+    plan: FleetLaunchPlan,
+  ): string[] | null {
+    if (!this.layout) return null;
+    if (this.layout.workspaces.length > 0 && !this.firstRun) return null;
+    const planned = commands.map((command) => command.trim()).filter(Boolean);
+    if (planned.length === 0 || plan.order.length === 0) return null;
+    const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
+    workspace.tabs = [plan.tab];
+    workspace.activeTabId = plan.tab.id;
+    workspace.defaultCwd = projectDirectory;
+    workspace.root = projectDirectory;
+    this.layout.workspaces.push(workspace);
+    this.layout.activeWorkspaceId = workspace.id;
+    plan.order.forEach((id, index) => {
+      const node = findPane(plan.tab.root, id);
+      if (node) node.cwd = projectDirectory;
+      this.queueAgentCommand(id, planned[index] ?? planned[0]);
+    });
+    workspace.defaultCli = planned[0];
+    this.lastUsedAgentCli = planned[0];
+    this.savePref("ubra.lastAgentCli", planned[0]);
+    this.paneFocusTarget = plan.order[0];
+    this.firstRun = false;
+    this.saveSoon(true);
+    return [...plan.order];
+  }
+
+  async skipOnboarding(): Promise<void> {
     if (this.firstRun) {
       this.firstRun = false;
       this.saveSoon(true);
+      return;
     }
-    this.onboardingOpen = false;
+    // Empty Workspace after closing the last workspace: start over at home,
+    // running the first detected agent CLI. With no CLI the terminal idles.
+    if (!this.layout || this.layout.workspaces.length > 0) return;
+    let home: string | null = null;
+    try {
+      home = await invoke<string>("home_dir");
+    } catch (e) {
+      console.error("ubra: home directory lookup failed", e);
+    }
+    if (!home) {
+      this.addBlankWorkspace();
+      return;
+    }
+    const command = implicitLaunchCommand(
+      this.autoLaunchAgent,
+      (await agentClis.ensure())[0]?.cli ?? null,
+    );
+    this.createWorkspace(home, command, false);
+    if (command) {
+      this.lastUsedAgentCli = command;
+      this.savePref("ubra.lastAgentCli", command);
+    }
   }
 
   takePendingTerminalCommand(paneId: string): string | null {
     return this.pendingTerminalCommands.take(paneId);
+  }
+
+  /**
+   * Queue an agent command to type on the pane's next spawn, and stamp the
+   * pane so a fresh spawn after a restart can rerun it. Callers save.
+   */
+  private queueAgentCommand(paneId: string, command: string): void {
+    this.pendingTerminalCommands.queue(paneId, command);
+    if (this.layout) stampPaneAgentCli(this.layout, paneId, command);
+  }
+
+  /**
+   * The pane's persisted agent CLI for a fresh (non-attached) spawn. Unlike
+   * the pending queue this is not consumed: rerunning the same agent on
+   * every fresh spawn is the point. Null when the pane never ran an agent.
+   */
+  /** Explicit relaunch for the respawn button; bypasses the auto-launch gate. */
+  relaunchPaneAgent(paneId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    const cli = node?.agentCli?.trim();
+    if (cli && node) this.queueAgentCommand(paneId, restoreCommandFor(cli, node.agentSession));
+  }
+
+  takeRestoreAgent(paneId: string): string | null {
+    if (!this.layout || !this.autoLaunchAgent) return null;
+    const found = findTabByPane(this.layout, paneId);
+    const node = found ? findPane(found.tab.root, paneId) : null;
+    const cli = node?.agentCli?.trim();
+    return cli && node ? restoreCommandFor(cli, node.agentSession) : null;
+  }
+
+  /**
+   * Stamp an observed agent session for resume-after-restart. True when
+   * the layout changes; callers save.
+   */
+  stampPaneAgentSession(paneId: string, cli: string, value: string): boolean {
+    return !!this.layout && stampPaneAgentSession(this.layout, paneId, cli, value);
+  }
+
+  /**
+   * Reap backend sessions no layout pane can adopt: keys from panes that no
+   * longer exist (or pre-reattach orphans). Keyless sessions are left
+   * alone. Best-effort; failures only log.
+   */
+  private async sweepOrphanedPtys(): Promise<void> {
+    const layout = this.layout;
+    if (!layout) return;
+    try {
+      const sessions = await invoke<PtySessionInfo[]>("pty_list");
+      const placed = new Set<string>();
+      for (const ws of layout.workspaces) {
+        for (const tab of ws.tabs) {
+          for (const id of collectPaneIds(tab.root)) placed.add(id);
+        }
+      }
+      for (const session of sessions) {
+        if (session.key !== null && session.key !== undefined && !placed.has(session.key)) {
+          await invoke("pty_kill", { id: session.id }).catch((error) => {
+            console.error("ubra: orphan reap failed", error);
+          });
+        }
+      }
+    } catch (error) {
+      console.error("ubra: orphan sweep failed", error);
+    }
   }
 
   cycleTab(dir: 1 | -1): void {
@@ -967,45 +1364,6 @@ class AppStore {
   }
 
   paneSizesChanged(): void {
-    this.saveSoon();
-  }
-
-  openSavedSetups(workspaceId?: string): void {
-    if (!this.loaded || !this.layout || this.recoveryRequired || this.firstRun) return;
-    if (this.onboardingOpen || this.settingsOpen || this.pendingClose) return;
-    this.savedSetupsRequest =
-      workspaceId ? { mode: "capture", workspaceId } : { mode: "library" };
-  }
-
-  closeSavedSetups(): void {
-    this.savedSetupsRequest = null;
-  }
-
-  /** Append an instantiated saved workspace and authorize its commands. */
-  launchSavedWorkspace(workspace: Workspace): void {
-    if (!this.layout) throw new Error("Workspace is no longer available.");
-    validateSetupInsertion($state.snapshot(this.layout), workspace);
-    const ids: string[] = [];
-    for (const tab of workspace.tabs) {
-      const visit = (node: typeof tab.root): void => {
-        if (node.kind === "pane") {
-          if (node.cmd !== undefined && node.cmd.length > 0) ids.push(node.id);
-          return;
-        }
-        visit(node.first);
-        visit(node.second);
-      };
-      visit(tab.root);
-    }
-    this.startup.authorize(ids);
-    this.layout.workspaces.push(workspace);
-    this.layout.activeWorkspaceId = workspace.id;
-    const tab = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? workspace.tabs[0];
-    const focusId = tab?.zoomedPaneId ?? (tab ? collectPaneIds(tab.root)[0] : undefined);
-    if (focusId) {
-      this.focusedPaneId = focusId;
-      this.paneFocusTarget = focusId;
-    }
     this.saveSoon();
   }
 

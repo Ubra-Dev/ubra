@@ -18,12 +18,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Per-arch macOS legs (not one universal build).
           - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: bundle-macOS-arm64
+            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle/
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: bundle-macOS-intel
+            bundle_dir: src-tauri/target/x86_64-apple-darwin/release/bundle/
           - os: ubuntu-latest
+            target: ""
+            artifact: bundle-Linux
+            bundle_dir: src-tauri/target/release/bundle/
           - os: windows-latest
+            target: ""
+            artifact: bundle-Windows
+            bundle_dir: src-tauri/target/release/bundle/
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # System dependencies from https://v2.tauri.app/start/prerequisites/
       - name: Install Linux dependencies
@@ -42,13 +56,15 @@ jobs:
             librsvg2-dev
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || '' }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -58,16 +74,114 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Check tag matches app version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CONF_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match tauri.conf.json version $CONF_VERSION."
+            exit 1
+          fi
+
+      # Refuse to ship an unsigned macOS release: without an identity the
+      # bundler signs ad-hoc and Gatekeeper blocks the DMG.
+      - name: Require macOS signing secrets
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "::error::APPLE_SIGNING_IDENTITY is not set; refusing to ship an unsigned macOS release."
+            exit 1
+          fi
+          if [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_API_KEY_P8" ]; then
+            echo "::error::Set exactly one notarization route: APPLE_API_KEY_P8 (preferred) or APPLE_PASSWORD."
+            exit 1
+          fi
+
+      # Keychain setup from the Tauri macOS signing guide; the keychain
+      # password is ephemeral (openssl rand), not a stored secret.
+      - name: Import signing certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import /tmp/certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm /tmp/certificate.p12
+          security find-identity -v -p codesigning build.keychain
+
+      # App Store Connect API key for notarization (preferred over Apple ID):
+      # the .p8 arrives base64-encoded and is written to a temp path the
+      # bundler reads via APPLE_API_KEY_PATH. Skipped when unset.
+      - name: Materialize App Store Connect API key
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -z "$APPLE_API_KEY_P8" ]; then
+            echo "No API key secret; falling back to Apple ID notarization."
+            exit 0
+          fi
+          echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
       # Direct CLI build (no tauri-action): bundles via the pinned
-      # @tauri-apps/cli in devDependencies.
+      # @tauri-apps/cli in devDependencies. With the Apple credentials set,
+      # each macOS build signs, notarizes, and staples automatically.
       - name: Tauri build
-        run: npm run tauri build
+        env:
+          TAURI_TARGET: ${{ matrix.target }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Unset secrets expand to empty: telemetry stays off but the
+          # frontend build (which needs these keys present) stays green.
+          PUBLIC_POSTHOG_HOST: ${{ secrets.PUBLIC_POSTHOG_HOST }}
+          PUBLIC_POSTHOG_PROJECT_TOKEN: ${{ secrets.PUBLIC_POSTHOG_PROJECT_TOKEN }}
+        run: |
+          if [ -n "$TAURI_TARGET" ]; then
+            npm run tauri build -- --target "$TAURI_TARGET"
+          else
+            npm run tauri build
+          fi
+
+      # Both macOS legs emit identically named `Ubra.app.tar.gz` updater
+      # bundles; rename by arch so they survive as distinct release assets.
+      - name: Disambiguate macOS updater bundle by arch
+        if: runner.os == 'macOS'
+        env:
+          TAURI_TARGET: ${{ matrix.target }}
+          BUNDLE_DIR: ${{ matrix.bundle_dir }}
+        run: |
+          cd "$BUNDLE_DIR/macos"
+          ls Ubra.app.tar.gz Ubra.app.tar.gz.sig
+          VER="${GITHUB_REF_NAME#v}"
+          ARCH="${TAURI_TARGET%%-*}"
+          mv Ubra.app.tar.gz "Ubra_${VER}_${ARCH}.app.tar.gz"
+          mv Ubra.app.tar.gz.sig "Ubra_${VER}_${ARCH}.app.tar.gz.sig"
 
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: bundle-${{ runner.os }}
-          path: src-tauri/target/release/bundle/
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bundle_dir }}
           if-no-files-found: error
 
   publish:
@@ -98,10 +212,114 @@ jobs:
             fi
           done
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: bundles
-      - uses: softprops/action-gh-release@v2
+
+      # The updater manifest generator lives in the repo (scripts/ +
+      # src/lib/updaterManifest.ts); the publish job needs a checkout to run it.
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
         with:
-          files: bundles/**/*
+          node-version: 24
+
+      # Fails closed when any platform lacks a signed updater bundle.
+      - name: Generate updater metadata
+        run: >
+          node scripts/make-latest-json.mjs --tag "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY" --dir bundles --out bundles/latest.json
+
+      # Stage exactly the files that become release assets: installer and
+      # updater bundles plus signatures. The loose `.app` directories and
+      # bundler debris (bundle_dmg.sh, icon.icns) stay out — release assets
+      # share one flat namespace, so any basename collision fails the release.
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          collide=0
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            if [ -e "dist/$base" ]; then
+              echo "::error::duplicate release asset name: $base ($f)"
+              collide=1
+            else
+              cp "$f" "dist/$base"
+            fi
+          done < <(find bundles -type f \( \
+            -name "*.dmg" -o -name "*.tar.gz" -o -name "*.sig" \
+            -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \
+            -o -name "*.exe" -o -name "*.msi" -o -name "*.zip" \
+            -o -name "latest.json" \) | sort)
+          [ "$collide" = "0" ] || exit 1
+          ls dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
           generate_release_notes: true
+
+  # Regenerate Casks/ubra.rb in Ubra-Dev/homebrew-tap from the published
+  # release DMGs. Skips (without failing the release) when the tap token
+  # is not configured; creates the cask on first run, updates it after.
+  tap-update:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check tap token
+        id: token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.token.outputs.skip != 'true'
+
+      - name: Setup Node
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Download macOS DMGs
+        if: steps.token.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dmg
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.dmg' --dir dmg
+          ls dmg
+
+      - name: Render cask
+        if: steps.token.outputs.skip != 'true'
+        run: >
+          node scripts/update-cask.mjs --tag "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY" --dir dmg --out /tmp/ubra.rb
+
+      - name: Push to tap
+        if: steps.token.outputs.skip != 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          rm -rf tap
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/Ubra-Dev/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp /tmp/ubra.rb tap/Casks/ubra.rb
+          cd tap
+          git config user.name "ubra-release"
+          git config user.email "release@getubra.com"
+          git add Casks/ubra.rb
+          if git diff --cached --quiet; then
+            echo "Cask already current."
+            exit 0
+          fi
+          git commit -m "ubra ${GITHUB_REF_NAME#v}"
+          git push -u origin HEAD

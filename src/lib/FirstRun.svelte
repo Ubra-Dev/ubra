@@ -1,10 +1,34 @@
 <script lang="ts">
+  import { PUBLIC_POSTHOG_HOST, PUBLIC_POSTHOG_PROJECT_TOKEN } from "$env/static/public";
+  import posthog from "posthog-js";
+  import { invoke } from "@tauri-apps/api/core";
   import { onMount, tick } from "svelte";
   import { overlayFocus } from "./overlayFocus";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { CUSTOM_COMMAND, resolveAgentCommand } from "./agentClis";
+  import AgentCliIcon from "./AgentCliIcon.svelte";
+  import AgentCliSelect from "./AgentCliSelect.svelte";
+  import Icon from "./Icon.svelte";
+  import {
+    FLEET_DEFAULT_PICKS,
+    planFleet,
+    rollFleetPlan,
+    type FleetLaunchPlan,
+  } from "./fleet";
+  import { computeLayout } from "./layout";
   import { agentClis } from "./agentClis.svelte";
+  import { posthogLogs } from "./posthogLogs";
+  import { PRIVACY_URL } from "./site.ts";
   import { store } from "./store.svelte";
+  import { telemetryStatus } from "./telemetry";
+  import { applyTelemetryConsent } from "./telemetrySync";
+
+  interface Props {
+    /** Revisit from Settings: creates a new workspace, never rewrites consent. */
+    revisit?: boolean;
+  }
+  let { revisit = false }: Props = $props();
 
   let projectDirectory = $state<string | null>(null);
   const detected = $derived(agentClis.clis);
@@ -13,14 +37,40 @@
   let customCommand = $state("");
   let pickingDirectory = $state(false);
   let errorMessage = $state<string | null>(null);
-  let selectEl = $state<HTMLSelectElement | null>(null);
+  let selectEl = $state<AgentCliSelect | null>(null);
   let customEl = $state<HTMLInputElement | null>(null);
+  let telemetryOptIn = $state(false);
+  let setupScrollEl = $state<HTMLDivElement | null>(null);
+  let telemetrySupported = $state(false);
+  let onboardingActionBusy = $state(false);
+  /** First-run wizard step; revisit mode always shows the single screen. */
+  let step = $state<"folder" | "fleet">("folder");
+  let fleetPicks = $state<string[]>([]);
+  let fleetSettled = false;
+  let supportedClis = $state<{ cli: string; label: string }[] | null>(null);
+  let fleetShownCaptured = false;
 
   const command = $derived(resolveAgentCommand(selection, customCommand));
   const selectedCli = $derived(detected?.find((entry) => entry.cli === selection) ?? null);
+  const fleetCommands = $derived(
+    planFleet(fleetPicks, detected?.length === 0 ? customCommand : null),
+  );
+  const supportedNames = $derived.by(() => {
+    const list = supportedClis ?? [];
+    if (list.length === 0) return "";
+    const head = list.slice(0, 6).map((entry) => entry.label);
+    const rest = list.length - head.length;
+    return rest > 0 ? `${head.join(", ")} and ${rest} more` : head.join(", ");
+  });
 
   onMount(() => {
     void agentClis.ensure();
+    telemetryStatus()
+      .then((status) => {
+        telemetrySupported = status.supported;
+        telemetryOptIn = status.consented;
+      })
+      .catch((e) => console.error("ubra: telemetry status failed", e));
   });
 
   // Settle the initial selection once when detection resolves; never
@@ -44,8 +94,99 @@
     else if (clis.length === 0) selection = CUSTOM_COMMAND;
   });
 
-  function onSelectChange(e: Event): void {
-    if ((e.target as HTMLSelectElement).value === CUSTOM_COMMAND) {
+  // Settle fleet picks once: the preferred CLI first (it takes the
+  // largest pane), then detection order. No cap; users pick as many as
+  // they like.
+  $effect(() => {
+    const clis = agentClis.clis;
+    if (clis === null || fleetSettled) return;
+    fleetSettled = true;
+    const prefill = store.preferredAgentCli();
+    const ordered = [...clis].sort((a, b) =>
+      a.cli === prefill ? -1 : b.cli === prefill ? 1 : 0,
+    );
+    fleetPicks = ordered.slice(0, FLEET_DEFAULT_PICKS).map((entry) => entry.cli);
+  });
+
+  // Rolled tiling for the current pick count. Re-rolls only when the
+  // count changes (or Shuffle is pressed), so toggling which CLIs are
+  // picked never reshuffles the preview under the user.
+  let fleetPlan = $state<FleetLaunchPlan | null>(null);
+  $effect(() => {
+    if (revisit || step !== "fleet") return;
+    const count = fleetCommands.length;
+    if (count === 0) {
+      fleetPlan = null;
+      return;
+    }
+    if (!fleetPlan || fleetPlan.order.length !== count) {
+      fleetPlan = rollFleetPlan(count, Math.random);
+    }
+  });
+
+  function shufflePlan(): void {
+    if (fleetCommands.length === 0) return;
+    fleetPlan = rollFleetPlan(fleetCommands.length, Math.random);
+  }
+
+  /** CLI per previewed pane: picks in order onto largest-first panes. */
+  const fleetAssign = $derived.by((): Map<string, string> => {
+    const assigned = new Map<string, string>();
+    if (!fleetPlan) return assigned;
+    fleetPlan.order.forEach((id, index) => {
+      const command = fleetCommands[index];
+      if (command) assigned.set(id, command);
+    });
+    return assigned;
+  });
+  const fleetPanes = $derived(
+    fleetPlan ? computeLayout(fleetPlan.tab.root).panes : [],
+  );
+
+  $effect(() => {
+    if (revisit || step !== "fleet") return;
+    const clis = detected;
+    if (clis === null) return;
+    if (!fleetShownCaptured) {
+      fleetShownCaptured = true;
+      if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+        posthog.capture("fleet_shown", { detectedClis: clis.length });
+        posthogLogs.fleetShown(clis.length);
+      }
+    }
+    if (clis.length === 0 && supportedClis === null) {
+      invoke<{ cli: string; label: string }[]>("supported_agent_clis")
+        .then((list) => {
+          supportedClis = list;
+        })
+        .catch((error: unknown) =>
+          console.error("ubra: supported CLIs lookup failed", error),
+        );
+    }
+  });
+
+  function togglePick(cli: string): void {
+    if (fleetPicks.includes(cli)) {
+      fleetPicks = fleetPicks.filter((pick) => pick !== cli);
+    } else {
+      fleetPicks = [...fleetPicks, cli];
+    }
+  }
+
+  function goFleet(): void {
+    errorMessage = null;
+    step = "fleet";
+    setupScrollEl?.scrollTo({ top: 0 });
+  }
+
+  function goFolder(): void {
+    errorMessage = null;
+    step = "folder";
+    setupScrollEl?.scrollTo({ top: 0 });
+  }
+
+  function onSelectChange(picked: string): void {
+    if (picked === CUSTOM_COMMAND) {
       void tick().then(() => customEl?.focus());
     }
   }
@@ -73,59 +214,193 @@
     }
   }
 
-  function startAgent(): void {
-    if (!projectDirectory || !command.trim()) return;
+  async function startAgent(): Promise<void> {
+    if (onboardingActionBusy || !projectDirectory || !command.trim()) return;
+    onboardingActionBusy = true;
+    if (revisit) {
+      const paneId = store.completeOnboardingRevisit(projectDirectory, command);
+      if (!paneId) {
+        errorMessage = "Couldn't prepare the project terminal. Try closing and retrying.";
+        onboardingActionBusy = false;
+      }
+      return;
+    }
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
     const paneId = store.completeOnboarding(projectDirectory, command);
     if (!paneId) {
       errorMessage = "Couldn't prepare the project terminal. Try skipping setup.";
+      onboardingActionBusy = false;
+      return;
+    }
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_completed");
+      posthogLogs.onboardingCompleted();
     }
   }
 
-  function skipSetup(): void {
-    store.skipOnboarding();
+  async function launchFleet(): Promise<void> {
+    if (onboardingActionBusy || !projectDirectory || fleetCommands.length === 0) {
+      return;
+    }
+    // The roll effect keeps the plan in sync; re-roll defensively if a
+    // pick landed after the last roll.
+    let plan = fleetPlan;
+    if (!plan || plan.order.length !== fleetCommands.length) {
+      plan = rollFleetPlan(fleetCommands.length, Math.random);
+      fleetPlan = plan;
+    }
+    onboardingActionBusy = true;
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
+    const ids = store.completeOnboardingFleet(projectDirectory, fleetCommands, plan);
+    if (!ids) {
+      errorMessage = "Couldn't prepare the project terminals. Try skipping setup.";
+      onboardingActionBusy = false;
+      return;
+    }
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_completed");
+      posthog.capture("fleet_launched", { cliCount: fleetCommands.length });
+      posthogLogs.onboardingCompleted();
+      posthogLogs.fleetLaunched(fleetCommands.length);
+    }
+  }
+
+  async function skipSetup(): Promise<void> {
+    if (onboardingActionBusy) return;
+    if (revisit) {
+      store.onboardingOpen = false;
+      return;
+    }
+    onboardingActionBusy = true;
+    await applyTelemetryConsent(telemetryOptIn).catch((error: unknown) => {
+      console.error("ubra: onboarding consent failed", error);
+    });
+    if (PUBLIC_POSTHOG_PROJECT_TOKEN && PUBLIC_POSTHOG_HOST) {
+      posthog.capture("onboarding_skipped");
+      posthogLogs.onboardingSkipped();
+    }
+    await store.skipOnboarding();
+  }
+
+  function onRevisitKeydown(e: KeyboardEvent): void {
+    if (revisit && e.key === "Escape") {
+      e.preventDefault();
+      store.onboardingOpen = false;
+    }
   }
 </script>
 
 <div class="onboarding" role="dialog" aria-modal="true" aria-labelledby="welcome-title"
-  tabindex="-1" data-keyboard-overlay use:overlayFocus>
+  tabindex="-1" data-keyboard-overlay use:overlayFocus onkeydown={onRevisitKeydown}>
   <div class="card">
     <aside class="intro">
       <div class="brand"><img class="brand-logo" src="/logo.png" alt="Ubra" width="2172" height="724" /></div>
-      <div class="intro-copy">
-        <h1 id="welcome-title">Put your agent in its project.</h1>
-        <p>
-          One terminal for your work, with agent activity visible while it runs.
-        </p>
-      </div>
-      <div class="terminal-preview" aria-label="Example agent session">
-        <div class="preview-bar">
-          <span></span><span></span><span></span>
-          <span class="preview-path">your-project</span>
+      {#if !revisit && step === "fleet"}
+        <div class="intro-copy">
+          <h1 id="welcome-title">Launch your fleet.</h1>
+          <p>
+            Your agents, side by side, each in its own terminal.
+          </p>
         </div>
-        <div class="preview-body">
-          <div><span class="prompt">$</span> {command.trim() || "your-agent"}</div>
-          <div class="preview-muted">Reading project files…</div>
-          <div class="preview-rule"></div>
-          <div class="preview-state"><i></i> Agent activity appears here</div>
+        <div class="fleet-preview" aria-label="Fleet layout preview">
+          {#if fleetCommands.length === 0 || !fleetPlan}
+            <div class="fleet-empty">Pick at least one CLI to preview your fleet.</div>
+          {:else}
+            <div class="fleet-tiling">
+              {#each fleetPanes as pane (pane.node.id)}
+                {@const cmd = fleetAssign.get(pane.node.id) ?? ""}
+                {@const [px, py, pw, ph] = pane.rect}
+                <div
+                  class="fleet-tile"
+                  class:hero={pane.node.id === fleetPlan?.order[0]}
+                  style="left: {(px * 100).toFixed(2)}%; top: {(py * 100).toFixed(2)}%; width: {(pw * 100).toFixed(2)}%; height: {(ph * 100).toFixed(2)}%;"
+                  title={cmd}
+                >
+                  <span class="fleet-tile-cli">{cmd}</span>
+                </div>
+              {/each}
+            </div>
+            {#if fleetCommands.length > 1}
+              <button class="shuffle-btn" type="button" onclick={shufflePlan}>
+                <Icon name="refresh" size={11} />
+                <span>Shuffle layout</span>
+              </button>
+            {/if}
+          {/if}
         </div>
-      </div>
-      <p class="intro-foot">Your agent runs in a regular terminal.</p>
+        <p class="intro-foot">Every agent runs in a regular terminal.</p>
+      {:else}
+        <div class="intro-copy">
+          <h1 id="welcome-title">Put your agent in its project.</h1>
+          <p>
+            One terminal for your work, with agent activity visible while it runs.
+          </p>
+        </div>
+        <div class="terminal-preview" aria-label="Example agent session">
+          <div class="preview-bar">
+            <span></span><span></span><span></span>
+            <span class="preview-path">your-project</span>
+          </div>
+          <div class="preview-body">
+            <div><span class="prompt">$</span> {command.trim() || "your-agent"}</div>
+            <div class="preview-muted">Reading project files…</div>
+            <div class="preview-rule"></div>
+            <div class="preview-state"><i></i> Agent activity appears here</div>
+          </div>
+        </div>
+        <p class="intro-foot">Your agent runs in a regular terminal.</p>
+      {/if}
     </aside>
 
     <form
       class="setup"
-      aria-label="First-run setup"
+      aria-label="Project setup"
       onsubmit={(event) => {
         event.preventDefault();
-        startAgent();
+        if (revisit) startAgent();
+        else if (step === "folder") goFleet();
+        else launchFleet();
       }}
     >
-      <div class="step-label">Get started</div>
-      <h2>Choose where to work</h2>
-      <p class="description">
-        Pick a project folder, then tell Ubra which agent command to run there.
-      </p>
+      <div class="step-head">
+        <div class="step-label">
+          {revisit ? "Get started" : step === "folder" ? "Step 1 of 2 — Project" : "Step 2 of 2 — Fleet"}
+        </div>
+        {#if !revisit && step === "fleet"}
+          <button
+            class="back-btn"
+            type="button"
+            onclick={goFolder}
+            disabled={onboardingActionBusy}
+            title="Back to project folder"
+            aria-label="Back to project folder"
+          >
+            <Icon name="chevron-left" size={14} />
+          </button>
+        {/if}
+      </div>
+      {#if !revisit && step === "fleet"}
+        <h2>Choose your fleet</h2>
+        <p class="description">
+          Pick the agents to launch side by side.
+        </p>
+      {:else}
+        <h2>Choose where to work</h2>
+        <p class="description">
+          {#if revisit}
+            Pick a project folder, then tell Ubra which agent command to run there.
+          {:else}
+            Pick a project folder — your fleet will start working there.
+          {/if}
+        </p>
+      {/if}
 
+      <div class="setup-scroll" bind:this={setupScrollEl}>
+      {#if revisit || step === "folder"}
       <div class="field-group">
         <span class="field-label">Project folder</span>
         {#if projectDirectory}
@@ -155,6 +430,8 @@
         {/if}
       </div>
 
+      {/if}
+      {#if revisit}
       <div class="field-group command-group">
         <span class="field-label" id="command-label">Agent command</span>
         {#if detected === null}
@@ -166,21 +443,16 @@
           {#if detected.length > 0}
             <span class="command-field">
               <span class="command-prompt" aria-hidden="true">$</span>
-              <select
+              <AgentCliSelect
                 bind:this={selectEl}
+                entries={detected}
                 bind:value={selection}
-                aria-labelledby="command-label"
-                aria-describedby="command-hint"
-                onchange={onSelectChange}
-              >
-                <option value="" disabled>Choose an agent CLI</option>
-                {#each detected as entry (entry.cli)}
-                  <option value={entry.cli} title={entry.path}>
-                    {entry.label} · {entry.cli}
-                  </option>
-                {/each}
-                <option value={CUSTOM_COMMAND}>Custom command…</option>
-              </select>
+                placeholder="Choose an agent CLI"
+                variant="field"
+                ariaLabel="Agent command"
+                ariaDescribedBy="command-hint"
+                onChange={onSelectChange}
+              />
             </span>
           {/if}
           {#if selection === CUSTOM_COMMAND}
@@ -215,29 +487,158 @@
         </span>
       </div>
 
+      {/if}
+      {#if !revisit && step === "fleet"}
+      <div class="field-group">
+        <span class="field-label" id="fleet-label">Your fleet</span>
+        {#if detected === null}
+          <span class="command-field">
+            <span class="command-prompt" aria-hidden="true">$</span>
+            <span class="detecting">Detecting installed agents…</span>
+          </span>
+        {:else if detected.length === 0}
+          <span class="command-field">
+            <span class="command-prompt" aria-hidden="true">$</span>
+            <input
+              type="text"
+              bind:this={customEl}
+              bind:value={customCommand}
+              placeholder="my-agent --yes"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-label="Custom agent command"
+            />
+          </span>
+          <span class="hint">
+            No agent CLIs detected — enter any installed command.
+            {#if supportedNames}
+              Ubra works with {supportedNames}.
+            {/if}
+          </span>
+        {:else}
+          <div class="cli-chips" role="group" aria-labelledby="fleet-label">
+            {#each detected as entry (entry.cli)}
+              {@const picked = fleetPicks.includes(entry.cli)}
+              <label class="cli-chip" class:picked title={`${entry.cli} — ${entry.path}`}>
+                <input
+                  type="checkbox"
+                  checked={picked}
+                  onchange={() => togglePick(entry.cli)}
+                  aria-label={entry.label}
+                />
+                <AgentCliIcon cli={entry.cli} label={entry.label} size={16} />
+                <span class="cli-chip-label">{entry.label}</span>
+                {#if fleetPicks[0] === entry.cli}
+                  <span class="cli-chip-hero">Main</span>
+                {/if}
+              </label>
+            {/each}
+          </div>
+          {#if fleetPicks.length > 6}
+            <span class="hint">
+              {fleetPicks.length} terminals — cozy. Deselect to slim down.
+            </span>
+          {/if}
+        {/if}
+      </div>
+
+      <div class="status-tip">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>
+          The fleet runs on your own CLI accounts. Each agent opens in its
+          own terminal, ready for your first prompt.
+        </span>
+      </div>
+      {:else}
       <div class="status-tip">
         <span class="status-dot" aria-hidden="true"></span>
         <span>
           When it runs, its status shows in the pane header and the Agents list.
         </span>
       </div>
+      {/if}
 
       {#if errorMessage}
         <div class="error" role="alert">{errorMessage}</div>
       {/if}
 
+      {#if telemetrySupported && !revisit && step === "folder"}
+        <label class="consent-row">
+          <input type="checkbox" bind:checked={telemetryOptIn} />
+          <span>
+            Help improve Ubra by sharing anonymous usage and crash reports.
+            <span class="hint-inline">
+              Never code, file paths, or commands. Change anytime in Settings.
+              <button
+                type="button"
+                class="inline-link"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  openUrl(PRIVACY_URL).catch(console.error);
+                }}
+              >
+                Privacy Policy
+              </button>
+            </span>
+          </span>
+        </label>
+      {/if}
+      </div>
+
       <div class="actions">
-        <button
-          class="start-button"
-          type="submit"
-          onclick={startAgent}
-          disabled={!projectDirectory || !command.trim()}
-        >
-          Open project and start agent
-        </button>
-        <button class="skip-button" type="button" onclick={skipSetup}>
-          {store.firstRun ? "Skip setup" : "Cancel"}
-        </button>
+        {#if revisit}
+          <button
+            class="start-button"
+            type="submit"
+            disabled={!projectDirectory || !command.trim() || onboardingActionBusy}
+          >
+            Get Started
+          </button>
+          <button
+            class="skip-button"
+            type="button"
+            onclick={skipSetup}
+            disabled={onboardingActionBusy}
+          >
+            Close
+          </button>
+        {:else if step === "folder"}
+          <button
+            class="start-button"
+            type="submit"
+            disabled={!projectDirectory || onboardingActionBusy}
+          >
+            Continue →
+          </button>
+          <button
+            class="skip-button"
+            type="button"
+            onclick={skipSetup}
+            disabled={onboardingActionBusy}
+          >
+            {store.firstRun ? "Skip setup" : "Empty Workspace"}
+          </button>
+        {:else}
+          <button
+            class="start-button"
+            type="submit"
+            disabled={!projectDirectory ||
+              fleetCommands.length === 0 ||
+              onboardingActionBusy}
+          >
+            Launch my fleet →
+          </button>
+          <button
+            class="skip-button"
+            type="button"
+            onclick={skipSetup}
+            disabled={onboardingActionBusy}
+          >
+            {store.firstRun ? "Skip setup" : "Empty Workspace"}
+          </button>
+        {/if}
       </div>
     </form>
   </div>
@@ -255,10 +656,13 @@
     padding: 32px;
     background: var(--app-bg);
     overflow: auto;
+    font-family: var(--font-ui);
   }
   .card {
     width: min(900px, 100%);
     min-height: 530px;
+    /* Fixed dialog height on every step; the fleet list scrolls inside. */
+    height: min(660px, calc(100vh - 64px));
     display: grid;
     grid-template-columns: 0.88fr 1.12fr;
     background: var(--surface-bg);
@@ -270,6 +674,8 @@
   .intro {
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     padding: 32px 30px 24px;
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border);
@@ -309,7 +715,7 @@
     border-radius: 8px;
     background: var(--input-bg);
     color: var(--text);
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 11px var(--font-ui);
   }
   .preview-bar {
     height: 27px;
@@ -366,14 +772,55 @@
     font-size: 11px;
   }
   .setup {
-    align-self: center;
+    display: flex;
+    flex-direction: column;
+    align-self: stretch;
+    min-width: 0;
+    min-height: 0;
     padding: 48px 46px 40px;
   }
-  .step-label {
+  /* Middle content scrolls; the step header above and actions below stay
+     pinned so the dialog keeps one height on every step. */
+  .setup-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
+    padding: 0 2px;
+  }
+  .step-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     margin-bottom: 11px;
+  }
+  .step-label {
     color: var(--accent);
     font-size: 11px;
     font-weight: 600;
+  }
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: 1px solid var(--input-border);
+    border-radius: 50%;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .back-btn:hover:not(:disabled) {
+    color: var(--text-strong);
+    border-color: var(--accent);
+  }
+  .back-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   .setup h2 {
     margin: 0;
@@ -450,7 +897,7 @@
   .folder-mark {
     flex: 0 0 auto;
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .folder-path {
     min-width: 0;
@@ -458,7 +905,7 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 11px var(--font-ui);
   }
   .change-folder {
     flex: 0 0 auto;
@@ -478,7 +925,7 @@
   }
   .command-prompt {
     color: var(--accent);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-ui);
   }
   .command-field input {
     width: 100%;
@@ -486,16 +933,7 @@
     outline: 0;
     background: transparent;
     color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  .command-field select {
-    width: 100%;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: var(--text-strong);
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    cursor: pointer;
+    font: 12px var(--font-ui);
   }
   .detecting {
     color: var(--text-subtle);
@@ -509,6 +947,36 @@
     color: var(--text-subtle);
     font-size: 11px;
     line-height: 1.45;
+  }
+  .consent-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 18px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .consent-row input {
+    margin-top: 3px;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
+  }
+  .consent-row .hint-inline {
+    color: var(--text-subtle);
+  }
+  .inline-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .inline-link:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
   }
   .status-tip {
     display: flex;
@@ -539,7 +1007,8 @@
   .actions {
     display: flex;
     align-items: center;
-    gap: 14px;
+    flex-wrap: wrap;
+    gap: 8px 14px;
     margin-top: 25px;
   }
   .start-button {
@@ -571,6 +1040,132 @@
   .skip-button:hover {
     color: var(--text-strong);
   }
+  /* Wrapping toggle chips; capped so a long detection list stays a
+     tidy scroll area. Chaining to the outer region stays default so one
+     gesture keeps going. */
+  .cli-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding: 2px;
+  }
+  .cli-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 100%;
+    padding: 6px 12px 6px 9px;
+    border: 1px solid var(--separator);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .cli-chip:hover {
+    border-color: var(--text-subtle);
+    color: var(--text);
+  }
+  .cli-chip input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+  .cli-chip:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .cli-chip.picked {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+    /* Tonal accent wash; falls back to a flat fill where color-mix
+       is unavailable. */
+    background: var(--surface-active);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--text-strong);
+  }
+  .cli-chip.picked:hover {
+    border-color: var(--accent);
+    color: var(--text-strong);
+  }
+  .cli-chip-label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 600;
+  }
+  .cli-chip-hero {
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--app-bg);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .fleet-preview {
+    margin-top: auto;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    padding: 10px;
+  }
+  .fleet-empty {
+    padding: 12px 6px;
+    color: var(--text-subtle);
+    font-size: 11px;
+    line-height: 1.5;
+    text-align: center;
+  }
+  .fleet-tiling {
+    position: relative;
+    min-height: 150px;
+  }
+  .fleet-tile {
+    position: absolute;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface-bg);
+  }
+  .fleet-tile.hero {
+    border-color: var(--accent);
+  }
+  .fleet-tile-cli {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-width: 100%;
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .shuffle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 2px 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .shuffle-btn:hover {
+    color: var(--text-strong);
+  }
   :global(.onboarding :focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
@@ -583,6 +1178,9 @@
     .card {
       max-width: 520px;
       grid-template-columns: 1fr;
+      /* Stacked layout sizes to content; the page scrolls instead. */
+      height: auto;
+      max-height: none;
     }
     .intro {
       padding: 22px 24px;
@@ -600,6 +1198,7 @@
       max-width: 440px;
     }
     .terminal-preview,
+    .fleet-preview,
     .intro-foot {
       display: none;
     }
