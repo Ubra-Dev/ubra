@@ -47,6 +47,30 @@ export function closeSession(key: string): void {
   if (lease.id !== null) void lease.kill(lease.id).catch(console.error);
 }
 
+/**
+ * Drop ownership without killing: the daemon is gone (or never answered),
+ * so there is nothing to kill. In-flight spawns still self-clean on
+ * resolution via the shared cancelled flag. Returns evicted leases.
+ */
+export function evictSessions(keys: Iterable<string>): SessionLease[] {
+  const evicted: SessionLease[] = [];
+  for (const key of keys) {
+    const lease = sessions.get(key);
+    if (!lease) continue;
+    sessions.delete(key);
+    lease.cancelled = true;
+    evicted.push(lease);
+  }
+  return evicted;
+}
+
+/** Evict only leases that never resolved a live id (failed boot spawns). */
+export function evictDeadSessions(keys: Iterable<string>): SessionLease[] {
+  return evictSessions(
+    [...keys].filter((key) => sessions.get(key)?.id === null),
+  );
+}
+
 /** Late exits cannot delete a newer lease. */
 export function dropSession(key: string, lease: SessionLease): void {
   if (sessions.get(key) === lease) sessions.delete(key);

@@ -8,6 +8,7 @@ export interface AgentStatus {
   cwd?: string;
   agentInstanceId?: string;
   reason?: string;
+  sessionRef?: { kind: string; value: string };
 }
 export interface AgentTransition {
   eventId: string;

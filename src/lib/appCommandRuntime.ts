@@ -132,6 +132,7 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       case "documentation": await openUrl(`${REPO_URL}#readme`); break;
       case "report-issue": await openUrl(`${REPO_URL}/issues`); break;
       case "quit": await invoke("quit_app"); break;
+      case "quit-stop-agents": await invoke("quit_app_and_stop_agents"); break;
     }
     return true;
   } catch (error) {

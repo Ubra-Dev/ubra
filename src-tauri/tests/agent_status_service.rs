@@ -4,7 +4,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use ubra_lib::agent_status::{AgentStatusService, AgentUpdate};
-use ubra_lib::pty_manager::{PtyEventSink, PtyManager};
+use ubra_lib::pty_manager::{PtyEventSink, PtyManager, SpawnOptions};
 
 struct Sink;
 impl PtyEventSink for Sink {
@@ -56,14 +56,13 @@ done
             let _ = tx.send(update);
         });
         let pane = manager
-            .spawn(
-                Some(program.to_string_lossy().into_owned()),
-                Some(dir.to_string_lossy().into_owned()),
-                vec![],
-                80,
-                24,
-                None,
-            )
+            .spawn(SpawnOptions {
+                shell: Some(program.to_string_lossy().into_owned()),
+                cwd: Some(dir.to_string_lossy().into_owned()),
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            })
             .unwrap();
         Self {
             dir,

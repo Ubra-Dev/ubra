@@ -36,6 +36,7 @@ import {
   setZoomedPane,
   splitPaneInTab,
   stampPaneAgentCli,
+  stampPaneAgentSession,
   type Tab,
 } from "../src/lib/layout.ts";
 
@@ -419,6 +420,42 @@ describe("sanitizeLayout", () => {
     const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
     raw.workspaces[0].tabs[0].root.agentCli = ["claude"];
     assert.throws(() => sanitizeLayout(raw), /Invalid saved pane agentCli/);
+  });
+
+  it("preserves pane agent sessions for resume", () => {
+    const layout = sanitizeLayout({
+      version: 2,
+      activeWorkspaceId: "w",
+      workspaces: [
+        {
+          id: "w",
+          name: "w",
+          activeTabId: "t",
+          tabs: [
+            {
+              id: "t",
+              name: "t",
+              root: {
+                kind: "pane",
+                id: "p",
+                agentCli: "codex",
+                agentSession: { cli: "codex", value: "019dd790-abc" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const root = layout.workspaces[0].tabs[0].root;
+    assert.equal(root.kind, "pane");
+    if (root.kind === "pane") {
+      assert.deepEqual(root.agentSession, { cli: "codex", value: "019dd790-abc" });
+    }
+    for (const bad of ["codex", ["codex"], { cli: "codex" }, { value: "x" }, 42]) {
+      const raw = JSON.parse(JSON.stringify({ ...defaultLayout(), version: 2 }));
+      raw.workspaces[0].tabs[0].root.agentSession = bad;
+      assert.throws(() => sanitizeLayout(raw), /Invalid saved pane agent session/);
+    }
   });
 });
 
@@ -995,5 +1032,32 @@ describe("stampPaneAgentCli", () => {
     assert.equal(stampPaneAgentCli(layout, root.id, "   "), false);
     assert.equal(root.agentCli, undefined);
     assert.equal(stampPaneAgentCli(layout, "missing-pane", "claude"), false);
+  });
+});
+
+describe("stampPaneAgentSession", () => {
+  it("stamps sessions and reports only changes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-1"), true);
+    assert.deepEqual(root.agentSession, { cli: "codex", value: "id-1" });
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-1"), false);
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "id-2"), true);
+    assert.deepEqual(root.agentSession, { cli: "codex", value: "id-2" });
+    const reloaded = sanitizeLayout(JSON.parse(JSON.stringify(layout)));
+    const again = reloaded.workspaces[0].tabs[0].root;
+    if (again.kind !== "pane") throw new Error("Expected pane");
+    assert.deepEqual(again.agentSession, { cli: "codex", value: "id-2" });
+  });
+
+  it("refuses blanks and missing panes", () => {
+    const layout = defaultLayout();
+    const root = layout.workspaces[0].tabs[0].root;
+    if (root.kind !== "pane") throw new Error("Expected pane");
+    assert.equal(stampPaneAgentSession(layout, root.id, "  ", "id-1"), false);
+    assert.equal(stampPaneAgentSession(layout, root.id, "codex", "  "), false);
+    assert.equal(root.agentSession, undefined);
+    assert.equal(stampPaneAgentSession(layout, "missing-pane", "codex", "id-1"), false);
   });
 });

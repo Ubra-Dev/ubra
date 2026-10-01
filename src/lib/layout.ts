@@ -18,6 +18,14 @@ export interface PaneNode {
   cmdOnRestore?: boolean;
   /** Last agent CLI launched in this pane; rerun when it spawns fresh. */
   agentCli?: string;
+  /** Captured agent session for resume-after-restart (stale-tolerant). */
+  agentSession?: AgentSession;
+}
+
+/** Session captured from a running agent; `cli` names its producer. */
+export interface AgentSession {
+  cli: string;
+  value: string;
 }
 
 export interface SplitNode {
@@ -159,6 +167,33 @@ export function stampPaneAgentCli(
   const node = found ? findPane(found.tab.root, paneId) : null;
   if (!node) return false;
   node.agentCli = trimmed;
+  return true;
+}
+
+/**
+ * Remember the agent session observed in a pane, for resume-after-restart.
+ * True only when the stamp changes: agent updates arrive far more often
+ * than sessions do, and unchanged stamps must not dirty the layout.
+ */
+export function stampPaneAgentSession(
+  layout: Layout,
+  paneId: string,
+  cli: string,
+  value: string,
+): boolean {
+  const trimmedCli = cli.trim();
+  const trimmedValue = value.trim();
+  if (!trimmedCli || !trimmedValue) return false;
+  const found = findTabByPane(layout, paneId);
+  const node = found ? findPane(found.tab.root, paneId) : null;
+  if (!node) return false;
+  if (
+    node.agentSession?.cli === trimmedCli &&
+    node.agentSession.value === trimmedValue
+  ) {
+    return false;
+  }
+  node.agentSession = { cli: trimmedCli, value: trimmedValue };
   return true;
 }
 
@@ -461,6 +496,21 @@ function sanitizeNode(v: unknown, context: LoadContext, depth: number): LayoutNo
         throw new Error("Invalid saved pane command restore policy.");
       }
       node.cmdOnRestore = value["cmdOnRestore"];
+    }
+    if (value["agentSession"] !== undefined) {
+      const session: unknown = value["agentSession"];
+      const fields =
+        typeof session === "object" && session !== null && !Array.isArray(session)
+          ? (session as Record<string, unknown>)
+          : null;
+      if (
+        !fields ||
+        typeof fields["cli"] !== "string" ||
+        typeof fields["value"] !== "string"
+      ) {
+        throw new Error("Invalid saved pane agent session.");
+      }
+      node.agentSession = { cli: fields["cli"], value: fields["value"] };
     }
     return node;
   }
