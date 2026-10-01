@@ -340,7 +340,7 @@ async fn notify_agent(
     if let Some(kind) = kind {
         eprintln!("ubra: agent notification ({kind:?}): {title}");
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     if macos_notify::is_bundled() {
         return Ok(macos_notify::notify(&title, &body).await);
     }
