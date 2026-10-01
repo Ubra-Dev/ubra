@@ -51,6 +51,12 @@
      */
     onSpawn?: (liveId: number, attached: boolean, firstDelivery: boolean) => void;
     onDispose?: (liveId: number) => void;
+    /**
+     * Fired whenever PTY bytes reach the terminal — live output or
+     * restored scrollback — so owners can tell a live pane from a
+     * blank one (e.g. to drop a launch overlay at first paint).
+     */
+    onOutput?: () => void;
   }
   let {
     sessionKey,
@@ -65,6 +71,7 @@
     onExit,
     onSpawn,
     onDispose,
+    onOutput,
   }: Props = $props();
 
   let container: HTMLDivElement | undefined = $state();
@@ -318,7 +325,10 @@
         (event) => {
           if (disposed) return;
           const data = attachment.output(event.payload);
-          if (data !== null) term.write(data);
+          if (data !== null) {
+            term.write(data);
+            onOutput?.();
+          }
         },
       );
       if (disposed) {
@@ -397,6 +407,9 @@
       restored.chunks.forEach((chunk) => {
         term.write(chunk);
       });
+      // Buffered pre-spawn output (shell banner, prompt) means the pane
+      // is already visibly alive; report it like live output.
+      if (restored.chunks.length > 0) onOutput?.();
       if (restored.exit) handleExit(restored.exit.success, restored.exit.code);
       else if (snapshotError) {
         // A session that exited while unmounted must show respawn, not silently

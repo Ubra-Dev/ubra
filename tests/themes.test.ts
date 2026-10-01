@@ -27,6 +27,12 @@ const builtInThemeIds = [
   "rose-pine",
   "rose-pine-dawn",
   "vesper",
+  "night-owl",
+  "monokai",
+  "ayu-mirage",
+  "github-dark",
+  "everforest",
+  "oxocarbon",
 ] as const;
 
 describe("theme catalog", () => {

@@ -10,7 +10,7 @@
   import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
-  import { AGENT_LAUNCH_TIMEOUT_MS, agentLaunchReady } from "./agentLaunching";
+  import { AGENT_LAUNCH_GRACE_MS, AGENT_LAUNCH_TIMEOUT_MS, agentLaunchReady } from "./agentLaunching";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import { paneDisplayTitle, type PaneNode } from "./layout";
@@ -198,21 +198,30 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
-  // Agent launch overlay: shown from the moment we type an agent command
-  // until the backend reports recognized agent UI (or the wait times out).
-  // A new spawn supersedes any previous wait; exits and unmounts clear it.
+  // Agent launch overlay: armed when we type an agent command, but shown
+  // only if the pane stays blank past the grace delay — first PTY output
+  // dismisses the wait immediately, so the overlay never covers a visibly
+  // booting agent. Backend agent recognition and the timeout are
+  // backstops. A new spawn supersedes any previous wait; exits and
+  // unmounts clear it.
   let launchStartedAt = $state<number | null>(null);
   let launchTimedOut = $state(false);
+  let launchOverlayArmed = $state(false);
   let launchTimer: ReturnType<typeof setTimeout> | null = null;
   const reduceMotion =
     typeof window !== "undefined" &&
     typeof window.matchMedia === "function" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let launchShowTimer: ReturnType<typeof setTimeout> | null = null;
 
   function clearLaunchTimer(): void {
     if (launchTimer !== null) {
       clearTimeout(launchTimer);
       launchTimer = null;
+    }
+    if (launchShowTimer !== null) {
+      clearTimeout(launchShowTimer);
+      launchShowTimer = null;
     }
   }
 
@@ -220,13 +229,18 @@
     clearLaunchTimer();
     launchStartedAt = null;
     launchTimedOut = false;
+    launchOverlayArmed = false;
   }
 
   onMount(() => () => clearLaunchTimer());
 
   const launchReady = $derived(agentLaunchReady(agent.paneState(node.id)));
   const launching = $derived(
-    launchStartedAt !== null && !launchTimedOut && !launchReady && !exited,
+    launchStartedAt !== null &&
+      launchOverlayArmed &&
+      !launchTimedOut &&
+      !launchReady &&
+      !exited,
   );
   const launchLabel = $derived(
     `Launching ${agentLabel ?? node.agentCli?.trim().split(/\s+/)[0] ?? "agent"}…`,
@@ -248,6 +262,11 @@
     if (!command) return;
     const startedAt = Date.now();
     launchStartedAt = startedAt;
+    launchShowTimer = setTimeout(() => {
+      launchShowTimer = null;
+      // Arm only our own wait; a newer spawn supersedes this one.
+      if (launchStartedAt === startedAt) launchOverlayArmed = true;
+    }, AGENT_LAUNCH_GRACE_MS);
     launchTimer = setTimeout(() => {
       launchTimer = null;
       launchTimedOut = true;
@@ -263,6 +282,13 @@
         node.id,
       );
     });
+  }
+
+  function onTerminalOutput(): void {
+    // First paint wins: the pane is visibly booting, so there is
+    // nothing blank left to cover — no need to wait for backend
+    // agent recognition.
+    if (launchStartedAt !== null) clearLaunch();
   }
 
   function openMenu(e: MouseEvent): void {
@@ -398,6 +424,7 @@
         onExit={() => { exited = true; terminalCommands.changed(); }}
         onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}
+        onOutput={onTerminalOutput}
       />
     {/key}
     {#if launching}

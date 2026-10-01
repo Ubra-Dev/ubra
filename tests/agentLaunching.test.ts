@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  AGENT_LAUNCH_GRACE_MS,
   AGENT_LAUNCH_TIMEOUT_MS,
   agentLaunchExpired,
   agentLaunchReady,
@@ -36,6 +37,13 @@ describe("agentLaunchReady", () => {
     for (const state of ["working", "blocked", "done"] as const) {
       assert.equal(agentLaunchReady({ state }), true);
     }
+  });
+});
+
+describe("agent launch timings", () => {
+  it("shows the overlay only after a short grace, well before the timeout", () => {
+    assert.ok(AGENT_LAUNCH_GRACE_MS > 0);
+    assert.ok(AGENT_LAUNCH_GRACE_MS < AGENT_LAUNCH_TIMEOUT_MS);
   });
 });
 
