@@ -21,7 +21,8 @@ git(project, "config", "user.email", "ubra-smoke@example.invalid");
 writeFileSync(join(project, "README.md"), "Native release smoke project\n");
 git(project, "add", "README.md");
 git(project, "commit", "-m", "Initial smoke fixture");
-git(project, "remote", "add", "origin", remote);
+// A relative local URL avoids drive-letter parsing differences on Windows.
+git(project, "remote", "add", "origin", "../remote.git");
 git(project, "push", "--set-upstream", "origin", "main");
 
 const windows = process.platform === "win32";
