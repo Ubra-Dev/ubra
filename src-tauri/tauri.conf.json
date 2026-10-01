@@ -38,7 +38,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15"
-    }
+    },
+    "resources": ["resources/logo.png"]
   },
   "plugins": {
     "updater": {

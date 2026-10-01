@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { Image } from "@tauri-apps/api/image";
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
+import { resolveResource } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { aboutMetadata } from "./aboutDialog";
 import { acceleratorFor, canDispatch, menuGroups, type AppCommand, type CommandContext } from "./appCommands";
 import { dispatchCommand } from "./appCommandRuntime";
 import { toasts } from "./toasts.svelte.ts";
@@ -44,6 +47,19 @@ export class NativeMenuController {
     return resource;
   }
 
+  /**
+   * Brand logo for the native About dialog, kept alive with the menu.
+   * Null when unavailable; the dialog still works without it.
+   */
+  private async loadAboutIcon(): Promise<Image | null> {
+    try {
+      return this.own(await Image.fromPath(await resolveResource("resources/logo.png")));
+    } catch (error) {
+      console.error("ubra: about icon unavailable", error);
+      return null;
+    }
+  }
+
   start(): Promise<void> {
     if (!this.starting) {
       const predecessor = latest;
@@ -60,6 +76,7 @@ export class NativeMenuController {
       await predecessor?.dispose();
       if (this.disposed) return;
       const info = await invoke<{ name: string; version: string }>("app_info");
+      const aboutIcon = await this.loadAboutIcon();
       const groups: Submenu[] = [];
       let windowMenu: Submenu | undefined;
       let helpMenu: Submenu | undefined;
@@ -71,7 +88,9 @@ export class NativeMenuController {
           } else if (entry.system) {
             items.push(this.own(await PredefinedMenuItem.new({
               text: entry.label,
-              item: entry.system === "About" ? { About: { name: info.name, version: info.version } } : entry.system,
+              item: entry.system === "About"
+                ? { About: aboutMetadata(info.name, info.version, aboutIcon ?? undefined) }
+                : entry.system,
             })));
           } else if (entry.action) {
             const action = entry.action;
