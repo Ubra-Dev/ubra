@@ -5785,7 +5785,7 @@ dependencies = [
  "anyhow",
  "block2",
  "fs2",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac",
  "libc",
  "objc2",
