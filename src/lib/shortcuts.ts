@@ -26,7 +26,8 @@ export type ShortcutAction =
   | "swap-neighbor"
   | "resize-pane"
   | "move-pane-to-new-tab"
-  | "move-pane-to-new-workspace";
+  | "move-pane-to-new-workspace"
+  | "toggle-notes";
 
 export interface ShortcutBinding {
   action: ShortcutAction;
@@ -75,6 +76,7 @@ export const SHORTCUTS: ShortcutBinding[] = [
   { action: "resize-pane", key: "arrowdown", mod: false, shift: true, alt: true, dir: "down", cap: "↓", blurb: "Grow pane down" },
   { action: "move-pane-to-new-tab", key: "t", mod: true, shift: false, alt: true, cap: "T", blurb: "Move pane to new tab" },
   { action: "move-pane-to-new-workspace", key: "n", mod: true, shift: false, alt: true, cap: "N", blurb: "Move pane to new workspace" },
+  { action: "toggle-notes", key: "n", mod: true, shift: true, alt: false, cap: "N", blurb: "Toggle notes panel" },
 ];
 
 /** Minimal key-event shape for matching (subset of KeyboardEvent). */

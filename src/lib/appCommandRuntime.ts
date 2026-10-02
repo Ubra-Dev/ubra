@@ -112,6 +112,7 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       case "split-right": store.splitPane(cur!.paneId, "row"); break;
       case "split-down": store.splitPane(cur!.paneId, "col"); break;
       case "toggle-zoom": store.toggleZoomPane(cur!.paneId); break;
+      case "toggle-notes": store.toggleRightPanelView("notes"); break;
       case "prev-tab": store.cycleTab(-1); break;
       case "next-tab": store.cycleTab(1); break;
       case "jump-tab": store.jumpTab(request.index!); break;
