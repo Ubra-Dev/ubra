@@ -340,7 +340,7 @@ async fn notify_agent(
     if let Some(kind) = kind {
         eprintln!("ubra: agent notification ({kind:?}): {title}");
     }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     if macos_notify::is_bundled() {
         return Ok(macos_notify::notify(&title, &body).await);
     }
@@ -384,7 +384,7 @@ struct ShellState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let builder = if std::env::var_os("TAURI_WEBDRIVER_PORT").is_some() {
         builder.plugin(tauri_plugin_wdio_webdriver::init())
     } else {
