@@ -18,7 +18,7 @@ async function waitForFile(path, timeoutMs = 60_000) {
 describe("packaged release smoke", () => {
   it("launches, executes a PTY command, and renders the workspace explorer", async () => {
     assert.ok(process.env.APP_BINARY, "APP_BINARY must point to the installed packaged app");
-    assert.equal(await browser.getTitle(), "Ubra");
+    assert.equal(await browser.getTitle(), "Ubra — Agent runtime");
     await waitForFile(join(project, "marker.txt"));
     assert.equal((await browser.$("body").getText()).includes("Native Smoke"), true);
 
@@ -38,10 +38,19 @@ describe("packaged release smoke", () => {
 
     const message = await browser.$('textarea[aria-label="Commit message"]');
     await message.setValue("Native smoke commit");
-    await browser.$("button=Commit").click();
-    await browser.$(`[aria-label="Unstage ${marker}"]`).waitForExist({ reverse: true });
+    const commitButton = await browser.$("button=Commit");
+    await commitButton.waitForEnabled();
+    await commitButton.click();
+    await browser.waitUntil(() => {
+      try {
+        return execFileSync("git", ["-C", project, "log", "-1", "--pretty=%s"], { encoding: "utf8" }).trim() === "Native smoke commit";
+      } catch {
+        return false;
+      }
+    }, { timeout: 30_000, timeoutMsg: "Source Control did not create the local commit" });
 
     const push = await browser.$('button[aria-label="Push"]');
+    await push.waitForEnabled();
     await push.click();
     await browser.waitUntil(() => {
       try {
