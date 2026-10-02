@@ -4,6 +4,7 @@
   import ExplorerView from "./ExplorerView.svelte";
   import Icon from "./Icon.svelte";
   import { MOTION_MED_MS, motionMs } from "./motion";
+  import NotesView from "./NotesView.svelte";
   import {
     MAX_SIDEBAR_WIDTH,
     MIN_SIDEBAR_WIDTH,
@@ -11,10 +12,17 @@
   } from "./sidebarResize";
   import SourceControlView from "./SourceControlView.svelte";
   import { frameCoalescer } from "./schedule";
-  import { store } from "./store.svelte";
+  import { store, type RightPanelView } from "./store.svelte";
 
   const ws = $derived(store.workspace());
   const root = $derived(store.activeWorkspaceRoot());
+  const panelLabel = $derived(
+    store.rightPanelView === "explorer"
+      ? "Explorer"
+      : store.rightPanelView === "source-control"
+        ? "Source Control"
+        : "Notes",
+  );
   let picking = $state(false);
   let error = $state<string | null>(null);
 
@@ -36,11 +44,6 @@
     } finally {
       picking = false;
     }
-  }
-
-  function showView(view: "explorer" | "source-control"): void {
-    store.setRightPanelView(view);
-    store.setRightPanelOpen(true);
   }
 
   // Width resize mirrors the left sidebar: the handle sits on the panel's
@@ -89,102 +92,94 @@
       store.setRightPanelWidth(MAX_SIDEBAR_WIDTH);
     }
   }
+
+  const views: { id: RightPanelView; title: string; icon: "folder" | "git-branch" | "book" }[] = [
+    { id: "explorer", title: "Explorer", icon: "folder" },
+    { id: "source-control", title: "Source Control", icon: "git-branch" },
+    { id: "notes", title: "Notes", icon: "book" },
+  ];
 </script>
 
 {#if store.layout && ws}
-  {#if store.rightPanelOpen}
-    <!-- Transform-only so show/hide animates without touching the drag-resized width. -->
-    <aside
-      class="rightbar"
-      aria-label="Explorer and source control"
-      style="width: {store.rightPanelWidth}px"
-      transition:fly={{ x: 16, duration: motionMs(MOTION_MED_MS) }}
-    >
-      <div class="tabs" role="tablist" aria-label="Right sidebar views">
+  <div class="rightwrap">
+    {#if store.rightPanelOpen}
+      <!-- Transform-only so show/hide animates without touching the drag-resized width. -->
+      <aside
+        class="rightbar"
+        aria-label={panelLabel}
+        style="width: {store.rightPanelWidth}px"
+        transition:fly={{ x: 16, duration: motionMs(MOTION_MED_MS) }}
+      >
+        <div class="body">
+          {#if store.rightPanelView === "notes"}
+            {#key ws.id}
+              <NotesView workspaceId={ws.id} />
+            {/key}
+          {:else if root}
+            {#key ws.id + root + store.rightPanelView}
+              {#if store.rightPanelView === "explorer"}
+                <ExplorerView root={root} />
+              {:else}
+                <SourceControlView root={root} />
+              {/if}
+            {/key}
+          {:else}
+            <div class="empty">
+              <p>No folder open for this workspace.</p>
+              <button
+                class="choose"
+                disabled={picking}
+                onclick={chooseRoot}
+              >
+                {picking ? "Opening folders…" : "Choose a project folder"}
+              </button>
+              {#if error}
+                <p class="error" role="alert">{error}</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="resize-x"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize right sidebar width"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={store.rightPanelWidth}
+          tabindex="0"
+          onpointerdown={startWidthDrag}
+          onpointermove={moveWidthDrag}
+          onpointerup={endWidthDrag}
+          onpointercancel={endWidthDrag}
+          onkeydown={onWidthKey}
+        ></div>
+      </aside>
+    {/if}
+    <div class="rail" role="tablist" aria-label="Right sidebar views">
+      {#each views as view (view.id)}
         <button
           role="tab"
-          class:active={store.rightPanelView === "explorer"}
-          aria-selected={store.rightPanelView === "explorer"}
-          title="Explorer"
-          onclick={() => store.setRightPanelView("explorer")}
+          title={view.title}
+          aria-label={view.title}
+          aria-selected={store.rightPanelOpen && store.rightPanelView === view.id}
+          class:active={store.rightPanelOpen && store.rightPanelView === view.id}
+          onclick={() => store.toggleRightPanelView(view.id)}
         >
-          <Icon name="folder" size={13} />
-          <span>Explorer</span>
+          <Icon name={view.icon} size={15} />
         </button>
-        <button
-          role="tab"
-          class:active={store.rightPanelView === "source-control"}
-          aria-selected={store.rightPanelView === "source-control"}
-          title="Source Control"
-          onclick={() => store.setRightPanelView("source-control")}
-        >
-          <Icon name="git-branch" size={13} />
-          <span>Source Control</span>
-        </button>
-      </div>
-      <div class="body">
-        {#if root}
-          {#key ws.id + root + store.rightPanelView}
-            {#if store.rightPanelView === "explorer"}
-              <ExplorerView root={root} />
-            {:else}
-              <SourceControlView root={root} />
-            {/if}
-          {/key}
-        {:else}
-          <div class="empty">
-            <p>No folder open for this workspace.</p>
-            <button
-              class="choose"
-              disabled={picking}
-              onclick={chooseRoot}
-            >
-              {picking ? "Opening folders…" : "Choose a project folder"}
-            </button>
-            {#if error}
-              <p class="error" role="alert">{error}</p>
-            {/if}
-          </div>
-        {/if}
-      </div>
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="resize-x"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize right sidebar width"
-        aria-valuemin={MIN_SIDEBAR_WIDTH}
-        aria-valuemax={MAX_SIDEBAR_WIDTH}
-        aria-valuenow={store.rightPanelWidth}
-        tabindex="0"
-        onpointerdown={startWidthDrag}
-        onpointermove={moveWidthDrag}
-        onpointerup={endWidthDrag}
-        onpointercancel={endWidthDrag}
-        onkeydown={onWidthKey}
-      ></div>
-    </aside>
-  {:else}
-    <div class="rail" aria-label="Right sidebar">
-      <button
-        title="Explorer"
-        aria-label="Show Explorer"
-        onclick={() => showView("explorer")}
-      >
-        <Icon name="folder" size={15} />
-      </button>
-      <button
-        title="Source Control"
-        aria-label="Show Source Control"
-        onclick={() => showView("source-control")}
-      >
-        <Icon name="git-branch" size={15} />
-      </button>
+      {/each}
     </div>
-  {/if}
+  </div>
 {/if}
 
 <style>
+  .rightwrap {
+    display: flex;
+    flex: 0 0 auto;
+    min-height: 0;
+  }
   .rightbar {
     position: relative;
     display: flex;
@@ -220,42 +215,6 @@
   .resize-x:focus-visible::after,
   .resize-x:active::after {
     background: var(--accent);
-  }
-  .tabs {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 2px;
-    padding: 8px 6px 6px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tabs button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 1 1 0;
-    min-width: 0;
-    gap: 6px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    font: inherit;
-    padding: 5px 6px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .tabs button span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .tabs button:hover {
-    color: var(--text-strong);
-    background: var(--surface-bg);
-  }
-  .tabs button.active {
-    color: var(--text-strong);
-    background: var(--surface-active);
   }
   .body {
     display: flex;
@@ -317,5 +276,9 @@
   .rail button:hover {
     color: var(--text-strong);
     background: var(--surface-bg);
+  }
+  .rail button.active {
+    color: var(--text-strong);
+    background: var(--surface-active);
   }
 </style>

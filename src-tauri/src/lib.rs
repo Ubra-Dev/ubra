@@ -7,6 +7,7 @@ pub mod git;
 pub mod git_branch;
 pub mod layout_store;
 pub mod macos_notify;
+pub mod notes;
 mod process_tree;
 pub mod pty_manager;
 pub mod screen_rules;
@@ -223,6 +224,72 @@ fn fs_list_dir(root: String, path: String) -> Result<files::DirListing, String> 
 #[tauri::command]
 fn fs_read_file(root: String, path: String) -> Result<files::FileContent, String> {
     files::read_file(&root, &path)
+}
+
+#[tauri::command]
+fn notes_list(
+    app: AppHandle,
+    scope: String,
+    workspace_id: Option<String>,
+) -> Result<notes::NoteListing, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::list_notes(&dir, &scope, workspace_id.as_deref())
+}
+
+#[tauri::command]
+fn notes_read(
+    app: AppHandle,
+    scope: String,
+    workspace_id: Option<String>,
+    name: String,
+) -> Result<notes::NoteContent, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::read_note(&dir, &scope, workspace_id.as_deref(), &name)
+}
+
+#[tauri::command]
+fn notes_write(
+    app: AppHandle,
+    scope: String,
+    workspace_id: Option<String>,
+    name: String,
+    content: String,
+) -> Result<notes::NoteEntry, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::write_note(&dir, &scope, workspace_id.as_deref(), &name, &content)
+}
+
+#[tauri::command]
+fn notes_rename(
+    app: AppHandle,
+    scope: String,
+    workspace_id: Option<String>,
+    old_name: String,
+    new_name: String,
+) -> Result<notes::NoteEntry, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::rename_note(&dir, &scope, workspace_id.as_deref(), &old_name, &new_name)
+}
+
+#[tauri::command]
+fn notes_delete(
+    app: AppHandle,
+    scope: String,
+    workspace_id: Option<String>,
+    name: String,
+) -> Result<(), String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::delete_note(&dir, &scope, workspace_id.as_deref(), &name)
+}
+
+#[tauri::command]
+fn notes_search(
+    app: AppHandle,
+    query: String,
+    workspace_id: Option<String>,
+) -> Result<notes::NoteSearchResults, String> {
+    let dir = data_dir(&app).map_err(|e| e.to_string())?;
+    notes::search_notes(&dir, &query, workspace_id.as_deref())
 }
 
 #[tauri::command]
@@ -531,6 +598,12 @@ pub fn run() {
             reset_layout,
             fs_list_dir,
             fs_read_file,
+            notes_list,
+            notes_read,
+            notes_write,
+            notes_rename,
+            notes_delete,
+            notes_search,
             git_status,
             git_diff_file,
             git_stage,

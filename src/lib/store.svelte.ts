@@ -82,7 +82,7 @@ import {
 } from "./sidebarResize";
 
 export type CloseKind = "workspace" | "tab" | "pane";
-export type RightPanelView = "explorer" | "source-control";
+export type RightPanelView = "explorer" | "source-control" | "notes";
 
 export interface PendingClose {
   kind: CloseKind;
@@ -268,7 +268,11 @@ class AppStore {
       const savedLeftOpen = window.localStorage.getItem("ubra.leftPanelOpen");
       if (savedLeftOpen !== null) this.leftPanelOpen = savedLeftOpen !== "false";
       const savedPanelView = window.localStorage.getItem("ubra.rightPanelView");
-      if (savedPanelView === "explorer" || savedPanelView === "source-control") {
+      if (
+        savedPanelView === "explorer" ||
+        savedPanelView === "source-control" ||
+        savedPanelView === "notes"
+      ) {
         this.rightPanelView = savedPanelView;
       }
       const savedAgentCli = window.localStorage.getItem("ubra.lastAgentCli");
@@ -613,6 +617,19 @@ class AppStore {
   setRightPanelView(view: RightPanelView): void {
     this.rightPanelView = view;
     this.savePref("ubra.rightPanelView", view);
+  }
+
+  /**
+   * Rail click: switch to the view and reveal the panel; clicking the
+   * active view's icon again collapses the panel.
+   */
+  toggleRightPanelView(view: RightPanelView): void {
+    if (this.rightPanelOpen && this.rightPanelView === view) {
+      this.setRightPanelOpen(false);
+    } else {
+      this.setRightPanelView(view);
+      this.setRightPanelOpen(true);
+    }
   }
 
   isAgentMuted(cli: string): boolean {

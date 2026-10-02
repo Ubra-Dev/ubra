@@ -47,6 +47,9 @@ export function canDispatch(request: CommandRequest, ctx: CommandContext): boole
     if (action === "paste") return ctx.terminalRunning;
     return action === "select-all";
   }
+  // Notes toggling works while editing too (it is never a text key),
+  // so it reads the gate before textFocus blocks every other shortcut.
+  if (action === "toggle-notes") return ctx.ready && !ctx.blocked && ctx.hasWorkspace;
   if (!ctx.ready || ctx.blocked || ctx.textFocus) return false;
   if (["new-workspace", "open-project", "new-empty-workspace",
        "font-bigger", "font-smaller", "font-reset"].includes(action)) return true;
@@ -109,7 +112,7 @@ export function menuGroups(isMac: boolean): MenuGroup[] {
     { label: "Terminal", items: [entry("split-right", "Split Right"), entry("split-down", "Split Down"), null,
       entry("rename-pane", "Rename Pane…"), entry("restart-terminal", "Restart Terminal"), null,
       entry("move-pane-to-new-tab", "Move Pane to New Tab"), entry("move-pane-to-new-workspace", "Move Pane to New Workspace")] },
-    { label: "View", items: [entry("toggle-zoom", "Zoom Pane"), null,
+    { label: "View", items: [entry("toggle-zoom", "Zoom Pane"), entry("toggle-notes", "Toggle Notes"), null,
       entry("font-bigger", "Increase Text Size"), entry("font-smaller", "Decrease Text Size"), entry("font-reset", "Reset Text Size"),
       null, entry("fullscreen", "Full Screen", false)] },
     { label: "Window", items: [entry("minimize", "Minimize"),
