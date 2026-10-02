@@ -384,7 +384,7 @@ struct ShellState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let builder = if std::env::var_os("TAURI_WEBDRIVER_PORT").is_some() {
         builder.plugin(tauri_plugin_wdio_webdriver::init())
     } else {

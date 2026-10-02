@@ -348,7 +348,15 @@ jobs:
           if ($process.ExitCode -notin @(0, 3010)) { throw "MSI installation failed: $($process.ExitCode)" }
           $app = Get-ChildItem 'C:\Program Files' -Filter ubra.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $app) { throw 'Installed ubra.exe was not found under Program Files' }
-          "APP_BINARY=$($app.FullName)" >> $env:GITHUB_ENV
+          # tauri-driver hands the executable path through EdgeDriver's binary
+          # capability. Keep that path free of spaces to avoid WebView2's
+          # DevToolsActivePort startup failure on Windows runners.
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'ubra-smoke'
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          Copy-Item (Join-Path $app.DirectoryName '*') $smokeDir -Recurse -Force
+          $smokeApp = Join-Path $smokeDir 'ubra.exe'
+          if (-not (Test-Path $smokeApp)) { throw 'Copied smoke app was not found' }
+          "APP_BINARY=$smokeApp" >> $env:GITHUB_ENV
 
       - name: Prepare isolated PTY and git fixtures
         run: node scripts/prepare-native-smoke.mjs
