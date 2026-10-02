@@ -14,8 +14,11 @@ export const config = {
     appArgs: [],
   }]],
   capabilities: [{
-    browserName: "tauri",
-    "tauri:options": { application: process.env.APP_BINARY },
+    browserName: process.platform === "win32" ? "wry" : "tauri",
+    "tauri:options": {
+      application: process.env.APP_BINARY,
+      ...(process.platform === "win32" ? { webviewOptions: {} } : {}),
+    },
   }],
   mochaOpts: { timeout: 120_000 },
   waitforTimeout: 30_000,
