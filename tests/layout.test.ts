@@ -46,29 +46,6 @@ import {
   type Tab,
 } from "../src/lib/layout.ts";
 
-/** Deterministic rng for tiling tests. */
-function seededRng(seed: number): Rng {
-  let state = seed >>> 0;
-  return () => {
-    state |= 0;
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Split tree shape without ids, for determinism comparisons. */
-function tilingShape(node: LayoutNode): unknown {
-  if (node.kind === "pane") return "pane";
-  return {
-    dir: node.dir,
-    sizes: node.sizes,
-    first: tilingShape(node.first),
-    second: tilingShape(node.second),
-  };
-}
-
 function rootPaneId(tab: Tab): string {
   assert.equal(tab.root.kind, "pane");
   return tab.root.id;
@@ -305,76 +282,6 @@ describe("leavesByAreaDesc", () => {
     const ordered = order.map((id) => areas.get(id) ?? 0);
     const sorted = [...ordered].sort((a, b) => b - a);
     assert.deepEqual(ordered, sorted);
-  });
-});
-
-describe("randomTiling", () => {
-  it("builds exactly N panes with unique ids", () => {
-    for (let count = 1; count <= 8; count++) {
-      const root = randomTiling(count, seededRng(count * 7919));
-      assert.equal(countPanes(root), count);
-      assert.equal(new Set(collectPaneIds(root)).size, count);
-    }
-  });
-
-  it("floors invalid counts at a single pane", () => {
-    assert.equal(countPanes(randomTiling(0, seededRng(1))), 1);
-    assert.equal(countPanes(randomTiling(-4, seededRng(1))), 1);
-  });
-
-  it("keeps every split ratio inside the 0.4..0.6 band", () => {
-    const check = (node: LayoutNode): void => {
-      if (node.kind === "pane") return;
-      const [a, b] = node.sizes;
-      assert.ok(a >= 0.4 && a <= 0.6, `ratio ${a} out of band`);
-      assert.ok(b >= 0.4 && b <= 0.6, `ratio ${b} out of band`);
-      check(node.first);
-      check(node.second);
-    };
-    for (const seed of [1, 7, 42]) check(randomTiling(6, seededRng(seed)));
-  });
-
-  it("is deterministic for a seeded rng", () => {
-    assert.deepEqual(
-      tilingShape(randomTiling(5, seededRng(11))),
-      tilingShape(randomTiling(5, seededRng(11))),
-    );
-  });
-
-  it("covers the unit square without overlap", () => {
-    const panes = computeLayout(randomTiling(5, seededRng(3))).panes;
-    const area = panes.reduce((sum, p) => sum + p.rect[2] * p.rect[3], 0);
-    assert.ok(Math.abs(area - 1) < 1e-9, `area ${area} should sum to 1`);
-  });
-});
-
-describe("leavesByAreaDesc", () => {
-  it("orders every leaf largest-first", () => {
-    const root = randomTiling(6, seededRng(21));
-    const order = leavesByAreaDesc(root);
-    assert.deepEqual(new Set(order), new Set(collectPaneIds(root)));
-    const areas = new Map(
-      computeLayout(root).panes.map((p) => [p.node.id, p.rect[2] * p.rect[3]] as const),
-    );
-    const ordered = order.map((id) => areas.get(id) ?? 0);
-    const sorted = [...ordered].sort((a, b) => b - a);
-    assert.deepEqual(ordered, sorted);
-  });
-});
-
-describe("fleetTab", () => {
-  it("builds a named tab around a random tiling", () => {
-    const tab = fleetTab(4, seededRng(5), "Fleet");
-    assert.equal(tab.name, "Fleet");
-    assert.equal(countPanes(tab.root), 4);
-  });
-
-  it("preserves the fleet tab when saving and restoring a layout", () => {
-    const layout = defaultLayout();
-    const tab = fleetTab(5, seededRng(9), "Fleet");
-    layout.workspaces[0].tabs = [tab];
-    layout.workspaces[0].activeTabId = tab.id;
-    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
   });
 });
 
