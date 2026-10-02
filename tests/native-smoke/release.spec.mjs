@@ -25,6 +25,7 @@ describe("packaged release smoke", () => {
     await browser.$('button[role="tab"][title="Explorer"]').click();
     const explorer = await browser.$('[role="tree"][aria-label="Workspace files"]');
     await explorer.waitForExist();
+    await browser.$('button[aria-label="Refresh"]').click();
     await browser.$('[role="treeitem"][title$="marker.txt"]').waitForExist();
   });
 
