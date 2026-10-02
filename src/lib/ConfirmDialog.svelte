@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { fade } from "svelte/transition";
   import { store } from "./store.svelte";
+  import { MOTION_FAST_MS, motionMs, rise } from "./motion";
   import { overlayFocus } from "./overlayFocus";
 
 
@@ -52,12 +54,14 @@
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="backdrop"
+    transition:fade={{ duration: motionMs(MOTION_FAST_MS) }}
     onclick={(e) => {
       if (e.target === e.currentTarget) store.cancelPendingClose();
     }}
   >
     <div
       class="dialog"
+      transition:rise
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="confirm-close-title"

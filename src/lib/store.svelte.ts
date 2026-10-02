@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { agentClis } from "./agentClis.svelte";
+import { DeferredSwitch } from "./deferredSwitch";
 import {
   activeTab,
   activeWorkspace,
@@ -19,9 +20,9 @@ import {
   findPane,
   findTabByPane,
   findWorkspaceByRoot,
-  gridTab,
   moveWorkspace,
   preferredAgentCli as pickPreferredAgentCli,
+  presetTab,
   resizePaneInTab,
   resolveWorkspaceRoot,
   sanitizeLayout,
@@ -35,6 +36,7 @@ import {
   type PaneNode,
   type Tab,
   type Workspace,
+  type WorkspaceLayoutPreset,
 } from "./layout";
 import { implicitLaunchCommand } from "./agentLaunch";
 import { restoreCommandFor } from "./agentResume";
@@ -115,7 +117,7 @@ class AppStore {
   saveError = $state<string | null>(null);
   /** True while a layout save is scheduled or in flight. */
   saving = $state(false);
-  rightPanelOpen = $state(true);
+  rightPanelOpen = $state(false);
   rightPanelView = $state<RightPanelView>("explorer");
   rightPanelWidth = $state<number>(DEFAULT_RIGHT_PANEL_WIDTH);
   leftPanelOpen = $state(true);
@@ -170,6 +172,21 @@ class AppStore {
   paneFocusTarget = $state<string | null>(null);
   /** Pane node id that should open terminal find; cleared on take. */
   paneFindTarget = $state<string | null>(null);
+  /**
+   * Workspace id highlighted in the sidebar while a deferred switch is still
+   * scheduled; null when idle. Lets the highlight paint on click, a frame
+   * before the canvas reveal commits.
+   */
+  pendingWorkspaceId = $state<string | null>(null);
+  /** Bumped whenever a different workspace becomes visible (reveal animation). */
+  workspaceSwitchToken = $state(0);
+  /** Bumped whenever a different tab becomes visible (reveal animation). */
+  tabSwitchToken = $state(0);
+  private deferredSwitch = new DeferredSwitch({
+    onPendingChange: (id) => {
+      this.pendingWorkspaceId = id;
+    },
+  });
   private startup = new StartupCommands();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTerminalCommands = new PendingCommands();
@@ -643,11 +660,11 @@ class AppStore {
   }
 
   /** New workspace: native folder picker, defaulting to the last used agent CLI. */
-  addWorkspace(withGrid = false): void {
-    void this.addWorkspaceFromPicker(withGrid);
+  addWorkspace(preset: WorkspaceLayoutPreset = "single"): void {
+    void this.addWorkspaceFromPicker(preset);
   }
 
-  async addWorkspaceFromPicker(withGrid = false): Promise<void> {
+  async addWorkspaceFromPicker(preset: WorkspaceLayoutPreset = "single"): Promise<void> {
     if (!this.layout) return;
     let dir: string | string[] | null;
     try {
@@ -663,7 +680,7 @@ class AppStore {
     if (typeof dir !== "string" || dir.trim() === "") return;
     const existing = findWorkspaceByRoot(this.layout.workspaces, dir);
     if (existing) {
-      this.switchWorkspace(existing.id);
+      this.requestSwitchWorkspace(existing.id);
       toasts.push(`"${existing.name}" is already open.`, "", "", {
         kind: "copy",
       });
@@ -672,7 +689,7 @@ class AppStore {
     this.createWorkspace(
       dir,
       implicitLaunchCommand(this.autoLaunchAgent, this.lastUsedAgentCli || null),
-      withGrid,
+      preset,
     );
   }
 
@@ -680,12 +697,12 @@ class AppStore {
   createWorkspace(
     projectDirectory: string,
     command: string | null,
-    withGrid: boolean,
+    preset: WorkspaceLayoutPreset,
   ): string | null {
     if (!this.layout) return null;
     const workspace = defaultWorkspace(baseName(projectDirectory) || "Project");
-    if (withGrid) {
-      const tab = gridTab();
+    if (preset !== "single") {
+      const tab = presetTab(preset);
       workspace.tabs = [tab];
       workspace.activeTabId = tab.id;
     }
@@ -693,6 +710,7 @@ class AppStore {
     workspace.root = projectDirectory;
     this.layout.workspaces.push(workspace);
     this.layout.activeWorkspaceId = workspace.id;
+    this.workspaceSwitchToken += 1;
     const tab = workspace.tabs[0];
     for (const id of collectPaneIds(tab.root)) {
       const node = findPane(tab.root, id);
@@ -702,7 +720,7 @@ class AppStore {
     const first = collectPaneIds(tab.root)[0];
     const pane = first ? findPane(tab.root, first) : null;
     if (!pane) return null;
-    if (withGrid) this.paneFocusTarget = pane.id;
+    if (preset !== "single") this.paneFocusTarget = pane.id;
     if (command?.trim()) {
       workspace.defaultCli = command.trim();
     }
@@ -716,15 +734,51 @@ class AppStore {
     const ws = defaultWorkspace(`Workspace ${this.layout.workspaces.length + 1}`);
     this.layout.workspaces.push(ws);
     this.layout.activeWorkspaceId = ws.id;
+    this.workspaceSwitchToken += 1;
     this.saveSoon();
   }
 
   switchWorkspace(id: string): void {
     if (!this.layout) return;
-    if (this.layout.workspaces.some((w) => w.id === id)) {
+    if (
+      this.layout.workspaces.some((w) => w.id === id) &&
+      this.layout.activeWorkspaceId !== id
+    ) {
       this.layout.activeWorkspaceId = id;
+      this.workspaceSwitchToken += 1;
       this.saveSoon();
     }
+  }
+
+  /**
+   * UI-initiated workspace switch: the sidebar highlights `id` synchronously
+   * while the canvas reveal commits on the next frame, so the click always
+   * paints first. Rapid requests collapse; only the latest commits.
+   */
+  requestSwitchWorkspace(id: string): void {
+    if (!this.layout) return;
+    if (!this.layout.workspaces.some((w) => w.id === id)) return;
+    if (id === this.layout.activeWorkspaceId) return;
+    this.deferredSwitch.request(id, () => this.switchWorkspace(id));
+  }
+
+  /**
+   * UI-initiated reveal: highlights the pane's workspace synchronously and
+   * switches workspace+tab on the next frame. Already-visible panes reveal
+   * synchronously since there is nothing to defer.
+   */
+  requestRevealPane(nodeId: string): void {
+    if (!this.layout) return;
+    const found = findTabByPane(this.layout, nodeId);
+    if (!found) return;
+    if (
+      found.ws.id === this.layout.activeWorkspaceId &&
+      found.tab.id === found.ws.activeTabId
+    ) {
+      this.revealPane(nodeId);
+      return;
+    }
+    this.deferredSwitch.request(found.ws.id, () => this.revealPane(nodeId));
   }
 
   renameWorkspace(id: string, name: string): void {
@@ -782,6 +836,7 @@ class AppStore {
 
   private doCloseWorkspace(id: string): void {
     if (!this.layout) return;
+    if (this.pendingWorkspaceId === id) this.deferredSwitch.cancel();
     const closing = this.layout.workspaces.find((w) => w.id === id);
     if (closing) {
       for (const tab of closing.tabs) {
@@ -792,20 +847,29 @@ class AppStore {
     if (this.layout.activeWorkspaceId === id) {
       this.layout.activeWorkspaceId =
         this.layout.workspaces[this.layout.workspaces.length - 1]?.id ?? "";
+      this.workspaceSwitchToken += 1;
     }
     // Closing the last workspace reveals the empty-state overlay instead of
     // resurrecting a blank workspace.
     this.saveSoon(true);
   }
 
-  addTab(): void {
+  addTab(): string | null {
     const ws = this.workspace();
-    if (!ws) return;
+    if (!ws) return null;
     const tab = defaultTab(`Tab ${ws.tabs.length + 1}`);
     if (tab.root.kind === "pane") this.applyWorkspaceDefaults(ws, tab.root);
     ws.tabs.push(tab);
     ws.activeTabId = tab.id;
+    this.tabSwitchToken += 1;
     this.saveSoon();
+    return tab.root.kind === "pane" ? tab.root.id : null;
+  }
+
+  /** Open a tab and queue an agent command to run in its pane. */
+  addTabWithCommand(command: string): void {
+    const paneId = this.addTab();
+    if (paneId) this.queueAgentCommand(paneId, command);
   }
 
   requestCloseTab(id: string): void {
@@ -831,17 +895,22 @@ class AppStore {
     if (ws.tabs.length <= 1) {
       ws.tabs = [defaultTab()];
       ws.activeTabId = ws.tabs[0].id;
+      this.tabSwitchToken += 1;
     } else {
       ws.tabs = ws.tabs.filter((t) => t.id !== id);
-      if (ws.activeTabId === id) ws.activeTabId = ws.tabs[ws.tabs.length - 1].id;
+      if (ws.activeTabId === id) {
+        ws.activeTabId = ws.tabs[ws.tabs.length - 1].id;
+        this.tabSwitchToken += 1;
+      }
     }
     this.saveSoon(true);
   }
 
   switchTab(id: string): void {
     const ws = this.workspace();
-    if (ws && ws.tabs.some((t) => t.id === id)) {
+    if (ws && ws.tabs.some((t) => t.id === id) && ws.activeTabId !== id) {
       ws.activeTabId = id;
+      this.tabSwitchToken += 1;
       this.saveSoon();
     }
   }
@@ -1035,6 +1104,14 @@ class AppStore {
     if (!this.layout) return;
     const found = findTabByPane(this.layout, nodeId);
     if (!found) return;
+    const wsChanged = this.layout.activeWorkspaceId !== found.ws.id;
+    if (wsChanged) {
+      this.workspaceSwitchToken += 1;
+    } else if (found.ws.activeTabId !== found.tab.id) {
+      // One reveal per jump: the workspace stagger covers cross-workspace
+      // reveals, the tab fade covers same-workspace ones.
+      this.tabSwitchToken += 1;
+    }
     this.layout.activeWorkspaceId = found.ws.id;
     found.ws.activeTabId = found.tab.id;
     this.saveSoon();
@@ -1068,7 +1145,7 @@ class AppStore {
     if (!this.layout) return null;
     if (this.layout.workspaces.length === 0) {
       if (!projectDirectory) return null;
-      const paneId = this.createWorkspace(projectDirectory, command, false);
+      const paneId = this.createWorkspace(projectDirectory, command, "single");
       if (command?.trim()) {
         this.lastUsedAgentCli = command.trim();
         this.savePref("ubra.lastAgentCli", command.trim());
@@ -1116,11 +1193,11 @@ class AppStore {
     if (!this.layout) return null;
     const existing = findWorkspaceByRoot(this.layout.workspaces, projectDirectory);
     if (existing) {
-      this.switchWorkspace(existing.id);
+      this.requestSwitchWorkspace(existing.id);
       this.onboardingOpen = false;
       return collectPaneIds(activeTab(existing).root)[0] ?? null;
     }
-    const paneId = this.createWorkspace(projectDirectory, command, false);
+    const paneId = this.createWorkspace(projectDirectory, command, "single");
     if (paneId && command?.trim()) {
       this.lastUsedAgentCli = command.trim();
       this.savePref("ubra.lastAgentCli", command.trim());
@@ -1189,7 +1266,7 @@ class AppStore {
       this.autoLaunchAgent,
       (await agentClis.ensure())[0]?.cli ?? null,
     );
-    this.createWorkspace(home, command, false);
+    this.createWorkspace(home, command, "single");
     if (command) {
       this.lastUsedAgentCli = command;
       this.savePref("ubra.lastAgentCli", command);
@@ -1278,9 +1355,12 @@ class AppStore {
   cycleWorkspace(dir: 1 | -1): void {
     if (!this.layout || this.layout.workspaces.length < 2) return;
     const all = this.layout.workspaces;
-    const at = all.findIndex((w) => w.id === this.layout!.activeWorkspaceId);
+    // Cycle from the pending target while a switch is in flight so rapid
+    // key repeats walk forward instead of re-requesting the same workspace.
+    const from = this.pendingWorkspaceId ?? this.layout.activeWorkspaceId;
+    const at = all.findIndex((w) => w.id === from);
     const cur = at < 0 ? 0 : at;
-    this.switchWorkspace(all[(cur + dir + all.length) % all.length].id);
+    this.requestSwitchWorkspace(all[(cur + dir + all.length) % all.length].id);
   }
 
   jumpTab(index: number): void {

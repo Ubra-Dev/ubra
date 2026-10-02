@@ -1,7 +1,9 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { fly } from "svelte/transition";
   import ExplorerView from "./ExplorerView.svelte";
   import Icon from "./Icon.svelte";
+  import { MOTION_MED_MS, motionMs } from "./motion";
   import {
     MAX_SIDEBAR_WIDTH,
     MIN_SIDEBAR_WIDTH,
@@ -91,10 +93,12 @@
 
 {#if store.layout && ws}
   {#if store.rightPanelOpen}
+    <!-- Transform-only so show/hide animates without touching the drag-resized width. -->
     <aside
       class="rightbar"
       aria-label="Explorer and source control"
       style="width: {store.rightPanelWidth}px"
+      transition:fly={{ x: 16, duration: motionMs(MOTION_MED_MS) }}
     >
       <div class="tabs" role="tablist" aria-label="Right sidebar views">
         <button

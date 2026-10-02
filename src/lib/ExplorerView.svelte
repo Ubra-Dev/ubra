@@ -106,7 +106,12 @@
     for (const rel of cached?.expanded ?? [""]) expanded.add(rel);
     expanded.add("");
     showHidden = cached?.showHidden ?? false;
-    for (const rel of expanded) void loadDir(rel);
+    // The view remounts on every workspace switch: let the reveal frame
+    // paint (sidebar highlight + pane fade) before kicking off IPC.
+    const frame = requestAnimationFrame(() => {
+      for (const rel of expanded) void loadDir(rel);
+    });
+    return () => cancelAnimationFrame(frame);
   });
 
   const rows = $derived.by(() => {

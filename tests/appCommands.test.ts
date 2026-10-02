@@ -111,4 +111,14 @@ describe("native menus and accelerators", () => {
     assert.equal(shouldDispatchDom("font-bigger", true, true), true);
     assert.equal(shouldDispatchDom("font-bigger", true, false), false);
   });
+
+  it("always dispatches editing keys the DOM receives, even when native owns the binding", () => {
+    // The webview consumes editing key equivalents (first-responder editing),
+    // so the native menu item never fires for them: a DOM-received edit must
+    // dispatch here or the key is swallowed with no effect.
+    for (const action of ["undo", "redo", "cut", "copy", "paste", "select-all"] as const) {
+      assert.equal(shouldDispatchDom(action, true), true, action);
+      assert.equal(shouldDispatchDom(action, false), true, action);
+    }
+  });
 });

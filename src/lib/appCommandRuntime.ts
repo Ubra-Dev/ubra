@@ -117,7 +117,7 @@ export async function dispatchCommand(request: CommandRequest): Promise<boolean>
       case "jump-tab": store.jumpTab(request.index!); break;
       case "prev-workspace": store.cycleWorkspace(-1); break;
       case "next-workspace": store.cycleWorkspace(1); break;
-      case "switch-workspace": store.switchWorkspace(request.workspaceId!); break;
+      case "switch-workspace": store.requestSwitchWorkspace(request.workspaceId!); break;
       case "font-bigger": store.bumpTermFontSize(1); store.bumpUiScale(1); break;
       case "font-smaller": store.bumpTermFontSize(-1); store.bumpUiScale(-1); break;
       case "font-reset": store.resetTermFontSize(); store.resetUiScale(); break;

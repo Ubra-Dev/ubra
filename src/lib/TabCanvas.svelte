@@ -141,7 +141,7 @@
 </script>
 
 <div class="canvas" bind:this={el}>
-  {#each placed.panes as pane (pane.node.id)}
+  {#each placed.panes as pane, i (pane.node.id)}
     <div
       class="slot"
       class:drag-source={dragSource === pane.node.id}
@@ -154,6 +154,7 @@
       style:top={pct(pane.rect[1])}
       style:width={pct(pane.rect[2])}
       style:height={pct(pane.rect[3])}
+      style:animation-delay={`${Math.min(i, 5) * 40}ms`}
     >
       <PaneView
         node={pane.node}
@@ -202,6 +203,27 @@
   }
   .slot[hidden] {
     display: none;
+  }
+  /* Workspace reveal: panes fade in with a per-slot stagger (see the inline
+     animation-delay). The `both` fill holds the first frame through the
+     delay so slots appear in sequence instead of flashing at full opacity. */
+  :global(.ws-enter) .slot {
+    animation: ubra-ws-slot-in var(--motion-slow) ease-out both;
+  }
+  @keyframes ubra-ws-slot-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.ws-enter) .slot {
+      animation: none;
+    }
   }
   .slot.drag-source {
     opacity: 0.55;

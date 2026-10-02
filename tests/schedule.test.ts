@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   asyncCoalescer,
+  frameBudgetQueue,
   frameCoalescer,
   trailingDebouncer,
   type FrameClock,
@@ -255,5 +256,89 @@ describe("trailingDebouncer", () => {
     debouncer.flush();
     debouncer.cancel();
     assert.deepEqual(clock.clears, []);
+  });
+});
+
+describe("frameBudgetQueue", () => {
+  it("drains at most maxPerFrame callbacks per frame", () => {
+    const clock = fakeFrameClock();
+    const queue = frameBudgetQueue(2, clock);
+    const calls: string[] = [];
+    for (const key of ["a", "b", "c", "d", "e"]) {
+      queue.push(key, () => calls.push(key));
+    }
+    assert.equal(queue.depth, 5);
+    assert.equal(clock.callbacks.size, 1);
+    clock.runAll();
+    assert.deepEqual(calls, ["a", "b"]);
+    assert.equal(queue.depth, 3);
+    clock.runAll();
+    assert.deepEqual(calls, ["a", "b", "c", "d"]);
+    clock.runAll();
+    assert.deepEqual(calls, ["a", "b", "c", "d", "e"]);
+    assert.equal(queue.depth, 0);
+    assert.equal(clock.callbacks.size, 0);
+  });
+
+  it("replaces the queued callback for a repeated key", () => {
+    const clock = fakeFrameClock();
+    const queue = frameBudgetQueue(4, clock);
+    const calls: string[] = [];
+    queue.push("a", () => calls.push("stale"));
+    queue.push("a", () => calls.push("fresh"));
+    assert.equal(queue.depth, 1);
+    clock.runAll();
+    assert.deepEqual(calls, ["fresh"]);
+  });
+
+  it("defers callbacks pushed while a batch runs to a later frame", () => {
+    const clock = fakeFrameClock();
+    const queue = frameBudgetQueue(4, clock);
+    const calls: string[] = [];
+    queue.push("a", () => {
+      calls.push("a");
+      queue.push("b", () => calls.push("b"));
+    });
+    clock.runAll();
+    assert.deepEqual(calls, ["a"]);
+    clock.runAll();
+    assert.deepEqual(calls, ["a", "b"]);
+  });
+
+  it("drops a single key without disturbing the rest", () => {
+    const clock = fakeFrameClock();
+    const queue = frameBudgetQueue(4, clock);
+    const calls: string[] = [];
+    queue.push("a", () => calls.push("a"));
+    queue.push("b", () => calls.push("b"));
+    queue.drop("a");
+    queue.drop("missing");
+    clock.runAll();
+    assert.deepEqual(calls, ["b"]);
+  });
+
+  it("cancel drops everything and keeps reporting errors without wedging", () => {
+    const clock = fakeFrameClock();
+    const queue = frameBudgetQueue(4, clock);
+    const calls: string[] = [];
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => errors.push(error);
+    try {
+      queue.push("boom", () => {
+        throw new Error("gpu failed");
+      });
+      queue.push("ok", () => calls.push("ok"));
+      clock.runAll();
+      assert.deepEqual(calls, ["ok"]);
+      assert.equal(errors.length, 1);
+      queue.push("late", () => calls.push("late"));
+      queue.cancel();
+      assert.equal(queue.depth, 0);
+      clock.runAll();
+      assert.deepEqual(calls, ["ok"]);
+    } finally {
+      console.error = original;
+    }
   });
 });

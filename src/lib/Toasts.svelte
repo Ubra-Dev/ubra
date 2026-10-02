@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { fly } from "svelte/transition";
   import { agent } from "./agent.svelte";
   import Icon from "./Icon.svelte";
+  import { MOTION_FAST_MS, motionMs } from "./motion";
   import { store } from "./store.svelte";
   import { toasts } from "./toasts.svelte.ts";
 
@@ -15,9 +17,11 @@
 {#if toasts.items.length > 0}
   <div class="stack {store.toastPosition}" role="status" aria-live="polite">
     {#each toasts.items as t (t.id)}
+      {@const fromTop = store.toastPosition.startsWith("top")}
       <button
         class="toast"
         class:copy={t.kind === "copy"}
+        transition:fly={{ y: fromTop ? -8 : 8, duration: motionMs(MOTION_FAST_MS) }}
         onclick={() => onClick(t.nodeId, t.id)}
       >
         <span class="toast-icon">

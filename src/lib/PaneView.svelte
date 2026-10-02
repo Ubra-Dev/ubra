@@ -1,13 +1,17 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import AgentCliIcon from "./AgentCliIcon.svelte";
   import ContextMenu, { announceMenuOpen } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
+  import Spinner from "./Spinner.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import { terminalCommands } from "./terminalCommands";
   import { agent } from "./agent.svelte";
   import { agentClis } from "./agentClis.svelte";
+  import { motionMs } from "./motion";
+  import { AGENT_LAUNCH_GRACE_MS, AGENT_LAUNCH_TIMEOUT_MS, agentLaunchReady } from "./agentLaunching";
   import { isMacPlatform, modLabel } from "./shortcuts";
   import { store } from "./store.svelte";
   import { paneDisplayTitle, type PaneNode } from "./layout";
@@ -195,15 +199,79 @@
     onHeaderPointerDown?.(node.id, e);
   }
 
+  // Agent launch overlay: armed when we type an agent command, but shown
+  // only if the pane stays blank past the grace delay — first PTY output
+  // dismisses the wait immediately, so the overlay never covers a visibly
+  // booting agent. Backend agent recognition and the timeout are
+  // backstops. A new spawn supersedes any previous wait; exits and
+  // unmounts clear it.
+  let launchStartedAt = $state<number | null>(null);
+  let launchTimedOut = $state(false);
+  let launchOverlayArmed = $state(false);
+  let launchTimer: ReturnType<typeof setTimeout> | null = null;
+  let launchShowTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearLaunchTimer(): void {
+    if (launchTimer !== null) {
+      clearTimeout(launchTimer);
+      launchTimer = null;
+    }
+    if (launchShowTimer !== null) {
+      clearTimeout(launchShowTimer);
+      launchShowTimer = null;
+    }
+  }
+
+  function clearLaunch(): void {
+    clearLaunchTimer();
+    launchStartedAt = null;
+    launchTimedOut = false;
+    launchOverlayArmed = false;
+  }
+
+  onMount(() => () => clearLaunchTimer());
+
+  const launchReady = $derived(agentLaunchReady(agent.paneState(node.id)));
+  const launching = $derived(
+    launchStartedAt !== null &&
+      launchOverlayArmed &&
+      !launchTimedOut &&
+      !launchReady &&
+      !exited,
+  );
+  const launchLabel = $derived(
+    `Launching ${agentLabel ?? node.agentCli?.trim().split(/\s+/)[0] ?? "agent"}…`,
+  );
+
+  // Retire a satisfied wait so the timeout timer never fires late.
+  $effect(() => {
+    if (launchStartedAt !== null && (launchReady || exited)) clearLaunch();
+  });
+
   function onTerminalSpawn(id: number, attached: boolean, firstDelivery: boolean): void {
     agent.register(id, node.id);
+    clearLaunch();
     // Session queue wins; otherwise a fresh (non-attached) first delivery
     // reruns the pane's persisted agent. Attached sessions already run it.
     const command =
       store.takePendingTerminalCommand(node.id) ??
       (!attached && firstDelivery ? store.takeRestoreAgent(node.id) : null);
     if (!command) return;
+    const startedAt = Date.now();
+    launchStartedAt = startedAt;
+    launchShowTimer = setTimeout(() => {
+      launchShowTimer = null;
+      // Arm only our own wait; a newer spawn supersedes this one.
+      if (launchStartedAt === startedAt) launchOverlayArmed = true;
+    }, AGENT_LAUNCH_GRACE_MS);
+    launchTimer = setTimeout(() => {
+      launchTimer = null;
+      launchTimedOut = true;
+    }, AGENT_LAUNCH_TIMEOUT_MS);
     invoke("pty_write", { id, data: `${command}\r` }).catch((error) => {
+      // A failed send never launches; drop only our own wait, since a
+      // newer spawn may already be waiting.
+      if (launchStartedAt === startedAt) clearLaunch();
       console.error("ubra: failed to start onboarding command", error);
       toasts.push(
         "Couldn't send the agent command",
@@ -211,6 +279,13 @@
         node.id,
       );
     });
+  }
+
+  function onTerminalOutput(): void {
+    // First paint wins: the pane is visibly booting, so there is
+    // nothing blank left to cover — no need to wait for backend
+    // agent recognition.
+    if (launchStartedAt !== null) clearLaunch();
   }
 
   function openMenu(e: MouseEvent): void {
@@ -346,8 +421,20 @@
         onExit={() => { exited = true; terminalCommands.changed(); }}
         onSpawn={onTerminalSpawn}
         onDispose={(id) => agent.unregister(id)}
+        onOutput={onTerminalOutput}
       />
     {/key}
+    {#if launching}
+      <div
+        class="launch-overlay"
+        role="status"
+        aria-label={launchLabel}
+        transition:fade={{ duration: motionMs(220) }}
+      >
+        <Spinner size={28} />
+        <span class="launch-label">{launchLabel}</span>
+      </div>
+    {/if}
     {#if exited}
       <button
         class="respawn"
@@ -520,6 +607,22 @@
     position: relative;
     flex: 1 1 0;
     min-height: 0;
+  }
+  .launch-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: var(--terminal-background);
+    color: var(--text-subtle);
+  }
+  .launch-label {
+    font: 12px var(--font-ui);
+    user-select: none;
   }
   .respawn {
     position: absolute;

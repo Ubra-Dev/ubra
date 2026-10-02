@@ -159,7 +159,7 @@ class AgentStore {
     if (target) this.jumpToPane(target);
   }
   jumpToPane(nodeId: string): void {
-    store.revealPane(nodeId);
+    store.requestRevealPane(nodeId);
     const found = store.layout && findTabByPane(store.layout, nodeId);
     if (found?.tab.zoomedPaneId && found.tab.zoomedPaneId !== nodeId) store.toggleZoomPane(found.tab.zoomedPaneId);
     store.paneFocusTarget = nodeId;

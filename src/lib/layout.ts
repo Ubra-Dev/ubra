@@ -79,62 +79,145 @@ export function defaultTab(name = "Tab 1"): Tab {
   return { id: newId("tab"), name, root: defaultPane() };
 }
 
-export function gridTab(name = "Tab 1"): Tab {
-  const row = (): SplitNode => ({
+/**
+ * Canonical tilings shared by the workspace layout menu and the onboarding
+ * fleet, so previews always match the launch. Two panes sit side by side,
+ * even counts stack two equal rows, and odd counts pair a full-height main
+ * column with the grid of the remainder; every column is equal width.
+ */
+export type WorkspaceLayoutPreset =
+  | "single"
+  | "side-by-side"
+  | "stacked"
+  | "main-stack"
+  | "grid-2x2"
+  | "main-2x2"
+  | "grid-3x2"
+  | "main-3x2"
+  | "grid-4x2";
+
+export const WORKSPACE_LAYOUT_PRESETS: WorkspaceLayoutPreset[] = [
+  "single",
+  "side-by-side",
+  "stacked",
+  "main-stack",
+  "grid-2x2",
+  "main-2x2",
+  "grid-3x2",
+  "main-3x2",
+  "grid-4x2",
+];
+
+/** Pane count each preset creates, for menu labels. */
+export const WORKSPACE_LAYOUT_PANE_COUNTS: Record<WorkspaceLayoutPreset, number> = {
+  single: 1,
+  "side-by-side": 2,
+  stacked: 2,
+  "main-stack": 3,
+  "grid-2x2": 4,
+  "main-2x2": 5,
+  "grid-3x2": 6,
+  "main-3x2": 7,
+  "grid-4x2": 8,
+};
+
+/** Display name per preset, shared by the layout menu and fleet preview. */
+export const WORKSPACE_LAYOUT_LABELS: Record<WorkspaceLayoutPreset, string> = {
+  single: "Single",
+  "side-by-side": "Side by side",
+  stacked: "Stacked",
+  "main-stack": "Main + stack",
+  "grid-2x2": "2 × 2 grid",
+  "main-2x2": "Main + 2 × 2",
+  "grid-3x2": "3 × 2 grid",
+  "main-3x2": "Main + 3 × 2",
+  "grid-4x2": "4 × 2 grid",
+};
+
+function splitNode(
+  dir: "row" | "col",
+  first: LayoutNode,
+  second: LayoutNode,
+  ratio = 0.5,
+): SplitNode {
+  return {
     kind: "split",
     id: newId("split"),
-    dir: "row",
-    sizes: [0.5, 0.5],
-    first: defaultPane(),
-    second: defaultPane(),
-  });
+    dir,
+    sizes: [ratio, 1 - ratio],
+    first,
+    second,
+  };
+}
+
+/**
+ * One row of `count` equal panes (counts below 1 give one). The pane share
+ * splits proportionally, so every column lands 1/count wide.
+ */
+function equalColRow(count: number): LayoutNode {
+  const panes = Math.max(Math.floor(count) || 1, 1);
+  if (panes === 1) return defaultPane();
+  const first = Math.ceil(panes / 2);
+  return splitNode("row", equalColRow(first), equalColRow(panes - first), first / panes);
+}
+
+/** Two stacked rows of `cols` equal panes each. */
+function evenGrid(cols: number): LayoutNode {
+  return splitNode("col", equalColRow(cols), equalColRow(cols));
+}
+
+/** Deterministic tiling for exactly `count` panes (counts below 1 give one). */
+export function tilingForCount(count: number): LayoutNode {
+  const panes = Math.max(Math.floor(count) || 1, 1);
+  if (panes === 1) return defaultPane();
+  if (panes === 2) return splitNode("row", defaultPane(), defaultPane());
+  if (panes % 2 === 0) return evenGrid(panes / 2);
+  const cols = (panes - 1) / 2;
+  // Full-height main column plus the grid of the remainder; all columns equal.
+  return splitNode("row", defaultPane(), evenGrid(cols), 1 / (1 + cols));
+}
+
+/** Deterministic tab tiling for a workspace preset. */
+export function presetTab(preset: WorkspaceLayoutPreset, name = "Tab 1"): Tab {
+  if (preset === "stacked") {
+    return {
+      id: newId("tab"),
+      name,
+      root: splitNode("col", defaultPane(), defaultPane()),
+    };
+  }
   return {
     id: newId("tab"),
     name,
-    root: {
-      kind: "split",
-      id: newId("split"),
-      dir: "col",
-      sizes: [0.5, 0.5],
-      first: row(),
-      second: row(),
-    },
+    root: tilingForCount(WORKSPACE_LAYOUT_PANE_COUNTS[preset]),
   };
 }
 
 /**
- * First-run fleet tab for `count` panes in a random tiling. Pane priority
- * comes from `leavesByAreaDesc`: the primary CLI takes the largest pane.
+ * Canonical menu preset for a pane count, when one exists. Two panes resolve
+ * to side-by-side; stacked stays a manual menu choice.
  */
-export function fleetTab(count: number, rng: Rng, name = "Tab 1"): Tab {
-  return { id: newId("tab"), name, root: randomTiling(count, rng) };
-}
-
-/** Injectable randomness for tiling; production passes Math.random. */
-export type Rng = () => number;
-
-/** Random split ratio bounds: wide enough to surprise, never a sliver. */
-const TILE_RATIO_MIN = 0.4;
-const TILE_RATIO_MAX = 0.6;
-
-/**
- * Random binary tiling for exactly `count` panes (counts below 1 give one).
- * Splits recurse with a random direction, pane share, and ratio, so every
- * first-run fleet lands in a fresh arrangement.
- */
-export function randomTiling(count: number, rng: Rng): LayoutNode {
+export function presetForCount(count: number): WorkspaceLayoutPreset | null {
   const panes = Math.max(Math.floor(count) || 1, 1);
-  if (panes === 1) return defaultPane();
-  const share = 1 + Math.floor(rng() * (panes - 1));
-  const ratio = TILE_RATIO_MIN + rng() * (TILE_RATIO_MAX - TILE_RATIO_MIN);
-  return {
-    kind: "split",
-    id: newId("split"),
-    dir: rng() < 0.5 ? "row" : "col",
-    sizes: [ratio, 1 - ratio],
-    first: randomTiling(share, rng),
-    second: randomTiling(panes - share, rng),
-  };
+  switch (panes) {
+    case 1: return "single";
+    case 2: return "side-by-side";
+    case 3: return "main-stack";
+    case 4: return "grid-2x2";
+    case 5: return "main-2x2";
+    case 6: return "grid-3x2";
+    case 7: return "main-3x2";
+    case 8: return "grid-4x2";
+    default: return null;
+  }
+}
+
+/** Human tiling name for a pane count (menu preset name when one exists). */
+export function tilingLabelForCount(count: number): string {
+  const preset = presetForCount(count);
+  if (preset) return WORKSPACE_LAYOUT_LABELS[preset];
+  const panes = Math.max(Math.floor(count) || 1, 1);
+  return panes % 2 === 0 ? `${panes / 2} × 2 grid` : `Main + ${(panes - 1) / 2} × 2`;
 }
 
 /** Leaf pane ids ordered by area, largest first. */

@@ -20,10 +20,7 @@ import {
   findSplit,
   findTabByPane,
   findWorkspaceByRoot,
-  fleetTab,
-  gridTab,
   leavesByAreaDesc,
-  randomTiling,
   isActiveAgentState,
   moveWorkspace,
   resizePaneInTab,
@@ -34,39 +31,20 @@ import {
   newId,
   paneDisplayTitle,
   preferredAgentCli,
+  presetForCount,
+  presetTab,
+  WORKSPACE_LAYOUT_PANE_COUNTS,
+  WORKSPACE_LAYOUT_PRESETS,
   sanitizeLayout,
+  tilingForCount,
+  tilingLabelForCount,
   swapPanesInTab,
   setZoomedPane,
   splitPaneInTab,
   stampPaneAgentCli,
   stampPaneAgentSession,
-  type LayoutNode,
-  type Rng,
   type Tab,
 } from "../src/lib/layout.ts";
-
-/** Deterministic rng for tiling tests. */
-function seededRng(seed: number): Rng {
-  let state = seed >>> 0;
-  return () => {
-    state |= 0;
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Split tree shape without ids, for determinism comparisons. */
-function tilingShape(node: LayoutNode): unknown {
-  if (node.kind === "pane") return "pane";
-  return {
-    dir: node.dir,
-    sizes: node.sizes,
-    first: tilingShape(node.first),
-    second: tilingShape(node.second),
-  };
-}
 
 function rootPaneId(tab: Tab): string {
   assert.equal(tab.root.kind, "pane");
@@ -114,14 +92,105 @@ describe("preferredAgentCli", () => {
   });
 });
 
-describe("gridTab", () => {
-  it("creates four distinct terminals in equal 2×2 quadrants", () => {
-    const tab = gridTab();
-    assert.equal(tab.name, "Tab 1");
-    assert.equal(countPanes(tab.root), 4);
-    const panes = computeLayout(tab.root).panes;
-    assert.equal(new Set(panes.map((p) => p.node.id)).size, 4);
-    assert.deepEqual(panes.map((p) => p.rect), [
+describe("tilingForCount", () => {
+  it("builds exactly N panes with unique ids", () => {
+    for (let count = 1; count <= 12; count++) {
+      const root = tilingForCount(count);
+      assert.equal(countPanes(root), count);
+      assert.equal(new Set(collectPaneIds(root)).size, count);
+    }
+  });
+
+  it("is deterministic: the same count always tiles the same rects", () => {
+    for (let count = 1; count <= 12; count++) {
+      assert.deepEqual(
+        computeLayout(tilingForCount(count)).panes.map((p) => p.rect),
+        computeLayout(tilingForCount(count)).panes.map((p) => p.rect),
+      );
+    }
+  });
+
+  it("floors invalid counts at a single pane", () => {
+    assert.equal(countPanes(tilingForCount(0)), 1);
+    assert.equal(countPanes(tilingForCount(-4)), 1);
+  });
+
+  it("covers the unit square without overlap", () => {
+    for (let count = 1; count <= 12; count++) {
+      const panes = computeLayout(tilingForCount(count)).panes;
+      const area = panes.reduce((sum, p) => sum + p.rect[2] * p.rect[3], 0);
+      assert.ok(Math.abs(area - 1) < 1e-9, `area ${area} should sum to 1`);
+    }
+  });
+
+  it("keeps every column equal width", () => {
+    for (let count = 1; count <= 12; count++) {
+      const panes = computeLayout(tilingForCount(count)).panes;
+      const widths = new Set(panes.map((p) => p.rect[2].toFixed(9)));
+      assert.equal(widths.size, 1, `count ${count} columns differ`);
+    }
+  });
+
+  it("preserves tilings when saving and restoring a layout", () => {
+    for (const count of [1, 2, 3, 4, 5, 6, 7, 8, 9, 12]) {
+      const layout = defaultLayout();
+      const tab = { id: "tab-count", name: "Count", root: tilingForCount(count) };
+      layout.workspaces[0].tabs = [tab];
+      layout.workspaces[0].activeTabId = tab.id;
+      assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
+    }
+  });
+});
+
+describe("presetForCount", () => {
+  it("resolves counts 1..8 to the canonical menu preset", () => {
+    assert.deepEqual(
+      [1, 2, 3, 4, 5, 6, 7, 8].map(presetForCount),
+      ["single", "side-by-side", "main-stack", "grid-2x2", "main-2x2",
+        "grid-3x2", "main-3x2", "grid-4x2"],
+    );
+  });
+
+  it("returns null past the menu presets", () => {
+    assert.equal(presetForCount(9), null);
+    assert.equal(presetForCount(12), null);
+  });
+});
+
+describe("tilingLabelForCount", () => {
+  it("uses menu preset names when one exists", () => {
+    assert.equal(tilingLabelForCount(1), "Single");
+    assert.equal(tilingLabelForCount(2), "Side by side");
+    assert.equal(tilingLabelForCount(4), "2 × 2 grid");
+    assert.equal(tilingLabelForCount(5), "Main + 2 × 2");
+    assert.equal(tilingLabelForCount(8), "4 × 2 grid");
+  });
+
+  it("names larger tilings by their grid shape", () => {
+    assert.equal(tilingLabelForCount(9), "Main + 4 × 2");
+    assert.equal(tilingLabelForCount(10), "5 × 2 grid");
+  });
+});
+
+describe("presetTab", () => {
+  it("creates the expected tiling per preset", () => {
+    const rects = (preset: Parameters<typeof presetTab>[0]) =>
+      computeLayout(presetTab(preset).root).panes.map((p) => p.rect);
+    assert.deepEqual(rects("single"), [[0, 0, 1, 1]]);
+    assert.deepEqual(rects("side-by-side"), [
+      [0, 0, 0.5, 1],
+      [0.5, 0, 0.5, 1],
+    ]);
+    assert.deepEqual(rects("stacked"), [
+      [0, 0, 1, 0.5],
+      [0, 0.5, 1, 0.5],
+    ]);
+    assert.deepEqual(rects("main-stack"), [
+      [0, 0, 0.5, 1],
+      [0.5, 0, 0.5, 0.5],
+      [0.5, 0.5, 0.5, 0.5],
+    ]);
+    assert.deepEqual(rects("grid-2x2"), [
       [0, 0, 0.5, 0.5],
       [0.5, 0, 0.5, 0.5],
       [0, 0.5, 0.5, 0.5],
@@ -129,58 +198,82 @@ describe("gridTab", () => {
     ]);
   });
 
-  it("preserves the grid when saving and restoring a layout", () => {
-    const layout = defaultLayout();
-    const tab = gridTab("Grid");
-    layout.workspaces[0].tabs = [tab];
-    layout.workspaces[0].activeTabId = tab.id;
-    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
-  });
-});
-
-describe("randomTiling", () => {
-  it("builds exactly N panes with unique ids", () => {
-    for (let count = 1; count <= 8; count++) {
-      const root = randomTiling(count, seededRng(count * 7919));
-      assert.equal(countPanes(root), count);
-      assert.equal(new Set(collectPaneIds(root)).size, count);
+  it("tiles 5, 6, 7, and 8 panes without gaps or overlap", () => {
+    const close = (actual: number[], expected: number[]): void => {
+      assert.equal(actual.length, expected.length);
+      for (const [i, value] of actual.entries()) {
+        assert.ok(Math.abs(value - expected[i]) < 1e-9, `${actual} should be close to ${expected}`);
+      }
+    };
+    const third = 1 / 3;
+    const actual5 = computeLayout(presetTab("main-2x2").root).panes.map((p) => p.rect);
+    assert.equal(actual5.length, 5);
+    const grid2x2 = [
+      [0, 0, third, 1],
+      [third, 0, third, 0.5],
+      [2 * third, 0, third, 0.5],
+      [third, 0.5, third, 0.5],
+      [2 * third, 0.5, third, 0.5],
+    ];
+    for (const [i, rect] of actual5.entries()) close([...rect], grid2x2[i]);
+    const grid3x2 = [
+      [0, 0, third, 0.5],
+      [third, 0, third, 0.5],
+      [2 * third, 0, third, 0.5],
+      [0, 0.5, third, 0.5],
+      [third, 0.5, third, 0.5],
+      [2 * third, 0.5, third, 0.5],
+    ];
+    const actual6 = computeLayout(presetTab("grid-3x2").root).panes.map((p) => p.rect);
+    assert.equal(actual6.length, 6);
+    for (const [i, rect] of actual6.entries()) close([...rect], grid3x2[i]);
+    const actual7 = computeLayout(presetTab("main-3x2").root).panes.map((p) => p.rect);
+    assert.equal(actual7.length, 7);
+    close([...actual7[0]], [0, 0, 0.25, 1]);
+    // Grid columns land on exact quarters beside the main column.
+    const grid7 = [
+      [0.25, 0, 0.25, 0.5],
+      [0.5, 0, 0.25, 0.5],
+      [0.75, 0, 0.25, 0.5],
+      [0.25, 0.5, 0.25, 0.5],
+      [0.5, 0.5, 0.25, 0.5],
+      [0.75, 0.5, 0.25, 0.5],
+    ];
+    for (const [i, rect] of actual7.slice(1).entries()) close([...rect], grid7[i]);
+    const actual8 = computeLayout(presetTab("grid-4x2").root).panes.map((p) => p.rect);
+    assert.deepEqual(actual8, [
+      [0, 0, 0.25, 0.5],
+      [0.25, 0, 0.25, 0.5],
+      [0.5, 0, 0.25, 0.5],
+      [0.75, 0, 0.25, 0.5],
+      [0, 0.5, 0.25, 0.5],
+      [0.25, 0.5, 0.25, 0.5],
+      [0.5, 0.5, 0.25, 0.5],
+      [0.75, 0.5, 0.25, 0.5],
+    ]);
+    for (const panes of [actual5, actual6, actual7, actual8]) {
+      const area = panes.reduce((sum, rect) => sum + rect[2] * rect[3], 0);
+      assert.ok(Math.abs(area - 1) < 1e-9, `area ${area} should sum to 1`);
     }
   });
 
-  it("floors invalid counts at a single pane", () => {
-    assert.equal(countPanes(randomTiling(0, seededRng(1))), 1);
-    assert.equal(countPanes(randomTiling(-4, seededRng(1))), 1);
-  });
-
-  it("keeps every split ratio inside the 0.4..0.6 band", () => {
-    const check = (node: LayoutNode): void => {
-      if (node.kind === "pane") return;
-      const [a, b] = node.sizes;
-      assert.ok(a >= 0.4 && a <= 0.6, `ratio ${a} out of band`);
-      assert.ok(b >= 0.4 && b <= 0.6, `ratio ${b} out of band`);
-      check(node.first);
-      check(node.second);
-    };
-    for (const seed of [1, 7, 42]) check(randomTiling(6, seededRng(seed)));
-  });
-
-  it("is deterministic for a seeded rng", () => {
-    assert.deepEqual(
-      tilingShape(randomTiling(5, seededRng(11))),
-      tilingShape(randomTiling(5, seededRng(11))),
-    );
-  });
-
-  it("covers the unit square without overlap", () => {
-    const panes = computeLayout(randomTiling(5, seededRng(3))).panes;
-    const area = panes.reduce((sum, p) => sum + p.rect[2] * p.rect[3], 0);
-    assert.ok(Math.abs(area - 1) < 1e-9, `area ${area} should sum to 1`);
+  it("matches the pane counts and survives a save/restore round-trip", () => {
+    for (const preset of WORKSPACE_LAYOUT_PRESETS) {
+      const layout = defaultLayout();
+      const tab = presetTab(preset, "Preset");
+      assert.equal(tab.name, "Preset");
+      assert.equal(countPanes(tab.root), WORKSPACE_LAYOUT_PANE_COUNTS[preset]);
+      assert.equal(new Set(collectPaneIds(tab.root)).size, WORKSPACE_LAYOUT_PANE_COUNTS[preset]);
+      layout.workspaces[0].tabs = [tab];
+      layout.workspaces[0].activeTabId = tab.id;
+      assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
+    }
   });
 });
 
 describe("leavesByAreaDesc", () => {
   it("orders every leaf largest-first", () => {
-    const root = randomTiling(6, seededRng(21));
+    const root = tilingForCount(7);
     const order = leavesByAreaDesc(root);
     assert.deepEqual(new Set(order), new Set(collectPaneIds(root)));
     const areas = new Map(
@@ -189,22 +282,6 @@ describe("leavesByAreaDesc", () => {
     const ordered = order.map((id) => areas.get(id) ?? 0);
     const sorted = [...ordered].sort((a, b) => b - a);
     assert.deepEqual(ordered, sorted);
-  });
-});
-
-describe("fleetTab", () => {
-  it("builds a named tab around a random tiling", () => {
-    const tab = fleetTab(4, seededRng(5), "Fleet");
-    assert.equal(tab.name, "Fleet");
-    assert.equal(countPanes(tab.root), 4);
-  });
-
-  it("preserves the fleet tab when saving and restoring a layout", () => {
-    const layout = defaultLayout();
-    const tab = fleetTab(5, seededRng(9), "Fleet");
-    layout.workspaces[0].tabs = [tab];
-    layout.workspaces[0].activeTabId = tab.id;
-    assert.deepEqual(sanitizeLayout(JSON.parse(JSON.stringify(layout))), layout);
   });
 });
 
@@ -296,7 +373,7 @@ describe("sanitizeLayout", () => {
   it("round-trips valid active and zoom references without changing identities", () => {
     const layout = defaultLayout();
     const workspace = defaultWorkspace("Second");
-    const tab = gridTab("Selected");
+    const tab = presetTab("grid-2x2", "Selected");
     workspace.tabs.push(tab);
     workspace.activeTabId = tab.id;
     tab.zoomedPaneId = collectPaneIds(tab.root)[2];
@@ -385,7 +462,7 @@ describe("sanitizeLayout", () => {
 
   it("normalizes extreme finite weights without overflow or lost geometry", () => {
     const layout = defaultLayout();
-    const tab = gridTab();
+    const tab = presetTab("grid-2x2");
     layout.workspaces[0].tabs = [tab];
     layout.workspaces[0].activeTabId = tab.id;
     if (tab.root.kind !== "split") throw new Error("Expected split");
@@ -401,7 +478,7 @@ describe("sanitizeLayout", () => {
 
   it("keeps representable geometry at both ratio boundaries and subnormal weights", () => {
     const layout = defaultLayout();
-    const tab = gridTab();
+    const tab = presetTab("grid-2x2");
     layout.workspaces[0].tabs = [tab];
     layout.workspaces[0].activeTabId = tab.id;
     if (tab.root.kind !== "split") throw new Error("Expected split");
@@ -415,7 +492,7 @@ describe("sanitizeLayout", () => {
 
   it("rejects nonfinite, nonpositive and degenerate weights", () => {
     const layout = defaultLayout();
-    const tab = gridTab();
+    const tab = presetTab("grid-2x2");
     layout.workspaces[0].tabs = [tab];
     layout.workspaces[0].activeTabId = tab.id;
     if (tab.root.kind !== "split") throw new Error("Expected split");
@@ -949,7 +1026,7 @@ describe("moveWorkspace", () => {
 
 describe("explicit launch policy", () => {
   it("migrates a valid version-1 layout to version 2 without losing commands or references", () => {
-    const tab = gridTab("Selected");
+    const tab = presetTab("grid-2x2", "Selected");
     const ids = collectPaneIds(tab.root);
     const workspace = defaultWorkspace("Second");
     const legacyFirst = workspace.tabs[0].root;

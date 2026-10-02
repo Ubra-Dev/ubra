@@ -72,6 +72,46 @@
     else updater.stopAutoCheck();
   });
 
+  // Workspace reveal animation: `ws-enter` marks the newly shown workspace
+  // so its panes fade in. The class comes from the pending id while hidden
+  // (animations start exactly on unhide) and is held via enterWsId until
+  // the stagger finishes. Token 0 is the boot state: no animation on load.
+  let enterWsId = $state<string | null>(null);
+  let enterTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const token = store.workspaceSwitchToken;
+    const id = store.layout?.activeWorkspaceId ?? null;
+    if (!token || !id) return;
+    enterWsId = id;
+    if (enterTimer) clearTimeout(enterTimer);
+    enterTimer = setTimeout(() => {
+      if (enterWsId === id) enterWsId = null;
+      enterTimer = null;
+    }, 650);
+  });
+
+  // Tab reveal animation: mirrors the workspace mechanism — `tab-enter`
+  // marks the newly shown tab so its content fades in. Tab switches commit
+  // synchronously (no pending id), so the token effect alone applies the
+  // class; Svelte flushes it before paint, like the workspace hold path.
+  // Keyed on the token itself: the visible tab id also changes on workspace
+  // switches, where the slot stagger already covers the reveal.
+  let enterTabId = $state<string | null>(null);
+  let lastTabToken = 0;
+  let enterTabTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const token = store.tabSwitchToken;
+    const id = store.workspace()?.activeTabId ?? null;
+    if (!token || !id || token === lastTabToken) return;
+    lastTabToken = token;
+    enterTabId = id;
+    if (enterTabTimer) clearTimeout(enterTabTimer);
+    enterTabTimer = setTimeout(() => {
+      if (enterTabId === id) enterTabId = null;
+      enterTabTimer = null;
+    }, 450);
+  });
+
   function onGlobalKeyDown(e: KeyboardEvent): void {
     if (e.defaultPrevented || e.isComposing) return;
     const isMac = isMacPlatform(navigator.platform);
@@ -84,10 +124,10 @@
     }
     if (!matched || matched.action === "switch-workspace" || !canDispatch(matched, context)) return;
     // Capture before xterm so app accelerators never become terminal input.
+    // A keydown that reaches the DOM was not consumed by the native menu, so
+    // the native action cannot also fire for this press (no double dispatch).
     e.preventDefault();
-    const ordinaryTextEdit = !isMac && context.textFocus && !e.shiftKey &&
-      ["copy", "paste", "select-all", "undo", "redo", "cut"].includes(matched.action);
-    if (shouldDispatchDom(matched.action, !ordinaryTextEdit && nativeOwnsShortcut(matched.action), e.key === "+" && e.shiftKey)) {
+    if (shouldDispatchDom(matched.action, nativeOwnsShortcut(matched.action), e.key === "+" && e.shiftKey)) {
       void dispatchCommand(matched);
     }
   }
@@ -126,9 +166,17 @@
           <TabBar />
           <div class="tabs">
             {#each store.layout.workspaces as ws (ws.id)}
-              <div class="ws" hidden={ws.id !== store.layout.activeWorkspaceId}>
+              <div
+                class="ws"
+                class:ws-enter={ws.id === store.pendingWorkspaceId || ws.id === enterWsId}
+                hidden={ws.id !== store.layout.activeWorkspaceId}
+              >
                 {#each ws.tabs as tab (tab.id)}
-                  <div class="tab" hidden={tab.id !== ws.activeTabId}>
+                  <div
+                    class="tab"
+                    class:tab-enter={tab.id === enterTabId}
+                    hidden={tab.id !== ws.activeTabId}
+                  >
                     <TabCanvas root={tab.root} zoomedId={tab.zoomedPaneId} />
                   </div>
                 {/each}
@@ -167,6 +215,11 @@
   }
   .root {
     --font-ui: system-ui, sans-serif;
+    /* Motion tokens (mirrored in src/lib/motion.ts for svelte/transition). */
+    --motion-fast: 120ms;
+    --motion-med: 180ms;
+    --motion-slow: 280ms;
+    --motion-ease-out: cubic-bezier(0.2, 0, 0, 1);
     width: 100vw;
     height: 100vh;
     background: var(--app-bg);
@@ -237,8 +290,41 @@
   .tab[hidden] {
     display: none;
   }
+  /* Tab reveal: the newly shown tab fades in with a slight rise. Whole-tab
+     motion (not per-slot) so it reads distinct from the workspace stagger. */
+  .tab-enter {
+    animation: ubra-tab-in var(--motion-slow) ease-out;
+  }
+  @keyframes ubra-tab-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab-enter {
+      animation: none;
+    }
+  }
   :global(button:focus-visible, select:focus-visible, input:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+  /* Subtle color crossfades on interactive elements. Transform/layout
+     transitions stay opt-in per component. */
+  :global(button, input, select) {
+    transition:
+      background-color var(--motion-fast) ease-out,
+      border-color var(--motion-fast) ease-out,
+      color var(--motion-fast) ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(button, input, select) {
+      transition: none;
+    }
   }
 </style>

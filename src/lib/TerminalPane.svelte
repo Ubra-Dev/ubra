@@ -51,6 +51,12 @@
      */
     onSpawn?: (liveId: number, attached: boolean, firstDelivery: boolean) => void;
     onDispose?: (liveId: number) => void;
+    /**
+     * Fired whenever PTY bytes reach the terminal — live output or
+     * restored scrollback — so owners can tell a live pane from a
+     * blank one (e.g. to drop a launch overlay at first paint).
+     */
+    onOutput?: () => void;
   }
   let {
     sessionKey,
@@ -65,6 +71,7 @@
     onExit,
     onSpawn,
     onDispose,
+    onOutput,
   }: Props = $props();
 
   let container: HTMLDivElement | undefined = $state();
@@ -168,6 +175,15 @@
     let gpuWanted = gpuEnabled;
     const ensureGpu = (): void => {
       if (disposed || gpu !== null || gpuFailed || !gpuWanted) return;
+      // Synchronous by design: the WebGL renderer floors cell width to
+      // integer device pixels, so its cells are narrower than the built-in
+      // renderer's for the same font. Fitting first and upgrading later
+      // would leave the grid painted ~10% too narrow with a dead right
+      // edge that no later refit corrects (the container never changes
+      // size). Upgrading here means fit.fit() below always measures with
+      // the active renderer's cells. Multi-pane reveals pay N context
+      // creations in one frame; a stable grid with no PTY resize churn is
+      // worth more than spreading them.
       gpu = enableGpuRenderer(term);
       if (gpu !== null) console.debug(`ubra: GPU terminal renderer active (${sessionKey})`);
       else gpuFailed = true;
@@ -179,14 +195,18 @@
     setGpuEnabled = (on: boolean) => {
       gpuWanted = on;
       if (disposed) return;
-      if (!on) dropGpu();
-      else if (
+      if (!on) {
+        dropGpu();
+      } else if (
         container &&
         container.clientWidth >= 10 &&
         container.clientHeight >= 10
-      )
+      ) {
         ensureGpu();
-      // Hidden panes upgrade on show via doFit.
+      }
+      // Hidden panes upgrade on show via doFit. Either direction flips cell
+      // metrics, so refit to the active renderer.
+      refit?.();
     };
     const unlistens: UnlistenFn[] = [];
     const attachment = new TerminalAttachment();
@@ -299,10 +319,27 @@
     const ensureFit = (): void => {
       fitFrame.schedule(doFit);
     };
-    ensureFit();
     refit = ensureFit;
 
-    const resizeObserver = new ResizeObserver(ensureFit);
+    // Hidden→visible transitions fit synchronously: the observer fires
+    // before paint, so upgrading+fitting here makes the first shown frame
+    // already correct instead of flashing one frame of stale grid. (The
+    // initial observe() notification covers the mount fit the same way.)
+    // Drag bursts keep coalescing through ensureFit.
+    let wasHidden = true;
+    const onResize = (entries: ResizeObserverEntry[]): void => {
+      const width = entries[entries.length - 1]?.contentRect.width ?? 0;
+      const hidden = width < 10;
+      const justShown = wasHidden && !hidden;
+      wasHidden = hidden;
+      if (justShown) {
+        fitFrame.cancel();
+        doFit();
+      } else {
+        ensureFit();
+      }
+    };
+    const resizeObserver = new ResizeObserver(onResize);
     resizeObserver.observe(container!);
 
     (async () => {
@@ -311,7 +348,10 @@
         (event) => {
           if (disposed) return;
           const data = attachment.output(event.payload);
-          if (data !== null) term.write(data);
+          if (data !== null) {
+            term.write(data);
+            onOutput?.();
+          }
         },
       );
       if (disposed) {
@@ -390,6 +430,9 @@
       restored.chunks.forEach((chunk) => {
         term.write(chunk);
       });
+      // Buffered pre-spawn output (shell banner, prompt) means the pane
+      // is already visibly alive; report it like live output.
+      if (restored.chunks.length > 0) onOutput?.();
       if (restored.exit) handleExit(restored.exit.success, restored.exit.code);
       else if (snapshotError) {
         // A session that exited while unmounted must show respawn, not silently

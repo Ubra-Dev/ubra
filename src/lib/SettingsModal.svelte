@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
+  import { MOTION_FAST_MS, motionMs, rise } from "./motion";
   import { agent } from "./agent.svelte";
   import { CUSTOM_COMMAND } from "./agentClis";
   import { telemetryStatus } from "./telemetry";
@@ -9,6 +11,8 @@
   import AgentCliSelect from "./AgentCliSelect.svelte";
   import { agentClis } from "./agentClis.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import LoadingText from "./LoadingText.svelte";
+  import { DEFAULT_LOADING_TEXT } from "./loadingGradient";
   import Spinner from "./Spinner.svelte";
   import { overlayFocus } from "./overlayFocus";
   import {
@@ -70,7 +74,8 @@
     | "shortcuts"
     | "app"
     | "workspace"
-    | "usage";
+    | "usage"
+    | "debug";
 
   const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
     { id: "appearance", label: "Appearance", icon: "palette" },
@@ -79,6 +84,7 @@
     { id: "app", label: "App", icon: "info" },
     { id: "workspace", label: "Workspace", icon: "layers" },
     { id: "usage", label: "Usage", icon: "activity" },
+    { id: "debug", label: "Debug", icon: "tool" },
   ];
 
   let section = $state<SectionId>("app");
@@ -93,6 +99,8 @@
   let appName = $state("Ubra");
   let appVersion = $state("");
   let fontQuery = $state("");
+  /** Debug-section draft for the loading-animation preview text. */
+  let debugLoadingText = $state(DEFAULT_LOADING_TEXT);
   /** Workspace-section draft: "" = off, a CLI id, or CUSTOM_COMMAND. */
   let cliSelection = $state("");
   let cliCustom = $state("");
@@ -477,12 +485,14 @@
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div
   class="backdrop"
+  transition:fade={{ duration: motionMs(MOTION_FAST_MS) }}
   onclick={(e) => {
     if (e.target === e.currentTarget) close();
   }}
 >
   <div
     class="dialog"
+    transition:rise
     role="dialog"
     aria-modal="true"
     aria-label="Settings"
@@ -1359,6 +1369,35 @@
               {/if}
             {/if}
           </section>
+        {:else if section === "debug"}
+          <section aria-label="Debug">
+            <h2>Debug</h2>
+            <div class="group">
+              <h3 class="group-label">Loading animation</h3>
+              <div class="card">
+                <div class="row debug-preview">
+                  <LoadingText text={debugLoadingText || DEFAULT_LOADING_TEXT} />
+                </div>
+                <label class="row">
+                  <span class="label">Preview text</span>
+                  <input
+                    type="text"
+                    bind:value={debugLoadingText}
+                    placeholder={DEFAULT_LOADING_TEXT}
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    aria-label="Loading animation preview text"
+                    class="file-input"
+                  />
+                </label>
+              </div>
+              <div class="hint">
+                Silkscreen text over the animated brand gradient. Clear the
+                field to fall back to &ldquo;{DEFAULT_LOADING_TEXT}&rdquo;.
+              </div>
+            </div>
+          </section>
         {/if}
       </div>
     </div>
@@ -1464,6 +1503,21 @@
     min-width: 0;
     padding: 18px 20px 24px;
     overflow-y: auto;
+  }
+  /* Section swap: the newly shown section fades in with a slight rise.
+     Each branch mounts a fresh <section>, so this replays on every switch. */
+  .content > section {
+    animation: ubra-section-in var(--motion-fast) var(--motion-ease-out);
+  }
+  @keyframes ubra-section-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   h2 {
     font-size: 20px;
@@ -1805,6 +1859,13 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .content > section {
+      animation: none;
+    }
+    .switch .track,
+    .switch .thumb {
+      transition: none;
+    }
     .update-progress > span {
       transition: none;
     }
@@ -1842,6 +1903,11 @@
   /* Square icon-only action; keeps its accessible name in markup. */
   .btn-icon {
     padding: 5px 8px;
+  }
+  /* Centered stage for the Debug loading-animation preview. */
+  .debug-preview {
+    justify-content: center;
+    padding: 16px 0;
   }
   .file-input {
     border: 1px solid var(--input-border);
