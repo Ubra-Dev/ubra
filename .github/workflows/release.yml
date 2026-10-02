@@ -293,6 +293,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install native smoke dependencies
+        run: npm ci
+        working-directory: tests/native-smoke
+
       - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
